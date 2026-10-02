@@ -15,15 +15,10 @@ pub fn brotli_reader<R: Read>(input: R) -> impl Read {
     brotli::Decompressor::new(input, 64 * 1024)
 }
 
-/// Build the image described by `list` into `out`, reading the contents of `new` ranges from
-/// `data` in order. `zero` and `erase` ranges stay zero, so `out` must start empty.
-pub fn apply<R: Read, W: Write + Seek>(
-    list: &TransferList,
-    mut data: R,
-    out: &mut W,
-) -> Result<()> {
-    // Header line 2 only counts the blocks written; the image spans the furthest range of any
-    // command (an `erase` usually reaches the end of the partition).
+/// Size in bytes of the image a transfer list describes. Header line 2 only counts the blocks
+/// written; the image spans the furthest range of any command (an `erase` usually reaches the
+/// end of the partition).
+pub fn image_size(list: &TransferList) -> Result<u64> {
     let end = list
         .commands
         .iter()
@@ -31,9 +26,18 @@ pub fn apply<R: Read, W: Write + Seek>(
         .map(|&(_, end)| end)
         .max()
         .unwrap_or(0);
-    let size = end
-        .checked_mul(BLOCK_SIZE as u64)
-        .context("image size overflows")?;
+    end.checked_mul(BLOCK_SIZE as u64)
+        .context("image size overflows")
+}
+
+/// Build the image described by `list` into `out`, reading the contents of `new` ranges from
+/// `data` in order. `zero` and `erase` ranges stay zero, so `out` must start empty.
+pub fn apply<R: Read, W: Write + Seek>(
+    list: &TransferList,
+    mut data: R,
+    out: &mut W,
+) -> Result<()> {
+    let size = image_size(list)?;
     if size > 0 {
         out.seek(SeekFrom::Start(size - 1))?;
         out.write_all(&[0])?;
@@ -119,6 +123,22 @@ mod tests {
         assert_blocks(&img, &[7, 0, 0, 0, 0, 0]);
         let img = run("4\n1\n0\n0\nnew 2,0,1\nzero 2,1,4\n", blk(7)).unwrap();
         assert_blocks(&img, &[7, 0, 0, 0]);
+    }
+
+    #[test]
+    fn image_size_is_the_furthest_range_end_in_bytes() {
+        let size = |t: &str| image_size(&transfer_list::parse(t).unwrap()).unwrap();
+        assert_eq!(
+            size("4\n1\n0\n0\nnew 2,4,5\nerase 2,5,6\n"),
+            6 * BLOCK_SIZE as u64
+        );
+        assert_eq!(
+            size("4\n9\n0\n0\nnew 2,0,1\nzero 2,1,3\n"),
+            3 * BLOCK_SIZE as u64
+        );
+        assert_eq!(size("4\n0\n0\n0\n"), 0);
+        let huge = transfer_list::parse("4\n1\n0\n0\nerase 2,0,18446744073709551615\n").unwrap();
+        assert!(image_size(&huge).is_err());
     }
 
     #[test]
