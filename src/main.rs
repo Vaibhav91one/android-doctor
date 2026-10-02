@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand};
+use std::io::Write;
 use std::path::PathBuf;
 
+mod info;
 #[allow(dead_code)] // wired up by the extract command (issue #4)
 mod sdat;
 #[allow(dead_code)] // wired up by the extract command (issue #4)
@@ -22,12 +24,24 @@ enum Command {
         output: PathBuf,
     },
     /// Print build info from an OTA without extracting
-    Info { input: PathBuf },
+    Info {
+        input: PathBuf,
+        /// Print all metadata as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
-        Command::Extract { .. } | Command::Info { .. } => anyhow::bail!("not implemented yet"),
+        Command::Extract { .. } => anyhow::bail!("not implemented yet"),
+        Command::Info { input, json } => {
+            let text = info::render(&info::read(&input)?, json)?;
+            match writeln!(std::io::stdout(), "{text}") {
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()), // e.g. `| head`
+                other => Ok(other?),
+            }
+        }
     }
 }
 
