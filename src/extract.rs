@@ -1,6 +1,7 @@
 //! Extract partition images from a block OTA (a zip or an already unpacked directory).
 use crate::{sdat, transfer_list};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -40,6 +41,14 @@ impl Source {
         })
     }
 
+    /// Size in bytes of a top-level file, for the progress bar.
+    fn file_size(&mut self, name: &str) -> Result<u64> {
+        Ok(match self {
+            Self::Zip(zip) => zip.by_name(name)?.size(),
+            Self::Dir(dir) => std::fs::metadata(dir.join(name))?.len(),
+        })
+    }
+
     fn open_file(&mut self, name: &str) -> Result<Box<dyn Read + '_>> {
         let reader: Box<dyn Read + '_> = match self {
             Self::Zip(zip) => Box::new(
@@ -61,6 +70,7 @@ fn extract_partition(
     names: &[String],
     part: &str,
     out_dir: &Path,
+    bar: &ProgressBar,
 ) -> Result<PathBuf> {
     let mut list_text = String::new();
     src.open_file(&format!("{part}{LIST_SUFFIX}"))?
@@ -80,7 +90,8 @@ fn extract_partition(
     } else {
         bail!("{part}: neither {br} nor {raw} found");
     };
-    let data = BufReader::new(src.open_file(&data_name)?);
+    bar.set_length(src.file_size(&data_name)?);
+    let data = BufReader::new(bar.wrap_read(src.open_file(&data_name)?));
 
     let final_path = out_dir.join(format!("{part}.img"));
     let tmp_path = out_dir.join(format!("{part}.img.part"));
@@ -102,10 +113,11 @@ fn extract_partition(
     Ok(final_path)
 }
 
-/// Extract every partition found in the OTA into `out_dir`, printing one line per image.
-pub fn run(input: &Path, out_dir: &Path) -> Result<()> {
-    let mut src = Source::open(input)?;
-    let names = src.names()?;
+/// Extract every partition found in the OTA into `out_dir`, one thread per partition, and
+/// return the image paths sorted by partition name. Every partition is attempted; the first
+/// error (in partition order) is returned.
+pub fn extract_all(input: &Path, out_dir: &Path) -> Result<Vec<PathBuf>> {
+    let names = Source::open(input)?.names()?;
     let mut parts: Vec<&str> = names
         .iter()
         .filter_map(|n| n.strip_suffix(LIST_SUFFIX))
@@ -125,8 +137,42 @@ pub fn run(input: &Path, out_dir: &Path) -> Result<()> {
         bail!("unsafe partition name {bad:?}");
     }
     std::fs::create_dir_all(out_dir)?;
-    for part in parts {
-        let path = extract_partition(&mut src, &names, part, out_dir)?;
+
+    // Hidden automatically when stderr is not a terminal.
+    let multi = MultiProgress::new();
+    let style = ProgressStyle::with_template("{prefix:>10} [{bar:30}] {bytes}/{total_bytes}")
+        .expect("valid progress template")
+        .progress_chars("=> ");
+    let results: Vec<Result<PathBuf>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = parts
+            .iter()
+            .map(|&part| {
+                let bar = multi.add(ProgressBar::new(0).with_style(style.clone()));
+                bar.set_prefix(part.to_string());
+                let names = &names;
+                scope.spawn(move || {
+                    // each thread needs its own handle: a zip reader is not shareable
+                    let mut src = Source::open(input)?;
+                    let result = extract_partition(&mut src, names, part, out_dir, &bar);
+                    bar.finish_and_clear();
+                    result
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| {
+                h.join()
+                    .unwrap_or_else(|_| Err(anyhow!("extraction thread panicked")))
+            })
+            .collect()
+    });
+    results.into_iter().collect()
+}
+
+/// `extract` command: extract all partitions and print one line per image.
+pub fn run(input: &Path, out_dir: &Path) -> Result<()> {
+    for path in extract_all(input, out_dir)? {
         println!(
             "{}  {} bytes",
             path.display(),
@@ -223,6 +269,85 @@ mod tests {
         run(&zip_path, &out).unwrap();
         check_sample_output(&out);
         assert!(!out.join("z.img").exists());
+    }
+
+    #[test]
+    fn many_partitions_extract_in_parallel_and_come_back_sorted() {
+        let (ota, out, work) = (
+            fresh_dir("many-in"),
+            fresh_dir("many-out"),
+            fresh_dir("many-zip"),
+        );
+        let mut files = Vec::new();
+        for (i, name) in ["zeta", "alpha", "mid", "beta", "omega", "delta"]
+            .iter()
+            .enumerate()
+        {
+            files.push((
+                format!("{name}.transfer.list"),
+                b"4\n2\n0\n0\nnew 2,0,2\n".to_vec(),
+            ));
+            files.push((
+                format!("{name}.new.dat.br"),
+                brotli(&[blk(i as u8 + 1), blk(i as u8 + 50)].concat()),
+            ));
+        }
+        let zip_path = work.join("ota.zip");
+        let mut w = zip::ZipWriter::new(File::create(&zip_path).unwrap());
+        for (name, body) in &files {
+            std::fs::write(ota.join(name), body).unwrap();
+            w.start_file(name.as_str(), zip::write::SimpleFileOptions::default())
+                .unwrap();
+            w.write_all(body).unwrap();
+        }
+        w.finish().unwrap();
+        for input in [&ota, &zip_path] {
+            let _ = std::fs::remove_dir_all(&out);
+            let paths = extract_all(input, &out).unwrap();
+            let names: Vec<_> = paths
+                .iter()
+                .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(
+                names,
+                [
+                    "alpha.img",
+                    "beta.img",
+                    "delta.img",
+                    "mid.img",
+                    "omega.img",
+                    "zeta.img"
+                ]
+            );
+            for (i, name) in ["zeta", "alpha", "mid", "beta", "omega", "delta"]
+                .iter()
+                .enumerate()
+            {
+                let expect = [blk(i as u8 + 1), blk(i as u8 + 50)].concat();
+                assert_eq!(
+                    std::fs::read(out.join(format!("{name}.img"))).unwrap(),
+                    expect,
+                    "{name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn one_bad_partition_fails_the_run_but_good_ones_still_finish() {
+        let (ota, out) = (fresh_dir("mixed-in"), fresh_dir("mixed-out"));
+        write_dir(&ota, &sample_files());
+        write_dir(
+            &ota,
+            &[
+                ("c.transfer.list", b"4\n1\n0\n0\nnew 2,0,1\n".to_vec()),
+                ("c.new.dat.br", vec![0xff; BLOCK]),
+            ],
+        );
+        let e = extract_all(&ota, &out).unwrap_err();
+        assert!(format!("{e:#}").contains("extracting c"), "{e:#}");
+        assert!(out.join("a.img").exists() && out.join("b.img").exists());
+        assert!(!out.join("c.img").exists() && !out.join("c.img.part").exists());
     }
 
     #[test]
