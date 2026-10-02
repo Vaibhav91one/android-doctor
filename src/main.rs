@@ -25,6 +25,12 @@ enum Command {
         /// Replace existing output files instead of refusing
         #[arg(long)]
         force: bool,
+        /// Extract only these partitions or images, comma-separated (e.g. system,boot)
+        #[arg(long, value_delimiter = ',')]
+        only: Vec<String>,
+        /// List what would be extracted, with sizes, and write nothing
+        #[arg(long)]
+        list: bool,
     },
     /// Print build info from an OTA without extracting
     Info {
@@ -55,7 +61,16 @@ fn main() -> anyhow::Result<()> {
             input,
             output,
             force,
-        } => extract::run(&input, &output, &extract::ExtractOptions { force }),
+            only,
+            list,
+        } => {
+            let opts = extract::ExtractOptions {
+                force,
+                only: (!only.is_empty()).then_some(only),
+                list,
+            };
+            extract::run(&input, &output, &opts)
+        }
         Command::Info { input, json } => print_out(&info::render(&info::read(&input)?, json)?),
         Command::Report { input, json } => {
             let meta = info::read(&input)?;

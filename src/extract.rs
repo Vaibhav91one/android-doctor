@@ -64,6 +64,18 @@ impl Source {
     }
 }
 
+/// Read and parse `<part>.transfer.list`.
+fn read_list(src: &mut Source, part: &str) -> Result<transfer_list::TransferList> {
+    let mut text = String::new();
+    src.open_file(&format!("{part}{LIST_SUFFIX}"))?
+        .take(MAX_LIST_BYTES + 1)
+        .read_to_string(&mut text)?;
+    if text.len() as u64 > MAX_LIST_BYTES {
+        bail!("{part}{LIST_SUFFIX} is larger than {MAX_LIST_BYTES} bytes");
+    }
+    transfer_list::parse(&text).with_context(|| format!("{part}{LIST_SUFFIX}"))
+}
+
 /// Build `<part>.img` in `out_dir`. The image is written under a temporary name and renamed
 /// when complete, so a failed extraction never leaves a plausible-looking partial image.
 fn extract_partition(
@@ -73,14 +85,7 @@ fn extract_partition(
     out_dir: &Path,
     bar: &ProgressBar,
 ) -> Result<PathBuf> {
-    let mut list_text = String::new();
-    src.open_file(&format!("{part}{LIST_SUFFIX}"))?
-        .take(MAX_LIST_BYTES + 1)
-        .read_to_string(&mut list_text)?;
-    if list_text.len() as u64 > MAX_LIST_BYTES {
-        bail!("{part}{LIST_SUFFIX} is larger than {MAX_LIST_BYTES} bytes");
-    }
-    let list = transfer_list::parse(&list_text).with_context(|| format!("{part}{LIST_SUFFIX}"))?;
+    let list = read_list(src, part)?;
 
     let br = format!("{part}.new.dat.br");
     let raw = format!("{part}.new.dat");
@@ -138,6 +143,10 @@ pub fn partition_names(input: &Path) -> Result<Vec<String>> {
 pub struct ExtractOptions {
     /// Replace existing output files instead of refusing.
     pub force: bool,
+    /// Extract only these partitions / raw images (by name without `.img`); `None` = all.
+    pub only: Option<Vec<String>>,
+    /// Print what would be extracted, with sizes, and write nothing.
+    pub list: bool,
 }
 
 /// Create a fresh `.part` file. A stale one (or a planted symlink) is removed first and the new
@@ -175,36 +184,76 @@ fn copy_raw(src: &mut Source, name: &str, out_dir: &Path) -> Result<PathBuf> {
     Ok(final_path)
 }
 
-/// Extract every partition found in the OTA into `out_dir`, one thread per partition, and
-/// return the image paths sorted by partition name, followed by the other top-level `*.img`
-/// files (boot, recovery, ...) copied as they are. Every partition is attempted; the first
-/// error (in partition order) is returned.
-pub fn extract_all(input: &Path, out_dir: &Path, opts: &ExtractOptions) -> Result<Vec<PathBuf>> {
-    let names = Source::open(input)?.names()?;
-    let parts = partitions_in(&names);
+fn is_safe_name(p: &str) -> bool {
+    !p.is_empty()
+        && p.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Validate the OTA's names and apply `--only`: returns (partitions, raw images), both sorted.
+fn select<'a>(
+    names: &'a [String],
+    only: &Option<Vec<String>>,
+) -> Result<(Vec<&'a str>, Vec<&'a str>)> {
+    let mut parts = partitions_in(names);
     if parts.is_empty() {
         bail!(
             "no *{LIST_SUFFIX} files found: not a block OTA (payload.bin OTAs are not supported)"
         );
     }
-    let safe = |p: &str| {
-        !p.is_empty()
-            && p.chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    };
-    if let Some(bad) = parts.iter().find(|p| !safe(p)) {
+    if let Some(bad) = parts.iter().find(|p| !is_safe_name(p)) {
         bail!("unsafe partition name {bad:?}");
     }
-    let raw = raw_images_in(&names);
+    let mut raw = raw_images_in(names);
     for name in &raw {
         let stem = name.strip_suffix(".img").unwrap_or(name);
-        if !safe(stem) {
+        if !is_safe_name(stem) {
             bail!("unsafe file name {name:?}");
         }
         if parts.contains(&stem) {
             bail!("{name} conflicts with the {stem} partition rebuilt from {stem}{LIST_SUFFIX}");
         }
     }
+    if let Some(only) = only {
+        let stem = |n: &str| n.strip_suffix(".img").map(str::to_string);
+        let available: Vec<&str> = parts
+            .iter()
+            .copied()
+            .chain(raw.iter().map(|n| n.strip_suffix(".img").unwrap_or(n)))
+            .collect();
+        if let Some(bad) = only.iter().find(|o| !available.contains(&o.as_str())) {
+            bail!("unknown name {bad:?}; available: {}", available.join(", "));
+        }
+        parts.retain(|p| only.iter().any(|o| o == p));
+        raw.retain(|n| only.iter().any(|o| Some(o) == stem(n).as_ref()));
+    }
+    Ok((parts, raw))
+}
+
+/// What `extract` would write, with sizes in bytes (partition images first, then raw images);
+/// reads only the transfer lists, writes nothing.
+pub fn list_images(input: &Path, opts: &ExtractOptions) -> Result<Vec<(String, u64)>> {
+    let mut src = Source::open(input)?;
+    let names = src.names()?;
+    let (parts, raw) = select(&names, &opts.only)?;
+    let mut images = Vec::new();
+    for part in parts {
+        let size = sdat::image_size(&read_list(&mut src, part)?)?;
+        images.push((format!("{part}.img"), size));
+    }
+    for name in raw {
+        images.push((name.to_string(), src.file_size(name)?));
+    }
+    Ok(images)
+}
+
+/// Extract every partition found in the OTA into `out_dir`, one thread per partition, and
+/// return the image paths sorted by partition name, followed by the other top-level `*.img`
+/// files (boot, recovery, ...) copied as they are. Every partition is attempted; the first
+/// error (in partition order) is returned.
+pub fn extract_all(input: &Path, out_dir: &Path, opts: &ExtractOptions) -> Result<Vec<PathBuf>> {
+    let names = Source::open(input)?.names()?;
+    let (parts, raw) = select(&names, &opts.only)?;
     // Names that differ only by case would overwrite each other on case-insensitive filesystems.
     let out_names: Vec<String> = parts
         .iter()
@@ -272,6 +321,12 @@ pub fn extract_all(input: &Path, out_dir: &Path, opts: &ExtractOptions) -> Resul
 
 /// `extract` command: extract all partitions and print one line per image.
 pub fn run(input: &Path, out_dir: &Path, opts: &ExtractOptions) -> Result<()> {
+    if opts.list {
+        for (name, size) in list_images(input, opts)? {
+            println!("{name}  {size} bytes");
+        }
+        return Ok(());
+    }
     for path in extract_all(input, out_dir, opts)? {
         println!(
             "{}  {} bytes",
@@ -580,7 +635,10 @@ mod tests {
             b"also precious"
         );
         assert!(!out.join("a.img.part").exists() && !out.join("boot.img.part").exists());
-        let force = ExtractOptions { force: true };
+        let force = ExtractOptions {
+            force: true,
+            ..Default::default()
+        };
         extract_all(&ota, &out, &force).unwrap();
         check_sample_output(&out);
         assert_eq!(std::fs::read(out.join("boot.img")).unwrap(), vec![0x11; 16]);
@@ -632,6 +690,186 @@ mod tests {
                 .is_symlink()
         );
         assert!(!victims.join("nowhere").exists() && !out.join("b.img").exists());
+    }
+
+    fn only(names: &[&str]) -> ExtractOptions {
+        ExtractOptions {
+            only: Some(names.iter().map(|n| n.to_string()).collect()),
+            ..Default::default()
+        }
+    }
+
+    fn written(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn only_selects_partitions_and_raw_images_by_name() {
+        let (ota, out) = (fresh_dir("only-in"), fresh_dir("only-out"));
+        let mut files = sample_files();
+        files.push(("boot.img", vec![0x11; 16]));
+        files.push(("vbmeta.img", vec![0x22; 16]));
+        write_dir(&ota, &files);
+        extract_all(&ota, &out, &only(&["b"])).unwrap();
+        assert_eq!(written(&out), ["b.img"]);
+        assert_eq!(std::fs::read(out.join("b.img")).unwrap(), blk(9));
+        let out2 = fresh_dir("only-out2");
+        let paths = extract_all(&ota, &out2, &only(&["boot", "a"])).unwrap();
+        assert_eq!(written(&out2), ["a.img", "boot.img"]);
+        assert_eq!(paths.len(), 2);
+        assert_eq!(
+            std::fs::read(out2.join("a.img")).unwrap(),
+            [blk(1), blk(2)].concat()
+        );
+        assert_eq!(
+            std::fs::read(out2.join("boot.img")).unwrap(),
+            vec![0x11; 16]
+        );
+    }
+
+    #[test]
+    fn only_with_an_unknown_name_lists_the_valid_ones_and_writes_nothing() {
+        let (ota, out) = (fresh_dir("onlybad-in"), fresh_dir("onlybad-out"));
+        let mut files = sample_files();
+        files.push(("boot.img", vec![0x11; 16]));
+        write_dir(&ota, &files);
+        let e = extract_all(&ota, &out, &only(&["a", "sysem"])).unwrap_err();
+        let msg = e.to_string();
+        assert!(
+            msg.contains("unknown name \"sysem\"") && msg.contains("available: a, b, boot"),
+            "{msg}"
+        );
+        assert!(written(&out).is_empty());
+        assert!(extract_all(&ota, &out, &only(&[""])).is_err());
+    }
+
+    #[test]
+    fn repeated_names_in_only_extract_each_image_once() {
+        let (ota, out) = (fresh_dir("dup-in"), fresh_dir("dup-out"));
+        write_dir(&ota, &sample_files());
+        let paths = extract_all(&ota, &out, &only(&["a", "a", "a"])).unwrap();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(written(&out), ["a.img"]);
+        let listed = list_images(&ota, &only(&["b", "b"])).unwrap();
+        assert_eq!(listed.len(), 1);
+    }
+
+    #[test]
+    fn only_matches_names_exactly_not_ignoring_case() {
+        let (ota, out) = (fresh_dir("exact-in"), fresh_dir("exact-out"));
+        let mut files = sample_files();
+        files.push(("Boot.img", vec![0x11; 16]));
+        write_dir(&ota, &files);
+        // "A" is not "a", and the Boot.img/boot-like clash only matters when both are selected
+        assert!(extract_all(&ota, &out, &only(&["A"])).is_err());
+        let paths = extract_all(&ota, &out, &only(&["a"])).unwrap();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(written(&out), ["a.img"]);
+    }
+
+    #[test]
+    fn a_trailing_comma_in_only_is_rejected_not_ignored() {
+        let (ota, out) = (fresh_dir("comma-in"), fresh_dir("comma-out"));
+        write_dir(&ota, &sample_files());
+        let e = extract_all(&ota, &out, &only(&["a", ""])).unwrap_err();
+        assert!(e.to_string().contains("unknown name \"\""), "{e}");
+        assert!(written(&out).is_empty());
+    }
+
+    #[test]
+    fn only_ignores_existing_files_that_are_not_selected() {
+        let (ota, out) = (fresh_dir("onlyex-in"), fresh_dir("onlyex-out"));
+        write_dir(&ota, &sample_files());
+        std::fs::write(out.join("a.img"), b"keep me").unwrap();
+        extract_all(&ota, &out, &only(&["b"])).unwrap();
+        assert_eq!(std::fs::read(out.join("a.img")).unwrap(), b"keep me");
+        assert!(extract_all(&ota, &out, &only(&["a"])).is_err());
+    }
+
+    #[test]
+    fn list_reports_sizes_without_writing_anything() {
+        let (ota, work, out) = (
+            fresh_dir("list-in"),
+            fresh_dir("list-zip"),
+            fresh_dir("list-out"),
+        );
+        let mut files = sample_files();
+        files.push(("boot.img", vec![0x11; 1234]));
+        write_dir(&ota, &files);
+        let zip_path = work.join("ota.zip");
+        zip_of(&files, &zip_path);
+        let expect = vec![
+            ("a.img".to_string(), 2 * BLOCK as u64),
+            ("b.img".to_string(), BLOCK as u64),
+            ("boot.img".to_string(), 1234),
+        ];
+        for input in [&ota, &zip_path] {
+            assert_eq!(
+                list_images(input, &ExtractOptions::default()).unwrap(),
+                expect
+            );
+        }
+        let list = ExtractOptions {
+            list: true,
+            ..Default::default()
+        };
+        run(&ota, &out, &list).unwrap();
+        assert!(written(&out).is_empty());
+        let gone = out.join("never-created");
+        run(&ota, &gone, &list).unwrap();
+        assert!(
+            !gone.exists(),
+            "--list must not create the output directory"
+        );
+        let sel = ExtractOptions {
+            only: Some(vec!["b".into()]),
+            ..Default::default()
+        };
+        assert_eq!(
+            list_images(&ota, &sel).unwrap(),
+            vec![("b.img".to_string(), BLOCK as u64)]
+        );
+    }
+
+    #[test]
+    fn listed_size_matches_the_extracted_image_when_the_header_count_is_smaller() {
+        let (ota, out) = (fresh_dir("listreal-in"), fresh_dir("listreal-out"));
+        // header says 1 block was written, but an erase reaches block 5, as in real OTAs
+        write_dir(
+            &ota,
+            &[
+                (
+                    "c.transfer.list",
+                    b"4\n1\n0\n0\nnew 2,0,1\nerase 2,1,5\n".to_vec(),
+                ),
+                ("c.new.dat", blk(7)),
+            ],
+        );
+        let listed = list_images(&ota, &ExtractOptions::default()).unwrap();
+        assert_eq!(listed, vec![("c.img".to_string(), 5 * BLOCK as u64)]);
+        extract_all(&ota, &out, &ExtractOptions::default()).unwrap();
+        assert_eq!(
+            std::fs::metadata(out.join("c.img")).unwrap().len(),
+            listed[0].1
+        );
+    }
+
+    #[test]
+    fn list_does_not_care_about_existing_output() {
+        let (ota, out) = (fresh_dir("listex-in"), fresh_dir("listex-out"));
+        write_dir(&ota, &sample_files());
+        std::fs::write(out.join("a.img"), b"x").unwrap();
+        let list = ExtractOptions {
+            list: true,
+            ..Default::default()
+        };
+        run(&ota, &out, &list).unwrap();
+        assert_eq!(std::fs::read(out.join("a.img")).unwrap(), b"x");
     }
 
     #[test]
