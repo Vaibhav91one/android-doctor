@@ -12,6 +12,11 @@ fn check_bounds(ranges: &[(u64, u64)], total_blocks: u64) -> Result<()> {
     }
 }
 
+/// Decompress a `.new.dat.br` stream on the fly, so no temporary `.new.dat` file is needed.
+pub fn brotli_reader<R: Read>(input: R) -> impl Read {
+    brotli::Decompressor::new(input, 64 * 1024)
+}
+
 /// Build the image described by `list` into `out`, reading the contents of `new` ranges from
 /// `data` in order. `zero` and `erase` ranges stay zero, so `out` must start empty.
 pub fn apply<R: Read, W: Write + Seek>(
@@ -113,5 +118,26 @@ mod tests {
         assert!(e.to_string().contains("past the end"), "{e}");
         let e = run("4\n2\n0\n0\nzero 2,5,6\n", vec![]).unwrap_err();
         assert!(e.to_string().contains("past the end"), "{e}");
+    }
+
+    #[test]
+    fn brotli_stream_round_trips_into_an_image() {
+        let mut packed = Vec::new();
+        {
+            let mut w = brotli::CompressorWriter::new(&mut packed, 4096, 5, 22);
+            w.write_all(&[blk(1), blk(2)].concat()).unwrap();
+        }
+        let list = transfer_list::parse("4\n3\n0\n0\nnew 2,0,1\nnew 2,2,3\n").unwrap();
+        let mut out = Cursor::new(Vec::new());
+        apply(&list, brotli_reader(Cursor::new(packed)), &mut out).unwrap();
+        assert_blocks(&out.into_inner(), &[1, 0, 2]);
+    }
+
+    #[test]
+    fn corrupt_brotli_input_is_an_error() {
+        let list = transfer_list::parse("4\n1\n0\n0\nnew 2,0,1\n").unwrap();
+        let mut out = Cursor::new(Vec::new());
+        let bad = Cursor::new(vec![0xffu8; BLOCK_SIZE]);
+        assert!(apply(&list, brotli_reader(bad), &mut out).is_err());
     }
 }
