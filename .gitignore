@@ -1,0 +1,7 @@
+/target
+*.img
+*.zip
+*.dat
+*.br
+*.new.dat*
+.scratch/
