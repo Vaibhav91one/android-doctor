@@ -36,6 +36,7 @@ impl Source {
                 .map(String::from)
                 .collect(),
             Self::Dir(dir) => std::fs::read_dir(dir)?
+                .filter(|e| e.as_ref().map_or(true, |e| e.path().is_file()))
                 .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
                 .collect::<std::io::Result<_>>()?,
         })
@@ -132,8 +133,37 @@ pub fn partition_names(input: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
+/// Top-level `*.img` files (boot, recovery, dtbo, vbmeta, ...), sorted.
+fn raw_images_in(names: &[String]) -> Vec<&str> {
+    let mut raw: Vec<&str> = names
+        .iter()
+        .map(String::as_str)
+        .filter(|n| n.ends_with(".img"))
+        .collect();
+    raw.sort_unstable();
+    raw
+}
+
+/// Copy a file out of the OTA unchanged (`.part` + rename, like partition images).
+fn copy_raw(src: &mut Source, name: &str, out_dir: &Path) -> Result<PathBuf> {
+    let final_path = out_dir.join(name);
+    let tmp_path = out_dir.join(format!("{name}.part"));
+    let copied = (|| -> Result<()> {
+        let mut out = File::create(&tmp_path)?;
+        std::io::copy(&mut src.open_file(name)?, &mut out)?;
+        Ok(())
+    })();
+    if let Err(e) = copied {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e.context(format!("copying {name}")));
+    }
+    std::fs::rename(&tmp_path, &final_path)?;
+    Ok(final_path)
+}
+
 /// Extract every partition found in the OTA into `out_dir`, one thread per partition, and
-/// return the image paths sorted by partition name. Every partition is attempted; the first
+/// return the image paths sorted by partition name, followed by the other top-level `*.img`
+/// files (boot, recovery, ...) copied as they are. Every partition is attempted; the first
 /// error (in partition order) is returned.
 pub fn extract_all(input: &Path, out_dir: &Path) -> Result<Vec<PathBuf>> {
     let names = Source::open(input)?.names()?;
@@ -150,6 +180,27 @@ pub fn extract_all(input: &Path, out_dir: &Path) -> Result<Vec<PathBuf>> {
     };
     if let Some(bad) = parts.iter().find(|p| !safe(p)) {
         bail!("unsafe partition name {bad:?}");
+    }
+    let raw = raw_images_in(&names);
+    for name in &raw {
+        let stem = name.strip_suffix(".img").unwrap_or(name);
+        if !safe(stem) {
+            bail!("unsafe file name {name:?}");
+        }
+        if parts.contains(&stem) {
+            bail!("{name} conflicts with the {stem} partition rebuilt from {stem}{LIST_SUFFIX}");
+        }
+    }
+    // Names that differ only by case would overwrite each other on case-insensitive filesystems.
+    let mut seen = std::collections::HashMap::new();
+    let out_names = parts
+        .iter()
+        .map(|p| format!("{p}.img"))
+        .chain(raw.iter().map(|n| n.to_string()));
+    for name in out_names {
+        if let Some(prev) = seen.insert(name.to_lowercase(), name.clone()) {
+            bail!("{prev} and {name} differ only by case and would overwrite each other");
+        }
     }
     std::fs::create_dir_all(out_dir)?;
 
@@ -182,7 +233,12 @@ pub fn extract_all(input: &Path, out_dir: &Path) -> Result<Vec<PathBuf>> {
             })
             .collect()
     });
-    results.into_iter().collect()
+    let mut paths = results.into_iter().collect::<Result<Vec<_>>>()?;
+    let mut src = Source::open(input)?;
+    for name in raw {
+        paths.push(copy_raw(&mut src, name, out_dir)?);
+    }
+    Ok(paths)
 }
 
 /// `extract` command: extract all partitions and print one line per image.
@@ -379,6 +435,122 @@ mod tests {
         assert_eq!(partition_names(&ota).unwrap(), ["a", "b"]);
         let empty = fresh_dir("names-empty");
         assert!(partition_names(&empty).unwrap().is_empty());
+    }
+
+    fn zip_of(files: &[(&str, Vec<u8>)], path: &Path) {
+        let mut w = zip::ZipWriter::new(File::create(path).unwrap());
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, body) in files {
+            w.start_file(*name, stored).unwrap();
+            w.write_all(body).unwrap();
+        }
+        w.finish().unwrap();
+    }
+
+    #[test]
+    fn raw_images_are_copied_unchanged_after_the_partitions() {
+        let (ota, out, work) = (
+            fresh_dir("raw-in"),
+            fresh_dir("raw-out"),
+            fresh_dir("raw-zip"),
+        );
+        let mut files = sample_files();
+        // deliberately not in alphabetical order
+        files.push(("vbmeta.img", vec![0x22; 64]));
+        files.push(("dtbo.img", vec![0x33; 7]));
+        files.push(("boot.img", vec![0x11; 5000]));
+        files.push(("readme.txt", b"not an image".to_vec()));
+        write_dir(&ota, &files);
+        std::fs::create_dir(ota.join("dirnamed.img")).unwrap();
+        let zip_path = work.join("ota.zip");
+        zip_of(&files, &zip_path);
+        for input in [&ota, &zip_path] {
+            let _ = std::fs::remove_dir_all(&out);
+            let paths = extract_all(input, &out).unwrap();
+            let names: Vec<_> = paths
+                .iter()
+                .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(
+                names,
+                ["a.img", "b.img", "boot.img", "dtbo.img", "vbmeta.img"]
+            );
+            assert_eq!(
+                std::fs::read(out.join("boot.img")).unwrap(),
+                vec![0x11; 5000]
+            );
+            assert_eq!(
+                std::fs::read(out.join("vbmeta.img")).unwrap(),
+                vec![0x22; 64]
+            );
+            assert!(!out.join("readme.txt").exists() && !out.join("dirnamed.img").exists());
+        }
+    }
+
+    #[test]
+    fn raw_image_colliding_with_a_partition_is_an_error_before_writing() {
+        let (ota, out) = (fresh_dir("clash-in"), fresh_dir("clash-out"));
+        let mut files = sample_files();
+        files.push(("a.img", vec![1; 10]));
+        write_dir(&ota, &files);
+        let e = extract_all(&ota, &out).unwrap_err();
+        assert!(
+            e.to_string().contains("conflicts with the a partition"),
+            "{e}"
+        );
+        assert!(!out.join("a.img").exists());
+    }
+
+    #[test]
+    fn output_names_differing_only_by_case_are_rejected() {
+        let (work, out) = (fresh_dir("case-zip"), fresh_dir("case-out"));
+        let zip_path = work.join("ota.zip");
+        let mut files = sample_files();
+        files.push(("Boot.img", vec![0x11; 8]));
+        files.push(("boot.img", vec![0x22; 8]));
+        zip_of(&files, &zip_path);
+        let e = extract_all(&zip_path, &out).unwrap_err();
+        assert!(e.to_string().contains("differ only by case"), "{e}");
+        // partitions: A and a rebuild to A.img and a.img
+        let mut files = sample_files();
+        files.push(("A.transfer.list", b"4\n1\n0\n0\nnew 2,0,1\n".to_vec()));
+        files.push(("A.new.dat", blk(3)));
+        zip_of(&files, &zip_path);
+        let e = extract_all(&zip_path, &out).unwrap_err();
+        assert!(e.to_string().contains("differ only by case"), "{e}");
+        assert!(
+            !out.join("a.img").exists(),
+            "nothing is written when names clash"
+        );
+    }
+
+    #[test]
+    fn unsafe_raw_image_names_are_rejected() {
+        let (ota, out) = (fresh_dir("rawname-in"), fresh_dir("rawname-out"));
+        let mut files = sample_files();
+        files.push(("we ird.img", vec![1; 10]));
+        write_dir(&ota, &files);
+        let e = extract_all(&ota, &out).unwrap_err();
+        assert!(e.to_string().contains("unsafe file name"), "{e}");
+    }
+
+    #[test]
+    fn failed_raw_copy_leaves_nothing_behind() {
+        let (work, out) = (fresh_dir("rawbad-zip"), fresh_dir("rawbad-out"));
+        let mut files = sample_files();
+        files.push(("boot.img", vec![0x5a; 64]));
+        let zip_path = work.join("ota.zip");
+        zip_of(&files, &zip_path);
+        // flip one byte of the stored boot.img data so its CRC no longer matches
+        let mut bytes = std::fs::read(&zip_path).unwrap();
+        let at = bytes.windows(64).position(|w| w == [0x5a; 64]).unwrap();
+        bytes[at] ^= 0xff;
+        std::fs::write(&zip_path, bytes).unwrap();
+        let e = extract_all(&zip_path, &out).unwrap_err();
+        assert!(format!("{e:#}").contains("copying boot.img"), "{e:#}");
+        assert!(out.join("a.img").exists());
+        assert!(!out.join("boot.img").exists() && !out.join("boot.img.part").exists());
     }
 
     #[test]
