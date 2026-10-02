@@ -5,6 +5,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
 const LIST_SUFFIX: &str = ".transfer.list";
 /// Transfer lists are a few KiB; the cap stops a hostile zip from exhausting memory.
@@ -76,9 +77,128 @@ fn read_list(src: &mut Source, part: &str) -> Result<transfer_list::TransferList
     transfer_list::parse(&text).with_context(|| format!("{part}{LIST_SUFFIX}"))
 }
 
+/// The data file(s) of a partition in reading order, and whether they are brotli-compressed.
+/// Preference: whole `.new.dat.br`, whole `.new.dat`, then numbered pieces (`.new.dat.br.N`,
+/// `.new.dat.N`), which are joined in numeric order and must be consecutive from 0 or 1.
+fn data_files(names: &[String], part: &str) -> Result<(Vec<String>, bool)> {
+    for (name, compressed) in [
+        (format!("{part}.new.dat.br"), true),
+        (format!("{part}.new.dat"), false),
+    ] {
+        if names.contains(&name) {
+            return Ok((vec![name], compressed));
+        }
+    }
+    for (prefix, compressed) in [
+        (format!("{part}.new.dat.br."), true),
+        (format!("{part}.new.dat."), false),
+    ] {
+        let mut pieces: Vec<(u64, &String)> = names
+            .iter()
+            .filter_map(|n| {
+                let digits = n.strip_prefix(&prefix)?;
+                if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                    return None;
+                }
+                Some((digits.parse().ok()?, n))
+            })
+            .collect();
+        if pieces.is_empty() {
+            continue;
+        }
+        pieces.sort_unstable();
+        let first = pieces[0].0;
+        if first > 1
+            || pieces
+                .iter()
+                .enumerate()
+                .any(|(i, p)| p.0 != first + i as u64)
+        {
+            let found: Vec<String> = pieces.iter().map(|p| p.0.to_string()).collect();
+            bail!(
+                "{part}: pieces {prefix}N are not consecutive from 0 or 1 (found {})",
+                found.join(", ")
+            );
+        }
+        return Ok((
+            pieces.into_iter().map(|p| p.1.clone()).collect(),
+            compressed,
+        ));
+    }
+    bail!(
+        "{part}: neither {part}.new.dat.br nor {part}.new.dat (nor numbered pieces of either) found"
+    );
+}
+
+type Chunk = std::io::Result<Vec<u8>>;
+
+/// Read the pieces one after the other (own handle on the OTA) and send them as chunks. An error
+/// is sent as the last message; a closed channel means the consumer is done, so just stop.
+fn pump_pieces(input: &Path, pieces: &[String], tx: SyncSender<Chunk>) {
+    let sent = (|| -> Result<()> {
+        let mut src = Source::open(input)?;
+        for name in pieces {
+            let mut reader = src.open_file(name)?;
+            loop {
+                let mut chunk = vec![0u8; 1 << 20];
+                let n = reader
+                    .read(&mut chunk)
+                    .with_context(|| format!("reading {name}"))?;
+                if n == 0 {
+                    break;
+                }
+                chunk.truncate(n);
+                if tx.send(Ok(chunk)).is_err() {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    })();
+    if let Err(e) = sent {
+        let _ = tx.send(Err(std::io::Error::other(format!("{e:#}"))));
+    }
+}
+
+/// `Read` over the chunks sent by `pump_pieces`.
+struct ChunkReader {
+    rx: Receiver<Chunk>,
+    chunk: Vec<u8>,
+    pos: usize,
+}
+
+impl ChunkReader {
+    fn new(rx: Receiver<Chunk>) -> Self {
+        Self {
+            rx,
+            chunk: Vec::new(),
+            pos: 0,
+        }
+    }
+}
+
+impl Read for ChunkReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        while self.pos >= self.chunk.len() {
+            match self.rx.recv() {
+                Ok(chunk) => {
+                    self.chunk = chunk?;
+                    self.pos = 0;
+                }
+                Err(_) => return Ok(0), // sender finished: end of data
+            }
+        }
+        let n = buf.len().min(self.chunk.len() - self.pos);
+        buf[..n].copy_from_slice(&self.chunk[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
 /// Build `<part>.img` in `out_dir`. The image is written under a temporary name and renamed
 /// when complete, so a failed extraction never leaves a plausible-looking partial image.
 fn extract_partition(
+    input: &Path,
     src: &mut Source,
     names: &[String],
     part: &str,
@@ -86,22 +206,27 @@ fn extract_partition(
     bar: &ProgressBar,
 ) -> Result<PathBuf> {
     let list = read_list(src, part)?;
-
-    let br = format!("{part}.new.dat.br");
-    let raw = format!("{part}.new.dat");
-    let (data_name, compressed) = if names.contains(&br) {
-        (br, true)
-    } else if names.contains(&raw) {
-        (raw, false)
-    } else {
-        bail!("{part}: neither {br} nor {raw} found");
-    };
-    bar.set_length(src.file_size(&data_name)?);
-    let data = BufReader::new(bar.wrap_read(src.open_file(&data_name)?));
+    let (data_names, compressed) = data_files(names, part)?;
+    let mut total = 0;
+    for name in &data_names {
+        total += src.file_size(name)?;
+    }
+    bar.set_length(total);
 
     let final_path = out_dir.join(format!("{part}.img"));
     let tmp_path = out_dir.join(format!("{part}.img.part"));
-    let built = (|| -> Result<()> {
+    let built = std::thread::scope(|scope| -> Result<()> {
+        let reader: Box<dyn Read + '_> = if let [only] = data_names.as_slice() {
+            src.open_file(only)?
+        } else {
+            // Several pieces are read one after the other by a helper thread (each piece needs
+            // its own handle on a zip) and handed over through a small bounded channel.
+            let (tx, rx) = sync_channel(4);
+            let pieces = &data_names;
+            scope.spawn(move || pump_pieces(input, pieces, tx));
+            Box::new(ChunkReader::new(rx))
+        };
+        let data = BufReader::new(bar.wrap_read(reader));
         let mut out = BufWriter::new(create_part(&tmp_path)?);
         if compressed {
             sdat::apply(&list, sdat::brotli_reader(data), &mut out)?;
@@ -110,7 +235,7 @@ fn extract_partition(
         }
         out.flush()?;
         Ok(())
-    })();
+    });
     if let Err(e) = built {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(e.context(format!("extracting {part}")));
@@ -297,7 +422,7 @@ pub fn extract_all(input: &Path, out_dir: &Path, opts: &ExtractOptions) -> Resul
                 scope.spawn(move || {
                     // each thread needs its own handle: a zip reader is not shareable
                     let mut src = Source::open(input)?;
-                    let result = extract_partition(&mut src, names, part, out_dir, &bar);
+                    let result = extract_partition(input, &mut src, names, part, out_dir, &bar);
                     bar.finish_and_clear();
                     result
                 })
@@ -905,6 +1030,220 @@ mod tests {
             line.contains("ext4  (size is not a multiple of 4096)"),
             "{line}"
         );
+    }
+
+    /// Cut `data` into pieces of the given sizes; the rest becomes the last piece.
+    fn cut(data: &[u8], sizes: &[usize]) -> Vec<Vec<u8>> {
+        let mut pieces = Vec::new();
+        let mut at = 0;
+        for &n in sizes {
+            pieces.push(data[at..at + n].to_vec());
+            at += n;
+        }
+        pieces.push(data[at..].to_vec());
+        pieces
+    }
+
+    fn piece_files(prefix: &str, first: usize, pieces: Vec<Vec<u8>>) -> Vec<(String, Vec<u8>)> {
+        let mut files = vec![(
+            "a.transfer.list".to_string(),
+            b"4\n3\n0\n0\nnew 2,0,3\n".to_vec(),
+        )];
+        for (i, body) in pieces.into_iter().enumerate() {
+            files.push((format!("{prefix}.{}", first + i), body));
+        }
+        files
+    }
+
+    fn extract_files(tag: &str, files: &[(String, Vec<u8>)]) -> (PathBuf, Result<Vec<PathBuf>>) {
+        let (ota, out) = (
+            fresh_dir(&format!("{tag}-in")),
+            fresh_dir(&format!("{tag}-out")),
+        );
+        let borrowed: Vec<(&str, Vec<u8>)> =
+            files.iter().map(|(n, b)| (n.as_str(), b.clone())).collect();
+        write_dir(&ota, &borrowed);
+        let res = extract_all(&ota, &out, &ExtractOptions::default());
+        (out, res)
+    }
+
+    fn three_blocks() -> Vec<u8> {
+        [blk(1), blk(2), blk(3)].concat()
+    }
+
+    #[test]
+    fn split_raw_pieces_are_joined_in_order_whatever_their_sizes() {
+        for first in [0, 1] {
+            let files = piece_files("a.new.dat", first, cut(&three_blocks(), &[1000, 5000]));
+            let (out, res) = extract_files(&format!("sraw{first}"), &files);
+            res.unwrap();
+            assert_eq!(
+                std::fs::read(out.join("a.img")).unwrap(),
+                three_blocks(),
+                "first piece is .{first}"
+            );
+        }
+    }
+
+    #[test]
+    fn split_brotli_pieces_are_joined_before_decompressing() {
+        let packed = brotli(&three_blocks());
+        let files = piece_files("a.new.dat.br", 1, cut(&packed, &[7, packed.len() / 2]));
+        let (out, res) = extract_files("sbr", &files);
+        res.unwrap();
+        assert_eq!(std::fs::read(out.join("a.img")).unwrap(), three_blocks());
+    }
+
+    #[test]
+    fn split_pieces_work_from_a_zip_too() {
+        let (work, out) = (fresh_dir("szip-in"), fresh_dir("szip-out"));
+        let files = piece_files("a.new.dat", 1, cut(&three_blocks(), &[4096, 4096]));
+        let borrowed: Vec<(&str, Vec<u8>)> =
+            files.iter().map(|(n, b)| (n.as_str(), b.clone())).collect();
+        let zip_path = work.join("ota.zip");
+        zip_of(&borrowed, &zip_path);
+        extract_all(&zip_path, &out, &ExtractOptions::default()).unwrap();
+        assert_eq!(std::fs::read(out.join("a.img")).unwrap(), three_blocks());
+    }
+
+    #[test]
+    fn pieces_missing_from_the_sequence_are_an_error() {
+        let mut files = piece_files("a.new.dat", 1, cut(&three_blocks(), &[4096, 4096]));
+        files.retain(|(n, _)| n != "a.new.dat.2");
+        let (out, res) = extract_files("smiss", &files);
+        let msg = format!("{:#}", res.unwrap_err());
+        assert!(
+            msg.contains("not consecutive") && msg.contains("found 1, 3"),
+            "{msg}"
+        );
+        let files = piece_files("a.new.dat", 2, cut(&three_blocks(), &[4096, 4096]));
+        let (_, res) = extract_files("sfirst", &files);
+        assert!(format!("{:#}", res.unwrap_err()).contains("not consecutive"));
+        assert!(!out.join("a.img").exists());
+    }
+
+    #[test]
+    fn a_whole_data_file_wins_over_pieces() {
+        let mut files = piece_files("a.new.dat", 1, vec![vec![0x77; 4096]]);
+        files[0].1 = b"4\n1\n0\n0\nnew 2,0,1\n".to_vec();
+        files.push(("a.new.dat".to_string(), blk(9)));
+        let (out, res) = extract_files("swhole", &files);
+        res.unwrap();
+        assert_eq!(std::fs::read(out.join("a.img")).unwrap(), blk(9));
+    }
+
+    #[test]
+    fn surplus_data_in_pieces_is_an_error_and_does_not_hang() {
+        let mut files = piece_files("a.new.dat", 1, cut(&three_blocks(), &[100]));
+        files[0].1 = b"4\n2\n0\n0\nnew 2,0,2\n".to_vec();
+        let (out, res) = extract_files("ssurplus", &files);
+        assert!(format!("{:#}", res.unwrap_err()).contains("more blocks"));
+        assert!(!out.join("a.img").exists() && !out.join("a.img.part").exists());
+    }
+
+    #[test]
+    fn a_consumer_that_stops_early_never_leaves_the_piece_reader_blocked() {
+        // 9 MiB of pieces but the transfer list needs 1 block: apply() fails after the first
+        // chunk while the reader thread still has far more than the channel can hold. If the
+        // receiver were kept alive that thread would block forever and the scope would hang.
+        let mut files = piece_files("a.new.dat", 1, vec![vec![0xAB; 3 << 20]; 3]);
+        files[0].1 = b"4\n1\n0\n0\nnew 2,0,1\n".to_vec();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (out, res) = extract_files("sstop", &files);
+            let _ = tx.send((out, res.map(|_| ()).map_err(|e| format!("{e:#}"))));
+        });
+        let (out, res) = rx
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("extraction hung: the piece reader is blocked on a full channel");
+        assert!(res.unwrap_err().contains("more blocks"));
+        assert!(!out.join("a.img").exists() && !out.join("a.img.part").exists());
+    }
+
+    #[test]
+    fn a_piece_read_error_after_the_consumer_finished_is_not_reported_as_success_or_truncation() {
+        // the corrupt piece is the LAST one and the list needs only the first: the run fails with
+        // the surplus-data error, never produces an image from a truncated stream
+        let files = piece_files("a.new.dat", 1, cut(&three_blocks(), &[4096, 4096]));
+        let mut files = files;
+        files[0].1 = b"4\n1\n0\n0\nnew 2,0,1\n".to_vec();
+        let (out, res) = extract_files("slate", &files);
+        assert!(format!("{:#}", res.unwrap_err()).contains("more blocks"));
+        assert!(!out.join("a.img").exists());
+    }
+
+    #[test]
+    fn short_data_in_pieces_is_an_error() {
+        let files = piece_files("a.new.dat", 1, cut(&three_blocks()[..8000], &[3000]));
+        let (out, res) = extract_files("sshort", &files);
+        assert!(format!("{:#}", res.unwrap_err()).contains("ended before"));
+        assert!(!out.join("a.img").exists());
+    }
+
+    #[test]
+    fn a_corrupt_piece_in_a_zip_fails_the_partition_cleanly() {
+        let (work, out) = (fresh_dir("scrc-in"), fresh_dir("scrc-out"));
+        let mut pieces = cut(&three_blocks(), &[4096, 4096]);
+        pieces[1] = vec![0x5a; 4096];
+        let files = piece_files("a.new.dat", 1, pieces);
+        let borrowed: Vec<(&str, Vec<u8>)> =
+            files.iter().map(|(n, b)| (n.as_str(), b.clone())).collect();
+        let zip_path = work.join("ota.zip");
+        zip_of(&borrowed, &zip_path);
+        let mut bytes = std::fs::read(&zip_path).unwrap();
+        let at = bytes.windows(64).position(|w| w == [0x5a; 64]).unwrap();
+        bytes[at] ^= 0xff;
+        std::fs::write(&zip_path, bytes).unwrap();
+        let e = extract_all(&zip_path, &out, &ExtractOptions::default()).unwrap_err();
+        let msg = format!("{e:#}");
+        assert!(msg.contains("extracting a"), "{msg}");
+        assert!(
+            msg.contains("reading a.new.dat.2"),
+            "the real cause must reach the user: {msg}"
+        );
+        assert!(!out.join("a.img").exists() && !out.join("a.img.part").exists());
+    }
+
+    #[test]
+    fn data_files_orders_pieces_numerically_and_reports_compression() {
+        let names: Vec<String> = [
+            "a.transfer.list",
+            "a.new.dat.10",
+            "a.new.dat.2",
+            "a.new.dat.1",
+            "a.new.dat.3",
+            "a.new.dat.4",
+            "a.new.dat.5",
+            "a.new.dat.6",
+            "a.new.dat.7",
+            "a.new.dat.8",
+            "a.new.dat.9",
+            "a.new.dat.notanumber",
+            "a.new.dat.",
+            "b.new.dat.1",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let (files, compressed) = data_files(&names, "a").unwrap();
+        let expect: Vec<String> = (1..=10).map(|n| format!("a.new.dat.{n}")).collect();
+        assert_eq!(
+            files, expect,
+            "numeric order, junk suffixes and other partitions ignored"
+        );
+        assert!(!compressed);
+        let br: Vec<String> = ["a.new.dat.br.1", "a.new.dat.br.0"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            data_files(&br, "a").unwrap(),
+            (
+                vec!["a.new.dat.br.0".to_string(), "a.new.dat.br.1".to_string()],
+                true
+            )
+        );
+        assert!(data_files(&["a.new.dat.x".to_string()], "a").is_err());
     }
 
     #[test]
