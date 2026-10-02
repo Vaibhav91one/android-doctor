@@ -2,6 +2,8 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[allow(dead_code)] // wired up by the extract command (issue #4)
+mod sdat;
+#[allow(dead_code)] // wired up by the extract command (issue #4)
 mod transfer_list;
 
 #[derive(Parser)]
