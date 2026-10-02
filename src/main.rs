@@ -1,6 +1,9 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+#[allow(dead_code)] // wired up by the extract command (issue #4)
+mod transfer_list;
+
 #[derive(Parser)]
 #[command(version, about = "Extract and audit Android OTA/ROM images")]
 struct Cli {
