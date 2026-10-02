@@ -97,7 +97,7 @@ fn extract_partition(
     let final_path = out_dir.join(format!("{part}.img"));
     let tmp_path = out_dir.join(format!("{part}.img.part"));
     let built = (|| -> Result<()> {
-        let mut out = BufWriter::new(File::create(&tmp_path)?);
+        let mut out = BufWriter::new(create_part(&tmp_path)?);
         if compressed {
             sdat::apply(&list, sdat::brotli_reader(data), &mut out)?;
         } else {
@@ -133,6 +133,20 @@ pub fn partition_names(input: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
+/// What `extract` should do beyond the defaults.
+#[derive(Debug, Default, Clone)]
+pub struct ExtractOptions {
+    /// Replace existing output files instead of refusing.
+    pub force: bool,
+}
+
+/// Create a fresh `.part` file. A stale one (or a planted symlink) is removed first and the new
+/// file is created exclusively, so a write never follows a link to somewhere else.
+fn create_part(path: &Path) -> Result<File> {
+    let _ = std::fs::remove_file(path);
+    File::create_new(path).with_context(|| format!("creating {}", path.display()))
+}
+
 /// Top-level `*.img` files (boot, recovery, dtbo, vbmeta, ...), sorted.
 fn raw_images_in(names: &[String]) -> Vec<&str> {
     let mut raw: Vec<&str> = names
@@ -149,7 +163,7 @@ fn copy_raw(src: &mut Source, name: &str, out_dir: &Path) -> Result<PathBuf> {
     let final_path = out_dir.join(name);
     let tmp_path = out_dir.join(format!("{name}.part"));
     let copied = (|| -> Result<()> {
-        let mut out = File::create(&tmp_path)?;
+        let mut out = create_part(&tmp_path)?;
         std::io::copy(&mut src.open_file(name)?, &mut out)?;
         Ok(())
     })();
@@ -165,7 +179,7 @@ fn copy_raw(src: &mut Source, name: &str, out_dir: &Path) -> Result<PathBuf> {
 /// return the image paths sorted by partition name, followed by the other top-level `*.img`
 /// files (boot, recovery, ...) copied as they are. Every partition is attempted; the first
 /// error (in partition order) is returned.
-pub fn extract_all(input: &Path, out_dir: &Path) -> Result<Vec<PathBuf>> {
+pub fn extract_all(input: &Path, out_dir: &Path, opts: &ExtractOptions) -> Result<Vec<PathBuf>> {
     let names = Source::open(input)?.names()?;
     let parts = partitions_in(&names);
     if parts.is_empty() {
@@ -192,14 +206,29 @@ pub fn extract_all(input: &Path, out_dir: &Path) -> Result<Vec<PathBuf>> {
         }
     }
     // Names that differ only by case would overwrite each other on case-insensitive filesystems.
-    let mut seen = std::collections::HashMap::new();
-    let out_names = parts
+    let out_names: Vec<String> = parts
         .iter()
         .map(|p| format!("{p}.img"))
-        .chain(raw.iter().map(|n| n.to_string()));
-    for name in out_names {
-        if let Some(prev) = seen.insert(name.to_lowercase(), name.clone()) {
+        .chain(raw.iter().map(|n| n.to_string()))
+        .collect();
+    let mut seen = std::collections::HashMap::new();
+    for name in &out_names {
+        if let Some(prev) = seen.insert(name.to_lowercase(), name) {
             bail!("{prev} and {name} differ only by case and would overwrite each other");
+        }
+    }
+    if !opts.force {
+        let existing: Vec<&str> = out_names
+            .iter()
+            .map(String::as_str)
+            .filter(|n| out_dir.join(n).symlink_metadata().is_ok())
+            .collect();
+        if !existing.is_empty() {
+            bail!(
+                "{} already exist in {}; pass --force to overwrite",
+                existing.join(", "),
+                out_dir.display()
+            );
         }
     }
     std::fs::create_dir_all(out_dir)?;
@@ -242,8 +271,8 @@ pub fn extract_all(input: &Path, out_dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 /// `extract` command: extract all partitions and print one line per image.
-pub fn run(input: &Path, out_dir: &Path) -> Result<()> {
-    for path in extract_all(input, out_dir)? {
+pub fn run(input: &Path, out_dir: &Path, opts: &ExtractOptions) -> Result<()> {
+    for path in extract_all(input, out_dir, opts)? {
         println!(
             "{}  {} bytes",
             path.display(),
@@ -306,7 +335,7 @@ mod tests {
     fn extracts_every_partition_from_a_directory() {
         let (ota, out) = (fresh_dir("dir-in"), fresh_dir("dir-out"));
         write_dir(&ota, &sample_files());
-        run(&ota, &out).unwrap();
+        run(&ota, &out, &ExtractOptions::default()).unwrap();
         check_sample_output(&out);
     }
 
@@ -321,7 +350,7 @@ mod tests {
             w.write_all(&body).unwrap();
         }
         w.finish().unwrap();
-        run(&zip_path, &out).unwrap();
+        run(&zip_path, &out, &ExtractOptions::default()).unwrap();
         check_sample_output(&out);
     }
 
@@ -337,7 +366,7 @@ mod tests {
             w.write_all(&body).unwrap();
         }
         w.finish().unwrap();
-        run(&zip_path, &out).unwrap();
+        run(&zip_path, &out, &ExtractOptions::default()).unwrap();
         check_sample_output(&out);
         assert!(!out.join("z.img").exists());
     }
@@ -374,7 +403,7 @@ mod tests {
         w.finish().unwrap();
         for input in [&ota, &zip_path] {
             let _ = std::fs::remove_dir_all(&out);
-            let paths = extract_all(input, &out).unwrap();
+            let paths = extract_all(input, &out, &ExtractOptions::default()).unwrap();
             let names: Vec<_> = paths
                 .iter()
                 .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
@@ -415,7 +444,7 @@ mod tests {
                 ("c.new.dat.br", vec![0xff; BLOCK]),
             ],
         );
-        let e = extract_all(&ota, &out).unwrap_err();
+        let e = extract_all(&ota, &out, &ExtractOptions::default()).unwrap_err();
         assert!(format!("{e:#}").contains("extracting c"), "{e:#}");
         assert!(out.join("a.img").exists() && out.join("b.img").exists());
         assert!(!out.join("c.img").exists() && !out.join("c.img.part").exists());
@@ -467,7 +496,7 @@ mod tests {
         zip_of(&files, &zip_path);
         for input in [&ota, &zip_path] {
             let _ = std::fs::remove_dir_all(&out);
-            let paths = extract_all(input, &out).unwrap();
+            let paths = extract_all(input, &out, &ExtractOptions::default()).unwrap();
             let names: Vec<_> = paths
                 .iter()
                 .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
@@ -494,7 +523,7 @@ mod tests {
         let mut files = sample_files();
         files.push(("a.img", vec![1; 10]));
         write_dir(&ota, &files);
-        let e = extract_all(&ota, &out).unwrap_err();
+        let e = extract_all(&ota, &out, &ExtractOptions::default()).unwrap_err();
         assert!(
             e.to_string().contains("conflicts with the a partition"),
             "{e}"
@@ -510,14 +539,14 @@ mod tests {
         files.push(("Boot.img", vec![0x11; 8]));
         files.push(("boot.img", vec![0x22; 8]));
         zip_of(&files, &zip_path);
-        let e = extract_all(&zip_path, &out).unwrap_err();
+        let e = extract_all(&zip_path, &out, &ExtractOptions::default()).unwrap_err();
         assert!(e.to_string().contains("differ only by case"), "{e}");
         // partitions: A and a rebuild to A.img and a.img
         let mut files = sample_files();
         files.push(("A.transfer.list", b"4\n1\n0\n0\nnew 2,0,1\n".to_vec()));
         files.push(("A.new.dat", blk(3)));
         zip_of(&files, &zip_path);
-        let e = extract_all(&zip_path, &out).unwrap_err();
+        let e = extract_all(&zip_path, &out, &ExtractOptions::default()).unwrap_err();
         assert!(e.to_string().contains("differ only by case"), "{e}");
         assert!(
             !out.join("a.img").exists(),
@@ -526,12 +555,104 @@ mod tests {
     }
 
     #[test]
+    fn existing_output_is_refused_without_force_and_replaced_with_it() {
+        let (ota, out) = (fresh_dir("force-in"), fresh_dir("force-out"));
+        let mut files = sample_files();
+        files.push(("boot.img", vec![0x11; 16]));
+        write_dir(&ota, &files);
+        extract_all(&ota, &out, &ExtractOptions::default()).unwrap();
+        std::fs::write(out.join("a.img"), b"precious").unwrap();
+        std::fs::write(out.join("boot.img"), b"also precious").unwrap();
+        std::fs::remove_file(out.join("b.img")).unwrap();
+        let e = extract_all(&ota, &out, &ExtractOptions::default()).unwrap_err();
+        let msg = e.to_string();
+        assert!(
+            msg.contains("a.img") && msg.contains("boot.img") && msg.contains("--force"),
+            "{msg}"
+        );
+        assert!(
+            !msg.contains("b.img"),
+            "only existing files are listed: {msg}"
+        );
+        assert_eq!(std::fs::read(out.join("a.img")).unwrap(), b"precious");
+        assert_eq!(
+            std::fs::read(out.join("boot.img")).unwrap(),
+            b"also precious"
+        );
+        assert!(!out.join("a.img.part").exists() && !out.join("boot.img.part").exists());
+        let force = ExtractOptions { force: true };
+        extract_all(&ota, &out, &force).unwrap();
+        check_sample_output(&out);
+        assert_eq!(std::fs::read(out.join("boot.img")).unwrap(), vec![0x11; 16]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_in_the_output_dir_are_never_written_through() {
+        use std::os::unix::fs::symlink;
+        let (ota, out, victims) = (
+            fresh_dir("sym-in"),
+            fresh_dir("sym-out"),
+            fresh_dir("sym-victim"),
+        );
+        let mut files = sample_files();
+        files.push(("boot.img", vec![0x11; 16]));
+        write_dir(&ota, &files);
+        // planted .part links, for a partition and for a raw image
+        symlink(victims.join("v1"), out.join("a.img.part")).unwrap();
+        symlink(victims.join("v2"), out.join("boot.img.part")).unwrap();
+        extract_all(&ota, &out, &ExtractOptions::default()).unwrap();
+        assert!(!victims.join("v1").exists() && !victims.join("v2").exists());
+        check_sample_output(&out);
+        assert_eq!(std::fs::read(out.join("boot.img")).unwrap(), vec![0x11; 16]);
+        assert!(!out.join("a.img.part").exists() && !out.join("boot.img.part").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_named_like_an_output_counts_as_existing() {
+        use std::os::unix::fs::symlink;
+        let (ota, out, victims) = (
+            fresh_dir("sym2-in"),
+            fresh_dir("sym2-out"),
+            fresh_dir("sym2-victim"),
+        );
+        write_dir(&ota, &sample_files());
+        symlink(victims.join("nowhere"), out.join("a.img")).unwrap(); // dangling
+        let e = extract_all(&ota, &out, &ExtractOptions::default()).unwrap_err();
+        assert!(
+            e.to_string().contains("a.img") && e.to_string().contains("--force"),
+            "{e}"
+        );
+        assert!(
+            out.join("a.img")
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!victims.join("nowhere").exists() && !out.join("b.img").exists());
+    }
+
+    #[test]
+    fn a_refused_run_writes_nothing_new() {
+        let (ota, out) = (fresh_dir("refuse-in"), fresh_dir("refuse-out"));
+        let mut files = sample_files();
+        files.push(("boot.img", vec![0x11; 16]));
+        write_dir(&ota, &files);
+        std::fs::write(out.join("boot.img"), b"mine").unwrap();
+        assert!(extract_all(&ota, &out, &ExtractOptions::default()).is_err());
+        assert!(!out.join("a.img").exists() && !out.join("b.img").exists());
+        assert_eq!(std::fs::read(out.join("boot.img")).unwrap(), b"mine");
+    }
+
+    #[test]
     fn unsafe_raw_image_names_are_rejected() {
         let (ota, out) = (fresh_dir("rawname-in"), fresh_dir("rawname-out"));
         let mut files = sample_files();
         files.push(("we ird.img", vec![1; 10]));
         write_dir(&ota, &files);
-        let e = extract_all(&ota, &out).unwrap_err();
+        let e = extract_all(&ota, &out, &ExtractOptions::default()).unwrap_err();
         assert!(e.to_string().contains("unsafe file name"), "{e}");
     }
 
@@ -547,7 +668,7 @@ mod tests {
         let at = bytes.windows(64).position(|w| w == [0x5a; 64]).unwrap();
         bytes[at] ^= 0xff;
         std::fs::write(&zip_path, bytes).unwrap();
-        let e = extract_all(&zip_path, &out).unwrap_err();
+        let e = extract_all(&zip_path, &out, &ExtractOptions::default()).unwrap_err();
         assert!(format!("{e:#}").contains("copying boot.img"), "{e:#}");
         assert!(out.join("a.img").exists());
         assert!(!out.join("boot.img").exists() && !out.join("boot.img.part").exists());
@@ -557,7 +678,7 @@ mod tests {
     fn input_without_transfer_lists_is_an_error() {
         let (ota, out) = (fresh_dir("none-in"), fresh_dir("none-out"));
         write_dir(&ota, &[("readme.txt", b"hi".to_vec())]);
-        let e = run(&ota, &out).unwrap_err();
+        let e = run(&ota, &out, &ExtractOptions::default()).unwrap_err();
         assert!(e.to_string().contains("not a block OTA"), "{e}");
     }
 
@@ -568,7 +689,7 @@ mod tests {
             &ota,
             &[("a.transfer.list", b"4\n1\n0\n0\nnew 2,0,1\n".to_vec())],
         );
-        let e = run(&ota, &out).unwrap_err();
+        let e = run(&ota, &out, &ExtractOptions::default()).unwrap_err();
         assert!(
             e.to_string().contains("neither a.new.dat.br nor a.new.dat"),
             "{e}"
@@ -585,7 +706,7 @@ mod tests {
                 ("a.new.dat.br", vec![0xff; BLOCK]),
             ],
         );
-        assert!(run(&ota, &out).is_err());
+        assert!(run(&ota, &out, &ExtractOptions::default()).is_err());
         assert!(!out.join("a.img").exists());
         assert!(!out.join("a.img.part").exists());
     }
@@ -594,7 +715,7 @@ mod tests {
     fn unsafe_partition_names_are_rejected() {
         let (ota, out) = (fresh_dir("name-in"), fresh_dir("name-out"));
         write_dir(&ota, &[("we ird.transfer.list", b"4\n0\n0\n0\n".to_vec())]);
-        let e = run(&ota, &out).unwrap_err();
+        let e = run(&ota, &out, &ExtractOptions::default()).unwrap_err();
         assert!(e.to_string().contains("unsafe partition name"), "{e}");
     }
 }

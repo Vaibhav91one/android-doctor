@@ -22,6 +22,9 @@ enum Command {
         input: PathBuf,
         #[arg(short, long, default_value = "out")]
         output: PathBuf,
+        /// Replace existing output files instead of refusing
+        #[arg(long)]
+        force: bool,
     },
     /// Print build info from an OTA without extracting
     Info {
@@ -48,7 +51,11 @@ fn print_out(text: &str) -> anyhow::Result<()> {
 
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
-        Command::Extract { input, output } => extract::run(&input, &output),
+        Command::Extract {
+            input,
+            output,
+            force,
+        } => extract::run(&input, &output, &extract::ExtractOptions { force }),
         Command::Info { input, json } => print_out(&info::render(&info::read(&input)?, json)?),
         Command::Report { input, json } => {
             let meta = info::read(&input)?;
