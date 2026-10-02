@@ -2,10 +2,9 @@ use clap::{Parser, Subcommand};
 use std::io::Write;
 use std::path::PathBuf;
 
+mod extract;
 mod info;
-#[allow(dead_code)] // wired up by the extract command (issue #4)
 mod sdat;
-#[allow(dead_code)] // wired up by the extract command (issue #4)
 mod transfer_list;
 
 #[derive(Parser)]
@@ -34,7 +33,7 @@ enum Command {
 
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
-        Command::Extract { .. } => anyhow::bail!("not implemented yet"),
+        Command::Extract { input, output } => extract::run(&input, &output),
         Command::Info { input, json } => {
             let text = info::render(&info::read(&input)?, json)?;
             match writeln!(std::io::stdout(), "{text}") {
