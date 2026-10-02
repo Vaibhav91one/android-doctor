@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 mod extract;
 mod info;
+mod report;
 mod sdat;
 mod transfer_list;
 
@@ -29,17 +30,31 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Staleness verdict from the OTA's build metadata
+    Report {
+        input: PathBuf,
+        /// Print the report as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+fn print_out(text: &str) -> anyhow::Result<()> {
+    match writeln!(std::io::stdout(), "{text}") {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()), // e.g. `| head`
+        other => Ok(other?),
+    }
 }
 
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Extract { input, output } => extract::run(&input, &output),
-        Command::Info { input, json } => {
-            let text = info::render(&info::read(&input)?, json)?;
-            match writeln!(std::io::stdout(), "{text}") {
-                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()), // e.g. `| head`
-                other => Ok(other?),
-            }
+        Command::Info { input, json } => print_out(&info::render(&info::read(&input)?, json)?),
+        Command::Report { input, json } => {
+            let meta = info::read(&input)?;
+            let parts = extract::partition_names(&input)?;
+            let report = report::analyze(&meta, parts, report::today_days())?;
+            print_out(&report::render(&report, json)?)
         }
     }
 }
