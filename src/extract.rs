@@ -113,16 +113,31 @@ fn extract_partition(
     Ok(final_path)
 }
 
-/// Extract every partition found in the OTA into `out_dir`, one thread per partition, and
-/// return the image paths sorted by partition name. Every partition is attempted; the first
-/// error (in partition order) is returned.
-pub fn extract_all(input: &Path, out_dir: &Path) -> Result<Vec<PathBuf>> {
-    let names = Source::open(input)?.names()?;
+/// Partition names (from `<part>.transfer.list`) among the top-level file names, sorted.
+fn partitions_in(names: &[String]) -> Vec<&str> {
     let mut parts: Vec<&str> = names
         .iter()
         .filter_map(|n| n.strip_suffix(LIST_SUFFIX))
         .collect();
     parts.sort_unstable();
+    parts
+}
+
+/// Partition names found in an OTA zip or directory (empty for a non-block OTA).
+pub fn partition_names(input: &Path) -> Result<Vec<String>> {
+    let names = Source::open(input)?.names()?;
+    Ok(partitions_in(&names)
+        .into_iter()
+        .map(String::from)
+        .collect())
+}
+
+/// Extract every partition found in the OTA into `out_dir`, one thread per partition, and
+/// return the image paths sorted by partition name. Every partition is attempted; the first
+/// error (in partition order) is returned.
+pub fn extract_all(input: &Path, out_dir: &Path) -> Result<Vec<PathBuf>> {
+    let names = Source::open(input)?.names()?;
+    let parts = partitions_in(&names);
     if parts.is_empty() {
         bail!(
             "no *{LIST_SUFFIX} files found: not a block OTA (payload.bin OTAs are not supported)"
@@ -348,6 +363,22 @@ mod tests {
         assert!(format!("{e:#}").contains("extracting c"), "{e:#}");
         assert!(out.join("a.img").exists() && out.join("b.img").exists());
         assert!(!out.join("c.img").exists() && !out.join("c.img.part").exists());
+    }
+
+    #[test]
+    fn partition_names_lists_sorted_partitions_without_reading_data() {
+        let ota = fresh_dir("names");
+        write_dir(
+            &ota,
+            &[
+                ("b.transfer.list", vec![]),
+                ("a.transfer.list", vec![]),
+                ("readme.txt", vec![]),
+            ],
+        );
+        assert_eq!(partition_names(&ota).unwrap(), ["a", "b"]);
+        let empty = fresh_dir("names-empty");
+        assert!(partition_names(&empty).unwrap().is_empty());
     }
 
     #[test]
