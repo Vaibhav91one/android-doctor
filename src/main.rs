@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use std::io::Write;
 use std::path::PathBuf;
 
+mod detect;
 mod extract;
 mod info;
 mod report;

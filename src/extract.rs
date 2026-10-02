@@ -1,5 +1,5 @@
 //! Extract partition images from a block OTA (a zip or an already unpacked directory).
-use crate::{sdat, transfer_list};
+use crate::{detect, sdat, transfer_list};
 use anyhow::{Context, Result, anyhow, bail};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::fs::File;
@@ -328,13 +328,25 @@ pub fn run(input: &Path, out_dir: &Path, opts: &ExtractOptions) -> Result<()> {
         return Ok(());
     }
     for path in extract_all(input, out_dir, opts)? {
-        println!(
-            "{}  {} bytes",
-            path.display(),
-            std::fs::metadata(&path)?.len()
-        );
+        println!("{}", describe(&path)?);
     }
     Ok(())
+}
+
+/// One result line: path, size, and the filesystem when the image holds one we recognise.
+fn describe(path: &Path) -> Result<String> {
+    let size = std::fs::metadata(path)?.len();
+    let mut line = format!("{}  {size} bytes", path.display());
+    if let Some(fs) = detect::filesystem_of_file(path) {
+        line.push_str(&format!("  {fs}"));
+        if size % sdat::BLOCK_SIZE as u64 != 0 {
+            line.push_str(&format!(
+                "  (size is not a multiple of {})",
+                sdat::BLOCK_SIZE
+            ));
+        }
+    }
+    Ok(line)
 }
 
 #[cfg(test)]
@@ -870,6 +882,29 @@ mod tests {
         };
         run(&ota, &out, &list).unwrap();
         assert_eq!(std::fs::read(out.join("a.img")).unwrap(), b"x");
+    }
+
+    #[test]
+    fn result_lines_show_the_filesystem_only_when_recognised() {
+        let dir = fresh_dir("describe");
+        let mut ext4 = vec![0u8; 8192];
+        ext4[1024 + 0x38..1024 + 0x3A].copy_from_slice(&0xEF53u16.to_le_bytes());
+        ext4[1024 + 0x60..1024 + 0x64].copy_from_slice(&0x40u32.to_le_bytes());
+        std::fs::write(dir.join("system.img"), &ext4).unwrap();
+        std::fs::write(dir.join("boot.img"), vec![7u8; 5000]).unwrap();
+        let line = describe(&dir.join("system.img")).unwrap();
+        assert!(line.ends_with("system.img  8192 bytes  ext4"), "{line}");
+        let line = describe(&dir.join("boot.img")).unwrap();
+        assert!(line.ends_with("boot.img  5000 bytes"), "{line}");
+        // a recognised filesystem whose size is not block aligned gets a warning
+        ext4.truncate(5000);
+        ext4.resize(5001, 0);
+        std::fs::write(dir.join("odd.img"), &ext4).unwrap();
+        let line = describe(&dir.join("odd.img")).unwrap();
+        assert!(
+            line.contains("ext4  (size is not a multiple of 4096)"),
+            "{line}"
+        );
     }
 
     #[test]
