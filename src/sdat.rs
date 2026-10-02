@@ -5,11 +5,9 @@ use std::io::{Read, Seek, SeekFrom, Write};
 
 pub const BLOCK_SIZE: usize = 4096;
 
-fn check_bounds(ranges: &[(u64, u64)], total_blocks: u64) -> Result<()> {
-    match ranges.iter().find(|&&(_, end)| end > total_blocks) {
-        Some((s, e)) => bail!("range {s}-{e} is past the end of the image ({total_blocks} blocks)"),
-        None => Ok(()),
-    }
+fn command_ranges(cmd: &Command) -> &[(u64, u64)] {
+    let (Command::New(r) | Command::Zero(r) | Command::Erase(r)) = cmd;
+    r
 }
 
 /// Decompress a `.new.dat.br` stream on the fly, so no temporary `.new.dat` file is needed.
@@ -24,8 +22,16 @@ pub fn apply<R: Read, W: Write + Seek>(
     mut data: R,
     out: &mut W,
 ) -> Result<()> {
-    let size = list
-        .total_blocks
+    // Header line 2 only counts the blocks written; the image spans the furthest range of any
+    // command (an `erase` usually reaches the end of the partition).
+    let end = list
+        .commands
+        .iter()
+        .flat_map(command_ranges)
+        .map(|&(_, end)| end)
+        .max()
+        .unwrap_or(0);
+    let size = end
         .checked_mul(BLOCK_SIZE as u64)
         .context("image size overflows")?;
     if size > 0 {
@@ -34,8 +40,6 @@ pub fn apply<R: Read, W: Write + Seek>(
     }
     let mut block = [0u8; BLOCK_SIZE];
     for cmd in &list.commands {
-        let (Command::New(ranges) | Command::Zero(ranges) | Command::Erase(ranges)) = cmd;
-        check_bounds(ranges, list.total_blocks)?;
         if let Command::New(ranges) = cmd {
             for &(start, end) in ranges {
                 out.seek(SeekFrom::Start(start * BLOCK_SIZE as u64))?;
@@ -89,7 +93,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_and_erase_stay_zero_and_size_is_total_blocks() {
+    fn zero_and_erase_stay_zero_and_count_toward_size() {
         let img = run("4\n3\n0\n0\nnew 2,0,1\nzero 2,1,2\nerase 2,2,3\n", blk(7)).unwrap();
         assert_blocks(&img, &[7, 0, 0]);
     }
@@ -107,17 +111,20 @@ mod tests {
     }
 
     #[test]
-    fn absurd_total_blocks_is_an_error() {
-        let e = run("4\n18446744073709551615\n0\n0\n", vec![]).unwrap_err();
-        assert!(e.to_string().contains("overflows"), "{e}");
+    fn image_spans_the_furthest_range_of_any_command() {
+        // header count (1) is smaller than where the ranges end, as in real lists
+        let img = run("4\n1\n0\n0\nnew 2,4,5\nerase 2,5,6\n", blk(7)).unwrap();
+        assert_blocks(&img, &[0, 0, 0, 0, 7, 0]);
+        let img = run("4\n1\n0\n0\nnew 2,0,1\nerase 2,3,6\n", blk(7)).unwrap();
+        assert_blocks(&img, &[7, 0, 0, 0, 0, 0]);
+        let img = run("4\n1\n0\n0\nnew 2,0,1\nzero 2,1,4\n", blk(7)).unwrap();
+        assert_blocks(&img, &[7, 0, 0, 0]);
     }
 
     #[test]
-    fn range_past_the_end_is_an_error() {
-        let e = run("4\n2\n0\n0\nnew 2,1,3\n", [blk(1), blk(2)].concat()).unwrap_err();
-        assert!(e.to_string().contains("past the end"), "{e}");
-        let e = run("4\n2\n0\n0\nzero 2,5,6\n", vec![]).unwrap_err();
-        assert!(e.to_string().contains("past the end"), "{e}");
+    fn absurd_range_end_is_an_error() {
+        let e = run("4\n1\n0\n0\nerase 2,0,18446744073709551615\n", vec![]).unwrap_err();
+        assert!(e.to_string().contains("overflows"), "{e}");
     }
 
     #[test]
