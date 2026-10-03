@@ -39,6 +39,9 @@ enum Command {
         /// List what would be extracted, with sizes, and write nothing
         #[arg(long)]
         list: bool,
+        /// Also extract the files of every ext2/3/4 image into <out>/files/<image>/ (with manifests)
+        #[arg(long)]
+        files: bool,
     },
     /// Print build info from an OTA without extracting
     Info {
@@ -60,6 +63,18 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// List a directory (or show one file) inside an ext2/3/4 image, without extracting it
+    Ls {
+        image: PathBuf,
+        /// Path inside the image (default: the root)
+        #[arg(default_value = "/")]
+        path: String,
+        /// Print JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print one regular file from an ext2/3/4 image to standard output
+    Cat { image: PathBuf, path: String },
     /// Show an AVB vbmeta image (or a partition with an AVB footer): header, key, descriptors, hashes
     Vbmeta {
         image: PathBuf,
@@ -219,11 +234,13 @@ fn main() -> anyhow::Result<()> {
             force,
             only,
             list,
+            files,
         } => {
             let opts = extract::ExtractOptions {
                 force,
                 only: (!only.is_empty()).then_some(only),
                 list,
+                files,
             };
             extract::run(&input, &output, &opts)
         }
@@ -251,6 +268,8 @@ fn main() -> anyhow::Result<()> {
             json,
             list,
         } => ramdisk_command(&input, output.as_deref(), json, list),
+        Command::Ls { image, path, json } => ls_command(&image, &path, json),
+        Command::Cat { image, path } => cat_command(&image, &path),
         Command::Vbmeta {
             image,
             images,
@@ -281,7 +300,7 @@ fn files_command(
     output: Option<&std::path::Path>,
     json: bool,
 ) -> anyhow::Result<()> {
-    let fs = ext4fs::Fs::open(image)?;
+    let fs = open_tree(image)?;
     let entries = match output {
         Some(out) => fs.extract(out, None)?,
         None => fs.entries()?.into_iter().map(|(e, _)| e).collect(),
@@ -291,29 +310,7 @@ fn files_command(
     } else {
         entries
             .iter()
-            .map(|e| {
-                let label = e
-                    .xattrs
-                    .iter()
-                    .find(|(k, _)| k == "security.selinux")
-                    .map_or("", |(_, v)| v.as_str());
-                let link = e
-                    .link
-                    .as_deref()
-                    .map(|l| format!(" -> {l}"))
-                    .unwrap_or_default();
-                format!(
-                    "{:7} {:04o} {:>5} {:>5} {:>11} {}{} {}",
-                    e.kind.name(),
-                    e.mode,
-                    e.uid,
-                    e.gid,
-                    e.size,
-                    e.path,
-                    link,
-                    label
-                )
-            })
+            .map(entry_line)
             .collect::<Vec<_>>()
             .join("\n")
     };
@@ -341,6 +338,88 @@ fn vbmeta_command(
         "the digest or a partition hash does not match"
     );
     Ok(())
+}
+
+/// Open the file system of an image, saying so plainly when it is a kind we cannot read yet.
+fn open_tree(image: &std::path::Path) -> anyhow::Result<ext4fs::Fs> {
+    if detect::filesystem_of_file(image) == Some(detect::Filesystem::Erofs) {
+        anyhow::bail!(
+            "{} is an erofs image; erofs trees are not supported yet",
+            image.display()
+        );
+    }
+    ext4fs::Fs::open(image)
+}
+
+fn entry_line(e: &ext4fs::Entry) -> String {
+    let label = e
+        .xattrs
+        .iter()
+        .find(|(k, _)| k == "security.selinux")
+        .map_or("", |(_, v)| v.as_str());
+    let link = e
+        .link
+        .as_deref()
+        .map(|l| format!(" -> {l}"))
+        .unwrap_or_default();
+    let name = if e.path.is_empty() {
+        "/"
+    } else {
+        e.path.as_str()
+    };
+    format!(
+        "{:7} {:04o} {:>5} {:>5} {:>11} {}{} {}",
+        e.kind.name(),
+        e.mode,
+        e.uid,
+        e.gid,
+        e.size,
+        name,
+        link,
+        label
+    )
+}
+
+fn ls_command(image: &std::path::Path, path: &str, json: bool) -> anyhow::Result<()> {
+    let entries: Vec<_> = open_tree(image)?
+        .list_dir(path)?
+        .into_iter()
+        .map(|(e, _)| e)
+        .collect();
+    let text = if json {
+        serde_json::to_string_pretty(&entries.iter().map(ext4fs::entry_json).collect::<Vec<_>>())?
+    } else {
+        entries
+            .iter()
+            .map(entry_line)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    print_out(&text)
+}
+
+fn cat_command(image: &std::path::Path, path: &str) -> anyhow::Result<()> {
+    let fs = open_tree(image)?;
+    let (entry, inode) = fs.lookup(path)?;
+    match entry.kind {
+        ext4fs::Kind::File => {}
+        ext4fs::Kind::Symlink => anyhow::bail!(
+            "/{} is a symlink to {}; give the real path",
+            entry.path,
+            entry.link.as_deref().unwrap_or("?")
+        ),
+        k => anyhow::bail!("/{} is a {}, not a regular file", entry.path, k.name()),
+    }
+    let mut out = std::io::stdout().lock();
+    match fs.cat(&inode, &mut out) {
+        Err(e)
+            if e.downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::BrokenPipe) =>
+        {
+            Ok(())
+        }
+        r => r,
+    }
 }
 
 #[cfg(test)]

@@ -882,6 +882,117 @@ impl Fs {
         })
     }
 
+    /// Resolve `path` to its entry without following symlinks ("" or "/" is the root).
+    pub fn lookup(&self, path: &str) -> Result<(Entry, Inode)> {
+        let mut inode = self.inode(2).context("reading the root directory")?;
+        let mut at = String::new();
+        for part in path.split('/').filter(|p| !p.is_empty() && *p != ".") {
+            ensure!(part != "..", "paths containing .. are not accepted");
+            let here = if at.is_empty() {
+                "/".to_string()
+            } else {
+                format!("/{at}")
+            };
+            ensure!(
+                Kind::from_mode(inode.mode) == Some(Kind::Dir),
+                "{} is not a directory (symlinks are not followed)",
+                short(&here)
+            );
+            let found = self
+                .dir_entries(&inode)?
+                .into_iter()
+                .find(|(n, _)| n == part);
+            let (_, ino) =
+                found.with_context(|| format!("{} not found in {}", short(part), short(&here)))?;
+            inode = self.inode(ino)?;
+            at = if at.is_empty() {
+                part.to_string()
+            } else {
+                format!("{at}/{part}")
+            };
+        }
+        let kind = Kind::from_mode(inode.mode)
+            .with_context(|| format!("unknown file type in mode {:#o}", inode.mode))?;
+        Ok((self.entry_of(at, &inode, kind)?, inode))
+    }
+
+    /// The entries of the directory at `path` (not recursive), or the entry itself for a file.
+    pub fn list_dir(&self, path: &str) -> Result<Vec<(Entry, Inode)>> {
+        let (entry, inode) = self.lookup(path)?;
+        if entry.kind != Kind::Dir {
+            return Ok(vec![(entry, inode)]);
+        }
+        let mut children = self.dir_entries(&inode)?;
+        children.sort();
+        children
+            .into_iter()
+            .map(|(name, ino)| {
+                let child = self.inode(ino)?;
+                let kind = Kind::from_mode(child.mode)
+                    .with_context(|| format!("{}: unknown file type", short(&name)))?;
+                let p = if entry.path.is_empty() {
+                    name
+                } else {
+                    format!("{}/{name}", entry.path)
+                };
+                Ok((self.entry_of(p, &child, kind)?, child))
+            })
+            .collect()
+    }
+
+    /// Write a regular file's contents to `out` (holes as zeros).
+    pub fn cat(&self, inode: &Inode, out: &mut dyn Write) -> Result<()> {
+        ensure!(
+            Kind::from_mode(inode.mode) == Some(Kind::File),
+            "not a regular file"
+        );
+        ensure!(
+            inode.size <= MAX_FILE_BYTES,
+            "a file of {} bytes is over the {MAX_FILE_BYTES}-byte limit",
+            inode.size
+        );
+        let runs = if inode.size == 0 {
+            Vec::new()
+        } else {
+            self.runs(inode)?
+        };
+        let zeros = vec![0u8; COPY_CHUNK];
+        let zero_fill = |out: &mut dyn Write, mut n: u64| -> Result<()> {
+            while n > 0 {
+                let k = n.min(COPY_CHUNK as u64) as usize;
+                out.write_all(&zeros[..k])?;
+                n -= k as u64;
+            }
+            Ok(())
+        };
+        let (mut at, mut buf) = (0u64, vec![0u8; COPY_CHUNK]);
+        for run in runs {
+            let start = run.lblk * self.bs;
+            if start >= inode.size {
+                break;
+            }
+            ensure!(start >= at, "file blocks overlap at byte {start}");
+            zero_fill(out, start - at)?;
+            let bytes = (run.blocks * self.bs).min(inode.size - start);
+            match run.pblk {
+                None => zero_fill(out, bytes)?,
+                Some(p) => {
+                    let (mut done, base) = (0u64, p * self.bs);
+                    while done < bytes {
+                        let n = (bytes - done).min(COPY_CHUNK as u64) as usize;
+                        self.src
+                            .read_at(base + done, &mut buf[..n])
+                            .context("reading file data")?;
+                        out.write_all(&buf[..n])?;
+                        done += n as u64;
+                    }
+                }
+            }
+            at = start + bytes;
+        }
+        zero_fill(out, inode.size - at)
+    }
+
     /// Every entry of the tree below the root (not the root itself), sorted by path. No file
     /// contents are read.
     pub fn entries(&self) -> Result<Vec<(Entry, Inode)>> {
@@ -1880,6 +1991,168 @@ mod tests {
         let a = std::fs::metadata(dir.join("o/files/a")).unwrap();
         let h = std::fs::metadata(dir.join("o/files/hard")).unwrap();
         assert_eq!((a.ino(), a.nlink()), (h.ino(), 2));
+    }
+
+    fn cat_bytes(fs: &Fs, path: &str) -> Vec<u8> {
+        let (_, inode) = fs.lookup(path).unwrap();
+        let mut out = Vec::new();
+        fs.cat(&inode, &mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn lookup_resolves_paths_without_following_symlinks() {
+        for (isz, ext) in [(256, true), (128, false)] {
+            let fs = sample(isz, ext).fs();
+            for p in ["a", "/a", "a/", "./a", "//a", "d/b", "/d//b/"] {
+                assert!(fs.lookup(p).is_ok(), "{p}");
+            }
+            assert_eq!(fs.lookup("d/b").unwrap().0.path, "d/b");
+            assert_eq!(fs.lookup("/").unwrap().0.kind, Kind::Dir);
+            assert_eq!(fs.lookup("").unwrap().0.path, "");
+            assert_eq!(fs.lookup("s").unwrap().0.kind, Kind::Symlink);
+            let e = |p: &str| format!("{:#}", fs.lookup(p).unwrap_err());
+            assert!(e("nope").contains("not found"), "{}", e("nope"));
+            assert!(e("d/nope").contains("not found in /d"));
+            assert!(e("a/x").contains("not a directory"));
+            assert!(e("s/x").contains("symlinks are not followed"));
+            assert!(e("d/../a").contains("not accepted"));
+        }
+    }
+
+    #[test]
+    fn list_dir_lists_one_level_or_the_file_itself() {
+        let fs = sample(256, true).fs();
+        let names = |p: &str| {
+            fs.list_dir(p)
+                .unwrap()
+                .into_iter()
+                .map(|(e, _)| e.path)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names("/"), ["a", "d", "empty", "hard", "l", "s"]);
+        assert_eq!(names("d"), ["d/b", "d/c"]);
+        assert_eq!(names("d/"), ["d/b", "d/c"]);
+        assert_eq!(names("a"), ["a"], "a file lists as itself");
+        let root = fs.list_dir("/").unwrap();
+        assert_eq!(
+            root.iter()
+                .find(|(e, _)| e.path == "s")
+                .unwrap()
+                .0
+                .link
+                .as_deref(),
+            Some("a")
+        );
+        assert!(fs.list_dir("zzz").is_err());
+    }
+
+    #[test]
+    fn cat_returns_the_exact_bytes_including_holes() {
+        for (isz, ext) in [(256, true), (128, false)] {
+            let fs = sample(isz, ext).fs();
+            assert_eq!(cat_bytes(&fs, "a"), b"hello\n");
+            assert_eq!(cat_bytes(&fs, "hard"), b"hello\n");
+            assert_eq!(cat_bytes(&fs, "d/b"), vec![7u8; 5000]);
+            assert_eq!(cat_bytes(&fs, "empty"), b"");
+            let mut want = vec![1u8; 20 * BS];
+            want[3 * BS..6 * BS].fill(0);
+            assert_eq!(cat_bytes(&fs, "d/c"), want);
+        }
+    }
+
+    #[test]
+    fn cat_handles_trailing_holes_unwritten_extents_and_refuses_non_files() {
+        let mut m = Img::new(256, true);
+        let at = m.alloc(b"head")[0];
+        extent_file(&mut m, 11, 3 * BS as u64 + 10, &[(0, 1, at)]);
+        let at2 = m.alloc(&vec![9u8; 2 * BS])[0];
+        extent_file(&mut m, 12, 2 * BS as u64, &[(0, 32770, at2)]);
+        m.dir(2, 2, &[("f", 11, 1), ("u", 12, 1)]);
+        let fs = m.fs();
+        let mut want = vec![0u8; 3 * BS + 10];
+        want[..4].copy_from_slice(b"head");
+        assert_eq!(cat_bytes(&fs, "f"), want);
+        assert_eq!(
+            cat_bytes(&fs, "u"),
+            vec![0u8; 2 * BS],
+            "unwritten extents are zeros"
+        );
+        let (_, dir) = fs.lookup("/").unwrap();
+        assert!(
+            format!("{:#}", fs.cat(&dir, &mut Vec::new()).unwrap_err())
+                .contains("not a regular file")
+        );
+        let (_, mut big) = fs.lookup("f").unwrap();
+        big.size = MAX_FILE_BYTES + 1;
+        assert!(
+            format!("{:#}", fs.cat(&big, &mut Vec::new()).unwrap_err()).contains("-byte limit")
+        );
+    }
+
+    #[test]
+    fn cat_stops_cleanly_when_the_reader_goes_away() {
+        struct Closed;
+        impl Write for Closed {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let fs = sample(256, true).fs();
+        let (_, inode) = fs.lookup("d/b").unwrap();
+        let e = fs.cat(&inode, &mut Closed).unwrap_err();
+        assert!(
+            e.downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::BrokenPipe)
+        );
+    }
+
+    #[test]
+    fn extract_trees_writes_each_ext_image_and_leaves_other_images_alone() {
+        use crate::extract::extract_trees;
+        let dir = scratch("trees");
+        let sys = dir.join("system.img");
+        std::fs::write(&sys, sample(256, true).img).unwrap();
+        let vend = dir.join("vendor.img");
+        std::fs::write(&vend, sample(128, false).img).unwrap();
+        let boot = dir.join("boot.img");
+        std::fs::write(&boot, vec![0x42u8; 4096]).unwrap();
+        let mut erofs = vec![0u8; 4096];
+        erofs[1024..1028].copy_from_slice(&0xE0F5_E1E2u32.to_le_bytes());
+        let ero = dir.join("odm.img");
+        std::fs::write(&ero, &erofs).unwrap();
+        let images = [sys.as_path(), vend.as_path(), boot.as_path(), ero.as_path()];
+        let out = dir.join("files");
+        extract_trees(&images, &out, false).unwrap();
+        assert_eq!(
+            std::fs::read(out.join("system/files/d/b")).unwrap(),
+            vec![7u8; 5000]
+        );
+        assert_eq!(
+            std::fs::read(out.join("vendor/files/a")).unwrap(),
+            b"hello\n"
+        );
+        assert!(
+            out.join("system/manifest.json").is_file()
+                && out.join("vendor/manifest.json").is_file()
+        );
+        assert!(
+            !out.join("boot").exists() && !out.join("odm").exists(),
+            "no tree for non-ext images"
+        );
+        // a second run refuses to merge into an existing tree, --force replaces it
+        let e = format!("{:#}", extract_trees(&images, &out, false).unwrap_err());
+        assert!(e.contains("not empty"), "{e}");
+        std::fs::write(out.join("system/files/stale"), b"x").unwrap();
+        extract_trees(&images, &out, true).unwrap();
+        assert!(!out.join("system/files/stale").exists());
+        assert_eq!(
+            std::fs::read(out.join("system/files/a")).unwrap(),
+            b"hello\n"
+        );
     }
 
     fn tempfile_like() -> File {
