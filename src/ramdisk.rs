@@ -20,12 +20,12 @@ const MAX_ENTRIES: usize = 1_000_000;
 /// Decompressed bytes accepted from one ramdisk, so a small hostile file cannot fill the disk.
 pub const MAX_DECOMPRESSED: u64 = 2 << 30;
 /// Property files are small; larger ones are not read for properties.
-const MAX_PROP_FILE: u64 = 1 << 20;
+pub(crate) const MAX_PROP_FILE: u64 = 1 << 20;
 const LEGACY_LZ4_MAGIC: u32 = 0x184C_2102;
 const LEGACY_LZ4_BLOCK: usize = 8 << 20;
 const SYMLINK_DEPTH: usize = 8;
 /// Properties worth reporting when auditing a device's debug and ADB exposure.
-const REPORTED_PROPS: [&str; 6] = [
+pub(crate) const REPORTED_PROPS: [&str; 6] = [
     "ro.secure",
     "ro.adb.secure",
     "ro.debuggable",
@@ -334,7 +334,7 @@ fn parse_props(text: &str, file: &str, out: &mut BTreeMap<String, Vec<(String, S
     }
 }
 
-fn is_prop_file(path: &str) -> bool {
+pub(crate) fn is_prop_file(path: &str) -> bool {
     let base = path.rsplit('/').next().unwrap_or(path);
     base == "prop.default" || base.ends_with(".prop")
 }
