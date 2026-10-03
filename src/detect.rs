@@ -246,6 +246,8 @@ pub fn identify_path(path: &Path) -> Result<Identified> {
 
 /// `filesystem()` for a file on disk; unreadable or short files are simply unrecognised.
 pub fn filesystem_of_file(path: &Path) -> Option<Filesystem> {
+    // opening a FIFO would block forever: it is not a file system image
+    refuse_blocking_file(path).ok()?;
     let mut head = Vec::with_capacity(HEAD_LEN);
     File::open(path)
         .ok()?

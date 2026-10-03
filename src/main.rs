@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use std::io::Write;
 use std::path::PathBuf;
 
+mod audit;
 mod avb;
 mod bootimg;
 mod detect;
@@ -77,6 +78,15 @@ enum Command {
     },
     /// Print one regular file from an ext2/3/4 image to standard output
     Cat { image: PathBuf, path: String },
+    /// Security posture of firmware images: ADB properties, setuid files, su binaries, init services
+    Audit {
+        /// Image files (ext2/3/4 or erofs), or a directory of them (such as an `extract` output)
+        #[arg(required = true)]
+        images: Vec<PathBuf>,
+        /// Print JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
     /// Show an AVB vbmeta image (or a partition with an AVB footer): header, key, descriptors, hashes
     Vbmeta {
         image: PathBuf,
@@ -272,6 +282,7 @@ fn main() -> anyhow::Result<()> {
         } => ramdisk_command(&input, output.as_deref(), json, list),
         Command::Ls { image, path, json } => ls_command(&image, &path, json),
         Command::Cat { image, path } => cat_command(&image, &path),
+        Command::Audit { images, json } => audit_command(&images, json),
         Command::Vbmeta {
             image,
             images,
@@ -397,6 +408,19 @@ fn cat_command(image: &std::path::Path, path: &str) -> anyhow::Result<()> {
         }
         r => r,
     }
+}
+
+fn audit_command(images: &[PathBuf], json: bool) -> anyhow::Result<()> {
+    let audits = audit::image_list(images)?
+        .iter()
+        .map(|p| audit::audit_image(p))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let text = if json {
+        serde_json::to_string_pretty(&audit::to_json(&audits))?
+    } else {
+        audit::to_text(&audits)
+    };
+    print_out(&text)
 }
 
 #[cfg(test)]
