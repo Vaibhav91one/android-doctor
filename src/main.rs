@@ -10,6 +10,7 @@ mod erofsfs;
 mod ext4fs;
 mod extract;
 mod info;
+mod lp;
 mod otameta;
 mod pac;
 mod payload;
