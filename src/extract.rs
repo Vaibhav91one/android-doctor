@@ -480,30 +480,26 @@ pub fn run(input: &Path, out_dir: &Path, opts: &ExtractOptions) -> Result<()> {
 /// `--files`: write the file tree and manifest of every ext2/3/4 image under `<dir>/<image name>/`.
 pub(crate) fn extract_trees(images: &[&Path], dir: &Path, force: bool) -> Result<()> {
     for image in images {
-        let Some(fs) = detect::filesystem_of_file(image) else {
+        if detect::filesystem_of_file(image).is_none() {
             continue;
-        };
+        }
         let name = image
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("image");
-        if matches!(fs, detect::Filesystem::Erofs) {
-            println!("files: {name}  erofs trees are not supported yet");
-            continue;
-        }
         let target = dir.join(name);
         if force && target.symlink_metadata().is_ok_and(|m| m.is_dir()) {
             std::fs::remove_dir_all(&target)?;
         }
-        let entries = crate::ext4fs::Fs::open(image)?
+        let entries = crate::tree::Tree::open(image)?
             .extract(&target, None)
             .with_context(|| format!("extracting the files of {}", image.display()))?;
         let count = |k| entries.iter().filter(|e| e.kind == k).count();
         println!(
             "files: {name}  {} entries ({} files, {} symlinks) -> {}",
             entries.len(),
-            count(crate::ext4fs::Kind::File),
-            count(crate::ext4fs::Kind::Symlink),
+            count(crate::tree::Kind::File),
+            count(crate::tree::Kind::Symlink),
             target.display()
         );
     }

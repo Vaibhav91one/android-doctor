@@ -5,6 +5,7 @@ use std::path::PathBuf;
 mod avb;
 mod bootimg;
 mod detect;
+mod erofsfs;
 mod ext4fs;
 mod extract;
 mod info;
@@ -14,6 +15,7 @@ mod report;
 mod sdat;
 mod sparse;
 mod transfer_list;
+mod tree;
 mod treeout;
 
 #[derive(Parser)]
@@ -300,13 +302,13 @@ fn files_command(
     output: Option<&std::path::Path>,
     json: bool,
 ) -> anyhow::Result<()> {
-    let fs = open_tree(image)?;
+    let fs = tree::Tree::open(image)?;
     let entries = match output {
         Some(out) => fs.extract(out, None)?,
-        None => fs.entries()?.into_iter().map(|(e, _)| e).collect(),
+        None => fs.entries()?,
     };
     let text = if json {
-        serde_json::to_string_pretty(&ext4fs::manifest(&entries))?
+        serde_json::to_string_pretty(&tree::manifest(&entries))?
     } else {
         entries
             .iter()
@@ -340,18 +342,7 @@ fn vbmeta_command(
     Ok(())
 }
 
-/// Open the file system of an image, saying so plainly when it is a kind we cannot read yet.
-fn open_tree(image: &std::path::Path) -> anyhow::Result<ext4fs::Fs> {
-    if detect::filesystem_of_file(image) == Some(detect::Filesystem::Erofs) {
-        anyhow::bail!(
-            "{} is an erofs image; erofs trees are not supported yet",
-            image.display()
-        );
-    }
-    ext4fs::Fs::open(image)
-}
-
-fn entry_line(e: &ext4fs::Entry) -> String {
+fn entry_line(e: &tree::Entry) -> String {
     let label = e
         .xattrs
         .iter()
@@ -381,13 +372,9 @@ fn entry_line(e: &ext4fs::Entry) -> String {
 }
 
 fn ls_command(image: &std::path::Path, path: &str, json: bool) -> anyhow::Result<()> {
-    let entries: Vec<_> = open_tree(image)?
-        .list_dir(path)?
-        .into_iter()
-        .map(|(e, _)| e)
-        .collect();
+    let entries = tree::Tree::open(image)?.list_dir(path)?;
     let text = if json {
-        serde_json::to_string_pretty(&entries.iter().map(ext4fs::entry_json).collect::<Vec<_>>())?
+        serde_json::to_string_pretty(&entries.iter().map(tree::entry_json).collect::<Vec<_>>())?
     } else {
         entries
             .iter()
@@ -399,19 +386,9 @@ fn ls_command(image: &std::path::Path, path: &str, json: bool) -> anyhow::Result
 }
 
 fn cat_command(image: &std::path::Path, path: &str) -> anyhow::Result<()> {
-    let fs = open_tree(image)?;
-    let (entry, inode) = fs.lookup(path)?;
-    match entry.kind {
-        ext4fs::Kind::File => {}
-        ext4fs::Kind::Symlink => anyhow::bail!(
-            "/{} is a symlink to {}; give the real path",
-            entry.path,
-            entry.link.as_deref().unwrap_or("?")
-        ),
-        k => anyhow::bail!("/{} is a {}, not a regular file", entry.path, k.name()),
-    }
+    let fs = tree::Tree::open(image)?;
     let mut out = std::io::stdout().lock();
-    match fs.cat(&inode, &mut out) {
+    match fs.cat_path(path, &mut out) {
         Err(e)
             if e.downcast_ref::<std::io::Error>()
                 .is_some_and(|e| e.kind() == std::io::ErrorKind::BrokenPipe) =>

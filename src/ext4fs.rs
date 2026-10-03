@@ -6,11 +6,14 @@
 //! whole image as hostile: every offset and length is checked against the image size, every
 //! allocation is bounded, and walks have depth, entry, loop and size limits.
 use crate::detect::refuse_blocking_file;
-use crate::treeout::{Collisions, Sink, host_collisions, prepare_staging, publish, short};
+use crate::tree::{
+    COPY_CHUNK, Entry, Kind, MAX_DEPTH, MAX_ENTRIES, MAX_FILE_BYTES, MAX_PATH, MAX_SYMLINK,
+    TreeSource, check_cat,
+};
+use crate::treeout::{Collisions, short};
 use anyhow::{Context, Result, bail, ensure};
-use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
@@ -19,20 +22,11 @@ const EXT_MAGIC: u16 = 0xEF53;
 const MIN_BLOCK: u64 = 1024;
 const MAX_BLOCK: u64 = 65536;
 const MAX_GROUPS: u64 = 1 << 20;
-const MAX_ENTRIES: usize = 2_000_000;
-const MAX_DEPTH: usize = 1024;
-const MAX_PATH: usize = 4096;
 const MAX_EXTENT_DEPTH: u16 = 5;
 const MAX_TREE_NODES: usize = 1 << 20;
 const MAX_RUNS: usize = 1 << 21;
 const MAX_XATTRS: usize = 4096;
 const MAX_XATTR_VALUE: usize = 1 << 20;
-const MAX_SYMLINK: u64 = 4096;
-/// Largest logical size of one file (holes are hashed as zeros, so this bounds the time).
-const MAX_FILE_BYTES: u64 = 16 << 30;
-/// Largest total of logical file sizes in one extraction, or four times the image if larger.
-const MIN_TOTAL_BYTES: u64 = 32 << 30;
-const COPY_CHUNK: usize = 1 << 20;
 const XATTR_MAGIC: u32 = 0xEA02_0000;
 
 const INCOMPAT_COMPRESSION: u32 = 0x1;
@@ -42,44 +36,6 @@ const INCOMPAT_64BIT: u32 = 0x80;
 const INODE_EXTENTS: u32 = 0x8_0000;
 const INODE_INLINE_DATA: u32 = 0x1000_0000;
 const INODE_ENCRYPT: u32 = 0x800;
-
-#[derive(Debug, PartialEq, Clone, Copy)]
-pub enum Kind {
-    File,
-    Dir,
-    Symlink,
-    CharDevice,
-    BlockDevice,
-    Fifo,
-    Socket,
-}
-
-impl Kind {
-    fn from_mode(mode: u16) -> Option<Kind> {
-        Some(match mode & 0o170000 {
-            0o100000 => Kind::File,
-            0o040000 => Kind::Dir,
-            0o120000 => Kind::Symlink,
-            0o020000 => Kind::CharDevice,
-            0o060000 => Kind::BlockDevice,
-            0o010000 => Kind::Fifo,
-            0o140000 => Kind::Socket,
-            _ => return None,
-        })
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Kind::File => "file",
-            Kind::Dir => "dir",
-            Kind::Symlink => "symlink",
-            Kind::CharDevice => "char",
-            Kind::BlockDevice => "block",
-            Kind::Fifo => "fifo",
-            Kind::Socket => "socket",
-        }
-    }
-}
 
 /// Where the image bytes come from.
 enum Source {
@@ -174,26 +130,6 @@ pub struct Fs {
     itables: Vec<u64>,
 }
 
-/// One entry of the tree.
-#[derive(Debug, Clone)]
-pub struct Entry {
-    pub path: String,
-    pub kind: Kind,
-    pub mode: u32,
-    pub uid: u32,
-    pub gid: u32,
-    pub size: u64,
-    pub mtime: i64,
-    pub ino: u32,
-    pub nlink: u16,
-    pub link: Option<String>,
-    pub rdev: Option<(u32, u32)>,
-    pub xattrs: Vec<(String, String)>,
-    pub sha256: Option<String>,
-    /// Set when the file had to be extracted under another name (case collision).
-    pub extracted_as: Option<String>,
-}
-
 fn xattr_prefix(index: u8) -> Option<&'static str> {
     Some(match index {
         1 => "user.",
@@ -207,7 +143,7 @@ fn xattr_prefix(index: u8) -> Option<&'static str> {
     })
 }
 
-fn xattr_text(v: &[u8]) -> String {
+pub(crate) fn xattr_text(v: &[u8]) -> String {
     let trimmed = {
         let mut end = v.len();
         while end > 0 && v[end - 1] == 0 {
@@ -225,7 +161,7 @@ fn xattr_text(v: &[u8]) -> String {
 }
 
 /// A directory entry name as text; bytes that are not UTF-8 become `%XX`.
-fn name_string(mut b: &[u8]) -> String {
+pub(crate) fn name_string(mut b: &[u8]) -> String {
     let mut out = String::new();
     loop {
         match std::str::from_utf8(b) {
@@ -868,8 +804,8 @@ impl Fs {
             gid: inode.gid,
             size: if kind == Kind::File { inode.size } else { 0 },
             mtime: inode.mtime,
-            ino: inode.ino,
-            nlink: inode.links,
+            ino: inode.ino as u64,
+            nlink: inode.links as u32,
             link: if kind == Kind::Symlink {
                 Some(self.symlink_target(inode)?)
             } else {
@@ -1059,103 +995,50 @@ impl Fs {
         out.sort_by(|a, b| a.0.path.cmp(&b.0.path));
         Ok(out)
     }
+}
 
+impl Fs {
     /// Extract the tree under `out_dir/files` with `manifest.json` beside it, all or nothing.
     pub fn extract(&self, out_dir: &Path, collisions: Option<Collisions>) -> Result<Vec<Entry>> {
-        let staging = prepare_staging(out_dir)?;
-        let result = self.extract_into(&staging, collisions);
-        match result {
-            Ok(entries) => {
-                std::fs::write(
-                    staging.join("manifest.json"),
-                    serde_json::to_string_pretty(&manifest(&entries))?,
-                )?;
-                publish(&staging, out_dir)?;
-                Ok(entries)
-            }
-            Err(e) => {
-                let _ = std::fs::remove_dir_all(&staging);
-                Err(e)
-            }
-        }
-    }
-
-    fn extract_into(&self, staging: &Path, collisions: Option<Collisions>) -> Result<Vec<Entry>> {
-        let files = staging.join("files");
-        std::fs::create_dir(&files)?;
-        let policy = collisions.unwrap_or_else(|| host_collisions(&files));
-        let mut sink = Sink::with_collisions(&files, policy);
-        let mut budget = MIN_TOTAL_BYTES.max(self.len.saturating_mul(4));
-        let mut first_path: HashMap<u32, (String, String)> = HashMap::new(); // inode -> (path, sha)
-        let mut done = Vec::new();
-        for (mut entry, inode) in self.entries()? {
-            let path = entry.path.clone();
-            let here = || format!("extracting {}", short(&path));
-            match entry.kind {
-                Kind::Dir => sink.make_parents(&format!("{path}/x")).with_context(here)?,
-                Kind::Symlink => sink.note_symlink(&path).with_context(here)?,
-                Kind::File => match first_path.get(&inode.ino) {
-                    Some((first, sha)) => {
-                        sink.hard_link(first, &path).with_context(here)?;
-                        entry.sha256 = Some(sha.clone());
-                    }
-                    None => {
-                        let mut sha = None;
-                        // owner read/write is added on disk so the tree stays usable; the manifest has the real mode
-                        sink.write_with(&path, inode.mode as u32 | 0o600, |f| {
-                            sha = Some(self.copy_data(&inode, f, &mut budget)?);
-                            Ok(())
-                        })
-                        .with_context(here)?;
-                        let sha = sha.expect("the closure ran");
-                        if inode.links > 1 {
-                            first_path.insert(inode.ino, (path.clone(), sha.clone()));
-                        }
-                        entry.sha256 = Some(sha);
-                    }
-                },
-                _ => {}
-            }
-            let actual = sink.actual_path(&path);
-            if actual != path && matches!(entry.kind, Kind::File | Kind::Dir) {
-                entry.extracted_as = Some(actual);
-            }
-            done.push(entry);
-        }
-        Ok(done)
+        crate::tree::extract(self, out_dir, collisions)
     }
 }
 
-pub fn manifest(entries: &[Entry]) -> Value {
-    let by: BTreeMap<&str, usize> = entries.iter().fold(BTreeMap::new(), |mut m, e| {
-        *m.entry(e.kind.name()).or_default() += 1;
-        m
-    });
-    json!({
-        "entries": entries.iter().map(entry_json).collect::<Vec<_>>(),
-        "summary": {"entries": entries.len(), "by_type": by},
-    })
-}
+impl TreeSource for Fs {
+    type Node = Inode;
 
-pub fn entry_json(e: &Entry) -> Value {
-    let mut v = json!({
-        "path": e.path, "type": e.kind.name(), "mode": e.mode, "uid": e.uid, "gid": e.gid,
-        "size": e.size, "mtime": e.mtime, "inode": e.ino, "nlink": e.nlink,
-        "link": e.link, "sha256": e.sha256,
-        "xattrs": e.xattrs.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect::<serde_json::Map<_, _>>(),
-    });
-    if let Some((major, minor)) = e.rdev {
-        v["rdev"] = json!([major, minor]);
+    fn image_len(&self) -> u64 {
+        self.len
     }
-    if let Some(a) = &e.extracted_as {
-        v["extracted_as"] = json!(a);
+
+    fn entries(&self) -> Result<Vec<(Entry, Inode)>> {
+        Fs::entries(self)
     }
-    v
+
+    fn copy_data(&self, node: &Inode, out: &mut File, budget: &mut u64) -> Result<String> {
+        Fs::copy_data(self, node, out, budget)
+    }
+
+    fn list_dir(&self, path: &str) -> Result<Vec<Entry>> {
+        Ok(Fs::list_dir(self, path)?
+            .into_iter()
+            .map(|(e, _)| e)
+            .collect())
+    }
+
+    fn cat_path(&self, path: &str, out: &mut dyn Write) -> Result<()> {
+        let (entry, inode) = self.lookup(path)?;
+        check_cat(&entry)?;
+        self.cat(&inode, out)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tree::manifest;
+    use crate::treeout::host_collisions;
+    use serde_json::{Value, json};
 
     const BS: usize = 1024;
     const BLOCKS: usize = 512;
@@ -2120,10 +2003,27 @@ mod tests {
         std::fs::write(&vend, sample(128, false).img).unwrap();
         let boot = dir.join("boot.img");
         std::fs::write(&boot, vec![0x42u8; 4096]).unwrap();
-        let mut erofs = vec![0u8; 4096];
-        erofs[1024..1028].copy_from_slice(&0xE0F5_E1E2u32.to_le_bytes());
         let ero = dir.join("odm.img");
-        std::fs::write(&ero, &erofs).unwrap();
+        let root = fs_erofs::mkfs::Node::Dir {
+            mode: 0o040755,
+            entries: [(
+                "f".to_string(),
+                fs_erofs::mkfs::Node::File {
+                    mode: 0o100644,
+                    data: b"from erofs".to_vec(),
+                    meta: Default::default(),
+                    xattrs: vec![],
+                },
+            )]
+            .into(),
+            meta: Default::default(),
+            xattrs: vec![],
+        };
+        std::fs::write(&ero, fs_erofs::mkfs::build_image(root, 12).unwrap()).unwrap();
+        let broken = dir.join("product.img");
+        let mut bad = std::fs::read(&ero).unwrap();
+        bad[1024 + 12] = 99; // a block size no erofs image has
+        std::fs::write(&broken, &bad).unwrap();
         let images = [sys.as_path(), vend.as_path(), boot.as_path(), ero.as_path()];
         let out = dir.join("files");
         extract_trees(&images, &out, false).unwrap();
@@ -2139,9 +2039,23 @@ mod tests {
             out.join("system/manifest.json").is_file()
                 && out.join("vendor/manifest.json").is_file()
         );
+        assert_eq!(
+            std::fs::read(out.join("odm/files/f")).unwrap(),
+            b"from erofs",
+            "erofs images get a tree too"
+        );
         assert!(
-            !out.join("boot").exists() && !out.join("odm").exists(),
-            "no tree for non-ext images"
+            !out.join("boot").exists(),
+            "no tree for images without a file system"
+        );
+        let e = format!(
+            "{:#}",
+            extract_trees(&[broken.as_path()], &dir.join("b"), false).unwrap_err()
+        );
+        assert!(e.contains("not a readable erofs image"), "{e}");
+        assert!(
+            !dir.join("b/product").exists(),
+            "a failed tree leaves nothing"
         );
         // a second run refuses to merge into an existing tree, --force replaces it
         let e = format!("{:#}", extract_trees(&images, &out, false).unwrap_err());

@@ -23,12 +23,15 @@ None so far. Every source file in this repository was written for this project.
 | `simg2img`/`img2simg`, `erofs-utils` (`mkfs.erofs`, `fsck.erofs`), 7-Zip, `brotli` | various | Used only as external checks while developing; not linked or bundled |
 | `ext4-view` 1.0, `ext4` 0.9 (crates), `7z`, `mke2fs`/`debugfs` (e2fsprogs) | MIT/Apache-2.0, MIT, LGPL/GPL tools | Used only as independent checks while developing and for the oracle scripts; not linked or bundled. The ext2/3/4 reader is written from the Linux kernel's ext4 on-disk format documentation |
 | AOSP libavb and `avbtool` | Apache-2.0 | The vbmeta layout follows `avb_vbmeta_image.h`, `avb_descriptor.h` and `avb_footer.h`; `avbtool info_image` is downloaded at check time as the independent reference, never bundled |
+| `am-fs-erofs` and `am-fs-core` (crates) | MIT | Linked: the EROFS reader (every layout `mkfs.erofs` 1.9 writes; the writer half is used only in tests). Chosen after a spike against `fsck.erofs --extract` and corrupted images; `erofs-utils` (`mkfs.erofs`, `fsck.erofs`, GPL/Apache tools) are used only as independent checks, never linked or bundled |
 
 ## Rust dependencies (direct)
 
 | Crate | License |
 |---|---|
 | anyhow | MIT OR Apache-2.0 |
+| am-fs-core | MIT |
+| am-fs-erofs | MIT |
 | brotli | BSD-3-Clause AND MIT |
 | bzip2 | MIT OR Apache-2.0 |
 | flate2 | MIT OR Apache-2.0 |
