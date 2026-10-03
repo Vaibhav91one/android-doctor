@@ -200,7 +200,7 @@ impl<R: Read> Read for LegacyLz4<R> {
 }
 
 /// Wrap `r` in the decoder for `c`.
-fn decoder<'a, R: Read + 'a>(c: Compression, r: R) -> Result<Box<dyn Read + 'a>> {
+pub(crate) fn decoder<'a, R: Read + 'a>(c: Compression, r: R) -> Result<Box<dyn Read + 'a>> {
     Ok(match c {
         Compression::None => Box::new(r),
         Compression::Gzip => Box::new(flate2::read::MultiGzDecoder::new(r)),

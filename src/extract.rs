@@ -291,10 +291,34 @@ fn raw_images_in(names: &[String]) -> Vec<&str> {
     let mut raw: Vec<&str> = names
         .iter()
         .map(String::as_str)
-        .filter(|n| n.ends_with(".img"))
+        .filter(|n| n.ends_with(".img") || is_archive_name(n))
         .collect();
     raw.sort_unstable();
     raw
+}
+
+/// A file name that an update is likely to ship its partition images in: a tar, one wrapped
+/// in a compression we can undo, or a Samsung `.tar.md5`.
+fn is_archive_name(name: &str) -> bool {
+    name.ends_with(".tar")
+        || name.ends_with(".tar.gz")
+        || name.ends_with(".tgz")
+        || name.ends_with(".tar.xz")
+        || name.ends_with(".txz")
+        || name.ends_with(".tar.bz2")
+        || name.ends_with(".tbz2")
+        || name.ends_with(".tar.zst")
+        || name.ends_with(".tar.lz4")
+        || name.ends_with(".tar.md5")
+}
+
+/// True when the head of a file is a tar, a tar wrapped in a compression we can undo, or a
+/// Samsung `.tar.md5` (whose body starts with the tar).
+fn is_tar_family(head: &[u8]) -> bool {
+    matches!(
+        crate::archive::kind_of(head),
+        Some(crate::archive::Kind::Tar) | Some(crate::archive::Kind::Compressed(_))
+    ) || head.windows(4).any(|w| w == b"ustar")
 }
 
 /// Copy a file out of the OTA unchanged (`.part` + rename, like partition images).
@@ -320,6 +344,13 @@ fn is_safe_name(p: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
+/// The directory name an archive is unpacked into: `SUPER.tar.md5` and `SUPER.tar.gz` both
+/// become `SUPER`.
+fn archive_stem(name: &str) -> &str {
+    let base = name.strip_suffix(".md5").unwrap_or(name);
+    base.strip_suffix(".tar").unwrap_or(base)
+}
+
 /// Validate the OTA's names and apply `--only`: returns (partitions, raw images), both sorted.
 fn select<'a>(
     names: &'a [String],
@@ -335,7 +366,13 @@ fn select<'a>(
     let mut raw = raw_images_in(names);
     for name in &raw {
         let stem = name.strip_suffix(".img").unwrap_or(name);
-        if !is_safe_name(stem) {
+        if is_archive_name(name) {
+            // An archive is unpacked into a directory named after its stem, so that stem
+            // must be a safe single component.
+            if !is_safe_name(archive_stem(name)) {
+                bail!("unsafe archive name {name:?}");
+            }
+        } else if !is_safe_name(stem) {
             bail!("unsafe file name {name:?}");
         }
         if parts.contains(&stem) {
@@ -448,7 +485,8 @@ pub fn extract_all(input: &Path, out_dir: &Path, opts: &ExtractOptions) -> Resul
     let mut paths = results.into_iter().collect::<Result<Vec<_>>>()?;
     let mut src = Source::open(input)?;
     for name in raw {
-        // super.img holds dynamic partitions: split it into <partition>.img files.
+        // Only the head is read here, so a corrupt image still fails inside copy_raw with its
+        // own error context.
         let head = {
             let mut r = src.open_file(name)?;
             let mut v = vec![0u8; detect::SNIFF_LEN];
@@ -456,8 +494,18 @@ pub fn extract_all(input: &Path, out_dir: &Path, opts: &ExtractOptions) -> Resul
             v.truncate(n);
             v
         };
-        let is_super = head.len() >= 4100 && head[4096..4100] == *b"gDla";
-        if is_super {
+        if is_tar_family(&head) {
+            // A JioSTB-style update keeps its partition images in a tar (optionally
+            // .tar.md5 or wrapped in gzip/xz); unpack it instead of copying the blob.
+            let tmp = out_dir.join(format!("{name}.archive"));
+            copy_raw(&mut src, name, out_dir)?;
+            let _ = std::fs::rename(out_dir.join(name), &tmp);
+            let target = out_dir.join(archive_stem(name));
+            crate::archive::extract(&tmp, &target)?;
+            let _ = std::fs::remove_file(&tmp);
+            paths.push(target);
+        } else if head.len() >= 4100 && head[4096..4100] == *b"gDla" {
+            // super.img holds dynamic partitions: split it into <partition>.img files.
             let bytes = {
                 let mut r = src.open_file(name)?;
                 let mut v = Vec::new();
@@ -592,6 +640,46 @@ mod tests {
 
     fn fresh_dir(tag: &str) -> crate::testutil::Scratch {
         crate::testutil::Scratch::new(&format!("x-{tag}"))
+    }
+
+    /// An OTA directory holding a JioSTB-style `SUPER.tar.md5` unpacks into its partition
+    /// images instead of being copied as one blob.
+    #[test]
+    fn a_tar_md5_update_is_unpacked_rather_than_copied() {
+        let s = fresh_dir("tarmd5");
+        let mut tar_bytes = tar::Builder::new(Vec::new());
+        for (name, body) in [("boot.img", b"BOOT".as_slice()), ("system.img", b"SYS")] {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(body.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            tar_bytes.append_data(&mut h, name, body).unwrap();
+        }
+        let tar_bytes = tar_bytes.into_inner().unwrap();
+        let mut blob = tar_bytes.clone();
+        use md5::Digest;
+        let digest: String = md5::Md5::digest(&tar_bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        blob.extend_from_slice(format!("{digest}  - -\n").as_bytes());
+        let mut files = sample_files();
+        files.push(("SUPER.tar.md5", blob));
+        write_dir(&s, &files);
+        let out = fresh_dir("tarmd5-out");
+        extract_all(&s, &out, &ExtractOptions::default()).unwrap();
+        assert_eq!(
+            std::fs::read(out.join("SUPER/files/boot.img")).unwrap(),
+            b"BOOT"
+        );
+        assert_eq!(
+            std::fs::read(out.join("SUPER/files/system.img")).unwrap(),
+            b"SYS"
+        );
+        assert!(
+            !out.join("SUPER.tar.md5").exists(),
+            "the blob is not left behind"
+        );
     }
 
     /// Partition `a` is brotli-compressed (blocks 1,2), `b` is raw (block 9).
