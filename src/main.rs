@@ -51,6 +51,21 @@ enum Command {
         /// Also extract the files of every ext2/3/4 image into <out>/files/<image>/ (with manifests)
         #[arg(long)]
         files: bool,
+        /// Do not fail when some inputs are skipped; report and exit 0
+        #[arg(long)]
+        allow_partial: bool,
+        /// Fail on any file that cannot be classified at all
+        #[arg(long)]
+        strict: bool,
+        /// Suppress progress bars and summary output
+        #[arg(short = 'q', long)]
+        quiet: bool,
+        /// Print debug traces to stderr
+        #[arg(short, long)]
+        verbose: bool,
+        /// Never emit colour
+        #[arg(long)]
+        no_color: bool,
     },
     /// Print build info from an OTA without extracting
     Info {
@@ -248,7 +263,7 @@ fn print_out(text: &str) -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
-    match Cli::parse().command {
+    let result = match Cli::parse().command {
         Command::Extract {
             input,
             output,
@@ -256,12 +271,22 @@ fn main() -> anyhow::Result<()> {
             only,
             list,
             files,
+            allow_partial,
+            strict,
+            quiet,
+            verbose,
+            no_color,
         } => {
             let opts = extract::ExtractOptions {
                 force,
                 only: (!only.is_empty()).then_some(only),
                 list,
                 files,
+                allow_partial,
+                strict,
+                quiet,
+                verbose,
+                no_color,
             };
             extract::run(&input, &output, &opts)
         }
@@ -317,6 +342,14 @@ fn main() -> anyhow::Result<()> {
             let parts = extract::partition_names(&input)?;
             let report = report::analyze(&meta, parts, report::today_days())?;
             print_out(&report::render(&report, json)?)
+        }
+    };
+    // Issue #77: unified error output - a one-line headline, then the cause chain.
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            eprintln!("error: {e}");
+            Err(e)
         }
     }
 }

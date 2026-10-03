@@ -1975,8 +1975,8 @@ mod tests {
         let out = scratch("t23-out");
         let done =
             crate::extract::extract_all_noted(&input, &out, &ExtractOptions::default()).unwrap();
-        assert_eq!(done.len(), 2);
-        assert!(done.iter().all(|(_, n)| n == "sha256 verified"));
+        assert_eq!(done.done.len(), 2);
+        assert!(done.done.iter().all(|(_, n)| n == "sha256 verified"));
         assert_eq!(
             crate::extract::list_images(&input, &ExtractOptions::default())
                 .unwrap()
