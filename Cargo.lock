@@ -35,6 +35,7 @@ dependencies = [
  "anyhow",
  "brotli",
  "clap",
+ "crc32fast",
  "indicatif",
  "serde_json",
  "zip",

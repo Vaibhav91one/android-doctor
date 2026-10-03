@@ -7,6 +7,7 @@ mod extract;
 mod info;
 mod report;
 mod sdat;
+mod sparse;
 mod transfer_list;
 
 #[derive(Parser)]
@@ -39,6 +40,17 @@ enum Command {
         /// Print all metadata as JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Turn Android sparse image(s) into a raw image
+    Unsparse {
+        /// Sparse file(s); several files that describe the same image are applied in the order given
+        #[arg(required = true)]
+        inputs: Vec<PathBuf>,
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Replace an existing output file instead of refusing
+        #[arg(long)]
+        force: bool,
     },
     /// Say what each file is, by its magic bytes (never by name)
     Identify {
@@ -122,6 +134,11 @@ fn main() -> anyhow::Result<()> {
             extract::run(&input, &output, &opts)
         }
         Command::Info { input, json } => print_out(&info::render(&info::read(&input)?, json)?),
+        Command::Unsparse {
+            inputs,
+            output,
+            force,
+        } => sparse::run(&inputs, &output, force),
         Command::Identify { paths, json } => identify(&paths, json),
         Command::Report { input, json } => {
             let meta = info::read(&input)?;

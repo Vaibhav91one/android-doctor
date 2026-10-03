@@ -276,7 +276,7 @@ pub struct ExtractOptions {
 
 /// Create a fresh `.part` file. A stale one (or a planted symlink) is removed first and the new
 /// file is created exclusively, so a write never follows a link to somewhere else.
-fn create_part(path: &Path) -> Result<File> {
+pub(crate) fn create_part(path: &Path) -> Result<File> {
     let _ = std::fs::remove_file(path);
     File::create_new(path).with_context(|| format!("creating {}", path.display()))
 }
@@ -459,7 +459,7 @@ pub fn run(input: &Path, out_dir: &Path, opts: &ExtractOptions) -> Result<()> {
 }
 
 /// One result line: path, size, and the filesystem when the image holds one we recognise.
-fn describe(path: &Path) -> Result<String> {
+pub(crate) fn describe(path: &Path) -> Result<String> {
     let size = std::fs::metadata(path)?.len();
     let mut line = format!("{}  {size} bytes", path.display());
     if let Some(fs) = detect::filesystem_of_file(path) {
