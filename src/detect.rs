@@ -156,7 +156,7 @@ pub fn sniff(head: &[u8]) -> Option<Identified> {
 
 /// Opening a FIFO blocks until someone writes to it, and a socket cannot be read as a file, so
 /// both are refused up front. Regular files and block/character devices are fine.
-fn refuse_blocking_file(path: &Path) -> Result<()> {
+pub(crate) fn refuse_blocking_file(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::FileTypeExt;
