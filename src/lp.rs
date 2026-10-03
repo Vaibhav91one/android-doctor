@@ -528,7 +528,7 @@ mod tests {
     fn is_super_rejects_plain_bytes() {
         let d = Scratch::new("lp-nosuper");
         let p = d.join("not.img");
-        std::fs::write(&p, &[0u8; 8200]).unwrap();
+        std::fs::write(&p, [0u8; 8200]).unwrap();
         assert!(!is_super(&p).unwrap());
     }
 }

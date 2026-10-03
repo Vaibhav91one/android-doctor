@@ -456,7 +456,7 @@ pub fn extract_all(input: &Path, out_dir: &Path, opts: &ExtractOptions) -> Resul
             v.truncate(n);
             v
         };
-        let is_super = head.len() >= 4100 && head[4096..4100] == [b'g', b'D', b'l', b'a'];
+        let is_super = head.len() >= 4100 && head[4096..4100] == *b"gDla";
         if is_super {
             let bytes = {
                 let mut r = src.open_file(name)?;
