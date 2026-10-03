@@ -556,11 +556,8 @@ mod tests {
         packed
     }
 
-    fn fresh_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("android-doctor-{}-{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn fresh_dir(tag: &str) -> crate::testutil::Scratch {
+        crate::testutil::Scratch::new(&format!("x-{tag}"))
     }
 
     /// Partition `a` is brotli-compressed (blocks 1,2), `b` is raw (block 9).
@@ -657,7 +654,7 @@ mod tests {
             w.write_all(body).unwrap();
         }
         w.finish().unwrap();
-        for input in [&ota, &zip_path] {
+        for input in [ota.as_path(), zip_path.as_path()] {
             let _ = std::fs::remove_dir_all(&out);
             let paths = extract_all(input, &out, &ExtractOptions::default()).unwrap();
             let names: Vec<_> = paths
@@ -750,7 +747,7 @@ mod tests {
         std::fs::create_dir(ota.join("dirnamed.img")).unwrap();
         let zip_path = work.join("ota.zip");
         zip_of(&files, &zip_path);
-        for input in [&ota, &zip_path] {
+        for input in [ota.as_path(), zip_path.as_path()] {
             let _ = std::fs::remove_dir_all(&out);
             let paths = extract_all(input, &out, &ExtractOptions::default()).unwrap();
             let names: Vec<_> = paths
@@ -1009,7 +1006,7 @@ mod tests {
             ("b.img".to_string(), BLOCK as u64),
             ("boot.img".to_string(), 1234),
         ];
-        for input in [&ota, &zip_path] {
+        for input in [ota.as_path(), zip_path.as_path()] {
             assert_eq!(
                 list_images(input, &ExtractOptions::default()).unwrap(),
                 expect
@@ -1119,7 +1116,10 @@ mod tests {
         files
     }
 
-    fn extract_files(tag: &str, files: &[(String, Vec<u8>)]) -> (PathBuf, Result<Vec<PathBuf>>) {
+    fn extract_files(
+        tag: &str,
+        files: &[(String, Vec<u8>)],
+    ) -> (crate::testutil::Scratch, Result<Vec<PathBuf>>) {
         let (ota, out) = (
             fresh_dir(&format!("{tag}-in")),
             fresh_dir(&format!("{tag}-out")),

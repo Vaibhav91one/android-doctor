@@ -15,6 +15,8 @@ mod ramdisk;
 mod report;
 mod sdat;
 mod sparse;
+#[cfg(test)]
+mod testutil;
 mod transfer_list;
 mod tree;
 mod treeout;

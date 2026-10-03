@@ -1273,11 +1273,8 @@ mod tests {
         m
     }
 
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("ad-ext4-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::testutil::Scratch {
+        crate::testutil::Scratch::new(&format!("ext4-{tag}"))
     }
 
     fn sha(b: &[u8]) -> String {
@@ -2070,13 +2067,13 @@ mod tests {
     }
 
     fn tempfile_like() -> File {
-        let p = std::env::temp_dir().join(format!("ad-ext4-sink-{}", std::process::id()));
+        let g = crate::testutil::Scratch::new("ext4-sink");
         File::options()
             .read(true)
             .write(true)
             .create(true)
             .truncate(true)
-            .open(p)
+            .open(g.join("x"))
             .unwrap()
     }
 }

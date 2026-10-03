@@ -119,11 +119,10 @@ mod tests {
         let big = "k=v\n".repeat(MAX_METADATA_BYTES as usize / 4 + 1);
         let e = from_zip(zip_with(METADATA_PATH, &big)).unwrap_err();
         assert!(e.to_string().contains("larger than"), "{e}");
-        let dir = std::env::temp_dir().join(format!("android-doctor-big-{}", std::process::id()));
+        let dir = crate::testutil::Scratch::new("info-big");
         std::fs::create_dir_all(dir.join("META-INF/com/android")).unwrap();
         std::fs::write(dir.join(METADATA_PATH), &big).unwrap();
         let e = read(&dir).unwrap_err();
-        std::fs::remove_dir_all(&dir).unwrap();
         assert!(e.to_string().contains("larger than"), "{e}");
     }
 
@@ -135,14 +134,14 @@ mod tests {
 
     #[test]
     fn reads_metadata_from_a_directory_and_rejects_empty_or_missing() {
-        let dir = std::env::temp_dir().join(format!("android-doctor-info-{}", std::process::id()));
+        let dir = crate::testutil::Scratch::new("info-dir");
         let meta_dir = dir.join("META-INF/com/android");
         std::fs::create_dir_all(&meta_dir).unwrap();
         std::fs::write(meta_dir.join("metadata"), SAMPLE).unwrap();
         assert_eq!(read(&dir).unwrap()["ota-type"], "BLOCK");
         std::fs::write(meta_dir.join("metadata"), "no pairs here\n").unwrap();
         assert!(read(&dir).unwrap_err().to_string().contains("no key=value"));
-        std::fs::remove_dir_all(&dir).unwrap();
-        assert!(read(&dir).is_err());
+        std::fs::remove_dir_all(&meta_dir).unwrap();
+        assert!(read(&dir).is_err(), "a dir without metadata still fails");
     }
 }

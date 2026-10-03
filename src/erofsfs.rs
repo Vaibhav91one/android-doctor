@@ -442,11 +442,8 @@ mod tests {
         Fs::open(&p)
     }
 
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("ad-erofs-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::testutil::Scratch {
+        crate::testutil::Scratch::new(&format!("erofs-{tag}"))
     }
 
     fn cat_bytes(fs: &Fs, path: &str) -> Vec<u8> {
@@ -667,7 +664,8 @@ mod tests {
     fn size_limits_are_enforced() {
         let fs = from_bytes(image()).unwrap();
         let (_, inode) = fs.lookup("d/b").unwrap();
-        let mut f = std::fs::File::create(scratch("limit").join("x")).unwrap();
+        let g = scratch("limit");
+        let mut f = std::fs::File::create(g.join("x")).unwrap();
         let mut budget = 10_000;
         fs.copy_data(&inode, &mut f, &mut budget).unwrap();
         assert_eq!(budget, 1000);
