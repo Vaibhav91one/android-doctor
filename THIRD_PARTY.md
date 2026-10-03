@@ -21,6 +21,7 @@ None so far. Every source file in this repository was written for this project.
 | AOSP `unpack_bootimg.py` and `mkbootimg.py` | Apache-2.0 | Independent checks for boot image support, downloaded when the checks run and never bundled |
 | `bsdtar` (libarchive) and the standard `gzip`, `bzip2`, `xz`, `zstd`, `lz4` tools | various | Independent checks for ramdisk extraction while developing; not linked or bundled. The cpio newc layout follows the Linux kernel's initramfs buffer-format documentation |
 | `simg2img`/`img2simg`, `erofs-utils` (`mkfs.erofs`, `fsck.erofs`), 7-Zip, `brotli` | various | Used only as external checks while developing; not linked or bundled |
+| `ext4-view` 1.0, `ext4` 0.9 (crates), `7z`, `mke2fs`/`debugfs` (e2fsprogs) | MIT/Apache-2.0, MIT, LGPL/GPL tools | Used only as independent checks while developing and for the oracle scripts; not linked or bundled. The ext2/3/4 reader is written from the Linux kernel's ext4 on-disk format documentation |
 
 ## Rust dependencies (direct)
 
