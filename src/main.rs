@@ -10,6 +10,7 @@ mod erofsfs;
 mod ext4fs;
 mod extract;
 mod info;
+mod otameta;
 mod payload;
 mod ramdisk;
 mod report;
@@ -54,6 +55,9 @@ enum Command {
         /// Print all metadata as JSON
         #[arg(long)]
         json: bool,
+        /// Also summarise the updater-script and read the signing certificate
+        #[arg(long)]
+        details: bool,
     },
     /// Show a boot or vendor_boot image's header, and with -o write its kernel, ramdisk, dtb, ...
     Unpack {
@@ -258,7 +262,11 @@ fn main() -> anyhow::Result<()> {
             };
             extract::run(&input, &output, &opts)
         }
-        Command::Info { input, json } => print_out(&info::render(&info::read(&input)?, json)?),
+        Command::Info {
+            input,
+            json,
+            details,
+        } => info_command(&input, json, details),
         Command::Unpack {
             input,
             output,
@@ -423,6 +431,27 @@ fn audit_command(images: &[PathBuf], json: bool) -> anyhow::Result<()> {
         audit::to_text(&audits)
     };
     print_out(&text)
+}
+
+fn info_command(input: &std::path::Path, json: bool, details: bool) -> anyhow::Result<()> {
+    let meta = info::read(input)?;
+    if !details {
+        return print_out(&info::render(&meta, json)?);
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    let d = otameta::read_details(input)?;
+    if json {
+        let mut v = d.to_json(now);
+        v["metadata"] = serde_json::to_value(&meta)?;
+        return print_out(&serde_json::to_string_pretty(&v)?);
+    }
+    print_out(&format!(
+        "{}\n\n{}",
+        info::render(&meta, false)?,
+        d.to_text(now)
+    ))
 }
 
 #[cfg(test)]
