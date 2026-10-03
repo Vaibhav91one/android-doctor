@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use std::io::Write;
 use std::path::PathBuf;
 
+mod avb;
 mod bootimg;
 mod detect;
 mod ext4fs;
@@ -58,6 +59,16 @@ enum Command {
         /// Replace existing files instead of refusing
         #[arg(long)]
         force: bool,
+    },
+    /// Show an AVB vbmeta image (or a partition with an AVB footer): header, key, descriptors, hashes
+    Vbmeta {
+        image: PathBuf,
+        /// Also hash each hashed partition found as <DIR>/<partition>.img and compare
+        #[arg(long)]
+        images: Option<PathBuf>,
+        /// Print JSON instead of text
+        #[arg(long)]
+        json: bool,
     },
     /// List a boot image's ramdisk (or a ramdisk file), report its ADB properties, and with -o extract it
     Ramdisk {
@@ -240,6 +251,11 @@ fn main() -> anyhow::Result<()> {
             json,
             list,
         } => ramdisk_command(&input, output.as_deref(), json, list),
+        Command::Vbmeta {
+            image,
+            images,
+            json,
+        } => vbmeta_command(&image, images.as_deref(), json),
         Command::Files {
             image,
             output,
@@ -302,6 +318,29 @@ fn files_command(
             .join("\n")
     };
     print_out(&text)
+}
+
+fn vbmeta_command(
+    image: &std::path::Path,
+    images: Option<&std::path::Path>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let meta = avb::read_input(image)?;
+    let checks = match images {
+        Some(dir) => avb::verify_images(&meta, dir)?,
+        None => Vec::new(),
+    };
+    let text = if json {
+        serde_json::to_string_pretty(&meta.to_json(&checks))?
+    } else {
+        meta.to_text(&checks)
+    };
+    print_out(&text)?;
+    anyhow::ensure!(
+        !meta.any_failure(&checks),
+        "the digest or a partition hash does not match"
+    );
+    Ok(())
 }
 
 #[cfg(test)]
