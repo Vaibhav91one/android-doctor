@@ -120,12 +120,18 @@ pub(crate) enum Tree {
 
 impl Tree {
     pub(crate) fn open(path: &Path) -> Result<Tree> {
-        Ok(match crate::detect::filesystem_of_file(path) {
-            Some(crate::detect::Filesystem::Erofs) => {
-                Tree::Erofs(Box::new(crate::erofsfs::Fs::open(path)?))
+        let fs = crate::detect::filesystem_of_file(path);
+        match fs {
+            Some(crate::detect::Filesystem::F2fs) => {
+                anyhow::bail!(
+                    "f2fs is not supported: the Linux kernel f2fs driver is GPL-licensed and no permissive Rust reader exists"
+                );
             }
-            _ => Tree::Ext(crate::ext4fs::Fs::open(path)?),
-        })
+            Some(crate::detect::Filesystem::Erofs) => {
+                Ok(Tree::Erofs(Box::new(crate::erofsfs::Fs::open(path)?)))
+            }
+            _ => Ok(Tree::Ext(crate::ext4fs::Fs::open(path)?)),
+        }
     }
 
     pub(crate) fn extract(&self, out: &Path, collisions: Option<Collisions>) -> Result<Vec<Entry>> {

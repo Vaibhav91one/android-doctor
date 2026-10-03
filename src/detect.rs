@@ -6,11 +6,17 @@ use std::io::Read;
 use std::path::Path;
 
 /// Bytes needed from the start of an image to recognise the supported filesystems
-/// (the ext superblock feature flags end at offset 1128).
+/// (the F2FS magic is at 0x170, the ext superblock feature flags end at offset 1128).
 pub const HEAD_LEN: usize = 1128;
 
 const EXT_MAGIC: u16 = 0xEF53;
 const EROFS_MAGIC: u32 = 0xE0F5_E1E2;
+// F2FS superblock magic at offset 0x170 (see the kernel's f2fs_fs.h). Stored little-endian
+// on disk, so the bytes are 0x11 0x20 0xF5 0xF2. F2FS itself is not implemented here (the kernel
+// driver is GPL and no permissive reader exists), but the magic is recognised so callers can give
+// a clear "not supported" error instead of "unknown format".
+const F2FS_MAGIC: u32 = 0xF2F5_2011;
+const F2FS_MAGIC_OFFSET: usize = 0x170;
 /// `s_feature_compat`: has_journal.
 const COMPAT_HAS_JOURNAL: u32 = 0x4;
 /// `s_feature_incompat` bits that only ext4 knows: extents, 64bit, mmp, flex_bg, ea_inode,
@@ -27,6 +33,8 @@ pub enum Filesystem {
     Ext3,
     Ext4,
     Erofs,
+    /// F2FS: recognised by magic but not readable (kernel driver is GPL, no permissive reader).
+    F2fs,
 }
 
 impl fmt::Display for Filesystem {
@@ -36,6 +44,7 @@ impl fmt::Display for Filesystem {
             Self::Ext3 => "ext3",
             Self::Ext4 => "ext4",
             Self::Erofs => "erofs",
+            Self::F2fs => "f2fs",
         })
     }
 }
@@ -51,6 +60,9 @@ fn le32(b: &[u8], at: usize) -> u32 {
 /// Recognise a filesystem from the first `HEAD_LEN` bytes of an image. Same rule as e2fsprogs'
 /// blkid: any ext4-only feature means ext4, else a journal means ext3, else ext2.
 pub fn filesystem(head: &[u8]) -> Option<Filesystem> {
+    if head.len() >= F2FS_MAGIC_OFFSET + 4 && le32(head, F2FS_MAGIC_OFFSET) == F2FS_MAGIC {
+        return Some(Filesystem::F2fs);
+    }
     if head.len() >= 1024 + 4 && le32(head, 1024) == EROFS_MAGIC {
         return Some(Filesystem::Erofs);
     }
@@ -157,6 +169,7 @@ pub fn sniff(head: &[u8]) -> Option<Identified> {
             Filesystem::Ext3 => "ext3",
             Filesystem::Ext4 => "ext4",
             Filesystem::Erofs => "erofs",
+            Filesystem::F2fs => "f2fs",
         };
         return found(id, &format!("{fs} filesystem"));
     }
@@ -384,6 +397,44 @@ mod tests {
     }
 
     #[test]
+    fn f2fs_is_recognised_by_its_magic_at_0x170() {
+        let mut b = vec![0u8; HEAD_LEN];
+        b[F2FS_MAGIC_OFFSET..F2FS_MAGIC_OFFSET + 4].copy_from_slice(&F2FS_MAGIC.to_le_bytes());
+        assert_eq!(filesystem(&b), Some(Filesystem::F2fs));
+        assert_eq!(
+            filesystem(&b[..F2FS_MAGIC_OFFSET + 4]),
+            Some(Filesystem::F2fs),
+            "needs only the magic"
+        );
+        assert_eq!(
+            &b[F2FS_MAGIC_OFFSET..F2FS_MAGIC_OFFSET + 4],
+            [0x11, 0x20, 0xF5, 0xF2],
+            "byte order as seen in a real image"
+        );
+    }
+
+    #[test]
+    fn f2fs_needs_the_full_four_bytes_at_the_right_offset() {
+        // one byte short of the magic: not enough
+        assert_eq!(filesystem(&vec![0u8; F2FS_MAGIC_OFFSET + 3]), None);
+        let mut near = vec![0u8; HEAD_LEN];
+        near[F2FS_MAGIC_OFFSET..F2FS_MAGIC_OFFSET + 3]
+            .copy_from_slice(&F2FS_MAGIC.to_le_bytes()[..3]);
+        assert_eq!(filesystem(&near), None, "three bytes is not enough");
+        // magic at the wrong offset (e.g. where erofs expects it) does not match
+        let mut wrong = vec![0u8; HEAD_LEN];
+        wrong[1024..1028].copy_from_slice(&F2FS_MAGIC.to_le_bytes());
+        assert_eq!(filesystem(&wrong), None);
+    }
+
+    #[test]
+    fn f2fs_sniffs_to_the_f2fs_id() {
+        let mut e = vec![0u8; SNIFF_LEN];
+        e[F2FS_MAGIC_OFFSET..F2FS_MAGIC_OFFSET + 4].copy_from_slice(&F2FS_MAGIC.to_le_bytes());
+        assert_eq!(id_of(&e), "f2fs");
+    }
+
+    #[test]
     fn anything_else_is_not_recognised() {
         assert_eq!(filesystem(&[]), None);
         assert_eq!(filesystem(&vec![0u8; HEAD_LEN]), None);
@@ -413,6 +464,16 @@ mod tests {
         );
         assert_eq!(filesystem_of_file(&dir.join("tiny.img")), None);
         assert_eq!(filesystem_of_file(&dir.join("missing.img")), None);
+        // a synthetic f2fs image is recognised by magic on disk
+        let mut f2fs = vec![0u8; HEAD_LEN];
+        f2fs[F2FS_MAGIC_OFFSET..F2FS_MAGIC_OFFSET + 4].copy_from_slice(&F2FS_MAGIC.to_le_bytes());
+        std::fs::write(dir.join("f2fs.img"), &f2fs).unwrap();
+        assert_eq!(
+            filesystem_of_file(&dir.join("f2fs.img")),
+            Some(Filesystem::F2fs)
+        );
+        // identify_path returns the f2fs id
+        assert_eq!(identify_path(&dir.join("f2fs.img")).unwrap().id, "f2fs");
     }
 
     fn head_with(at: usize, magic: &[u8]) -> Vec<u8> {
@@ -445,6 +506,7 @@ mod tests {
             (0, &[0x04, 0x22, 0x4D, 0x18], "lz4"),
             (0, &[0x28, 0xB5, 0x2F, 0xFD], "zstd"),
             (257, b"ustar", "tar"),
+            (F2FS_MAGIC_OFFSET, &[0x11, 0x20, 0xF5, 0xF2], "f2fs"),
             (4096, b"gDla", "lp-super"),
         ];
         for (at, magic, id) in table {
@@ -502,6 +564,9 @@ mod tests {
         let mut e = vec![0u8; SNIFF_LEN];
         e[1024..1028].copy_from_slice(&EROFS_MAGIC.to_le_bytes());
         assert_eq!(id_of(&e), "erofs");
+        let mut f = vec![0u8; SNIFF_LEN];
+        f[F2FS_MAGIC_OFFSET..F2FS_MAGIC_OFFSET + 4].copy_from_slice(&F2FS_MAGIC.to_le_bytes());
+        assert_eq!(id_of(&f), "f2fs");
     }
 
     #[test]

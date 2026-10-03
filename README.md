@@ -69,7 +69,7 @@ Status: **verified** = checked against an independent reference tool on real fir
 | Vendor containers (`.ozip`, `.pac`, Qualcomm `rawprogram`, Amlogic, ...) | planned | Without real samples these will be marked unverified |
 | Incremental OTAs (`*.patch.dat`, delta payloads) | no | Fails with a clear error |
 | dm-verity hash tree and FEC regeneration for A/B partitions | planned | Needed to check the whole-image hash of partitions that declare those extents |
-| f2fs | no | No permissive reader exists |
+| f2fs | detected | Detected by magic, but not readable: the Linux kernel f2fs driver is GPL-licensed and no permissive Rust reader exists; commands that read a filesystem (`files`, `ls`, `cat`, `audit`, `extract --files`) fail with "f2fs is not supported" |
 | `.ofp` and other key-protected containers | no | |
 
 Roadmap and issue list: see the milestones on GitHub.

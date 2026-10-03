@@ -1208,4 +1208,15 @@ service plain /system/bin/plain
         );
         assert!(audit_image(&d.join("missing")).is_err());
     }
+
+    #[test]
+    fn f2fs_is_detected_and_refused_with_a_clear_message() {
+        let d = crate::testutil::Scratch::new("audit-f2fs");
+        let mut f2fs = vec![0u8; 1128];
+        f2fs[0x170..0x170 + 4].copy_from_slice(&0xF2F52011u32.to_le_bytes());
+        std::fs::write(d.join("system.img"), &f2fs).unwrap();
+        let e = audit_image(&d.join("system.img")).unwrap_err();
+        let msg = format!("{e:#}");
+        assert!(msg.contains("f2fs is not supported"), "{msg}");
+    }
 }
