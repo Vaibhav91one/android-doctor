@@ -1196,7 +1196,11 @@ service plain /system/bin/plain
         );
         let empty = crate::testutil::Scratch::new("audit-empty");
         assert!(
-            format!("{:#}", image_list(&[empty.to_path_buf()]).unwrap_err()).contains("no images")
+            format!(
+                "{:#}",
+                image_list(std::slice::from_ref(&*empty)).unwrap_err()
+            )
+            .contains("no images")
         );
         assert!(
             image_list(&[d.join("missing")]).is_ok(),
