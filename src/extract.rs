@@ -275,6 +275,8 @@ pub struct ExtractOptions {
     pub only: Option<Vec<String>>,
     /// Print what would be extracted, with sizes, and write nothing.
     pub list: bool,
+    /// Also extract the file tree of every ext2/3/4 image into `<out>/files/<image>/`.
+    pub files: bool,
 }
 
 /// Create a fresh `.part` file. A stale one (or a planted symlink) is removed first and the new
@@ -456,8 +458,9 @@ pub fn run(input: &Path, out_dir: &Path, opts: &ExtractOptions) -> Result<()> {
         }
         return Ok(());
     }
-    for (path, note) in extract_all_noted(input, out_dir, opts)? {
-        let line = describe(&path)?;
+    let done = extract_all_noted(input, out_dir, opts)?;
+    for (path, note) in &done {
+        let line = describe(path)?;
         println!(
             "{}",
             if note.is_empty() {
@@ -465,6 +468,43 @@ pub fn run(input: &Path, out_dir: &Path, opts: &ExtractOptions) -> Result<()> {
             } else {
                 format!("{line}  {note}")
             }
+        );
+    }
+    if opts.files {
+        let images: Vec<&Path> = done.iter().map(|(p, _)| p.as_path()).collect();
+        extract_trees(&images, &out_dir.join("files"), opts.force)?;
+    }
+    Ok(())
+}
+
+/// `--files`: write the file tree and manifest of every ext2/3/4 image under `<dir>/<image name>/`.
+pub(crate) fn extract_trees(images: &[&Path], dir: &Path, force: bool) -> Result<()> {
+    for image in images {
+        let Some(fs) = detect::filesystem_of_file(image) else {
+            continue;
+        };
+        let name = image
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("image");
+        if matches!(fs, detect::Filesystem::Erofs) {
+            println!("files: {name}  erofs trees are not supported yet");
+            continue;
+        }
+        let target = dir.join(name);
+        if force && target.symlink_metadata().is_ok_and(|m| m.is_dir()) {
+            std::fs::remove_dir_all(&target)?;
+        }
+        let entries = crate::ext4fs::Fs::open(image)?
+            .extract(&target, None)
+            .with_context(|| format!("extracting the files of {}", image.display()))?;
+        let count = |k| entries.iter().filter(|e| e.kind == k).count();
+        println!(
+            "files: {name}  {} entries ({} files, {} symlinks) -> {}",
+            entries.len(),
+            count(crate::ext4fs::Kind::File),
+            count(crate::ext4fs::Kind::Symlink),
+            target.display()
         );
     }
     Ok(())
