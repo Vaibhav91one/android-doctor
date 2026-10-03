@@ -1,5 +1,5 @@
 //! Extract partition images from a block OTA (a zip or an already unpacked directory).
-use crate::{detect, sdat, transfer_list};
+use crate::{detect, payload, sdat, transfer_list};
 use anyhow::{Context, Result, anyhow, bail};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::fs::File;
@@ -256,6 +256,9 @@ fn partitions_in(names: &[String]) -> Vec<&str> {
 
 /// Partition names found in an OTA zip or directory (empty for a non-block OTA).
 pub fn partition_names(input: &Path) -> Result<Vec<String>> {
+    if let Some(names) = payload::partition_names(input)? {
+        return Ok(names);
+    }
     let names = Source::open(input)?.names()?;
     Ok(partitions_in(&names)
         .into_iter()
@@ -322,9 +325,7 @@ fn select<'a>(
 ) -> Result<(Vec<&'a str>, Vec<&'a str>)> {
     let mut parts = partitions_in(names);
     if parts.is_empty() {
-        bail!(
-            "no *{LIST_SUFFIX} files found: not a block OTA (payload.bin OTAs are not supported)"
-        );
+        bail!("no *{LIST_SUFFIX} files found and no payload.bin: not a block OTA or an A/B OTA");
     }
     if let Some(bad) = parts.iter().find(|p| !is_safe_name(p)) {
         bail!("unsafe partition name {bad:?}");
@@ -358,6 +359,9 @@ fn select<'a>(
 /// What `extract` would write, with sizes in bytes (partition images first, then raw images);
 /// reads only the transfer lists, writes nothing.
 pub fn list_images(input: &Path, opts: &ExtractOptions) -> Result<Vec<(String, u64)>> {
+    if let Some(images) = payload::list(input, opts)? {
+        return Ok(images);
+    }
     let mut src = Source::open(input)?;
     let names = src.names()?;
     let (parts, raw) = select(&names, &opts.only)?;
@@ -452,10 +456,34 @@ pub fn run(input: &Path, out_dir: &Path, opts: &ExtractOptions) -> Result<()> {
         }
         return Ok(());
     }
-    for path in extract_all(input, out_dir, opts)? {
-        println!("{}", describe(&path)?);
+    for (path, note) in extract_all_noted(input, out_dir, opts)? {
+        let line = describe(&path)?;
+        println!(
+            "{}",
+            if note.is_empty() {
+                line
+            } else {
+                format!("{line}  {note}")
+            }
+        );
     }
     Ok(())
+}
+
+/// `extract_all` plus a short note per image on how far it was verified (A/B payloads check each
+/// image's SHA-256; block OTAs carry no hashes, so their notes are empty).
+pub fn extract_all_noted(
+    input: &Path,
+    out_dir: &Path,
+    opts: &ExtractOptions,
+) -> Result<Vec<(PathBuf, String)>> {
+    if let Some(done) = payload::extract(input, out_dir, opts)? {
+        return Ok(done);
+    }
+    Ok(extract_all(input, out_dir, opts)?
+        .into_iter()
+        .map(|p| (p, String::new()))
+        .collect())
 }
 
 /// One result line: path, size, and the filesystem when the image holds one we recognise.

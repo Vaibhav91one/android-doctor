@@ -3,12 +3,25 @@
 Command-line tool to extract and audit Android firmware packages.
 
 ```
-android-doctor extract <ota.zip|dir> [-o out] [--only a,b] [--list] [--force]
-android-doctor info    <ota.zip|dir> [--json]   # build metadata (META-INF/com/android/metadata)
-android-doctor report  <ota.zip|dir> [--json]   # staleness verdict from the security patch level
+android-doctor extract  <ota.zip|dir|payload.bin> [-o out] [--only a,b] [--list] [--force]
+android-doctor unsparse <file>... -o out.img [--force]   # Android sparse image(s) to a raw image
+android-doctor identify <path>... [--json]               # what is this file, by magic bytes
+android-doctor info     <ota.zip|dir> [--json]           # build metadata (META-INF/com/android/metadata)
+android-doctor report   <ota.zip|dir> [--json]           # staleness verdict from the security patch level
 ```
 
 ## What `extract` does today
+
+`extract` recognises the kind of OTA by looking inside it.
+
+**Full A/B OTAs** (a zip with a stored `payload.bin`, a directory holding `payload.bin`, or a bare `payload.bin`):
+
+- Decodes the `REPLACE`, `REPLACE_BZ`, `REPLACE_XZ` and `ZSTD` operations (and `ZERO`/`DISCARD`) in parallel across all CPU cores, straight from the zip (no unzip step), with a progress bar per partition.
+- Checks the SHA-256 of every operation's data and of every finished image against the manifest, and says so on the result line (`sha256 verified`).
+- All-or-nothing: if anything fails, no image is published and every `.part` file is removed.
+- Incremental OTAs (operations that need the previous build) are refused up front with a message naming the operation types.
+- Limits that stop a hostile file from burning time or disk: manifest 64 MiB, 1024 partitions, 64 GiB per partition.
+- Not done: partitions that declare dm-verity/FEC extents get their data extracted, but the whole-image hash is reported as "not checked", because the device adds those bytes at install time. A `payload.bin` stored compressed inside the zip must be unzipped first.
 
 Full **block OTAs** (`<part>.new.dat.br` or `.new.dat` plus `<part>.transfer.list`, as a zip or an unpacked directory):
 
@@ -26,13 +39,15 @@ Status: **verified** = checked against an independent reference tool on real fir
 
 | Format | Status | Notes |
 |---|---|---|
+| A/B `payload.bin`, full OTA (`REPLACE`, `REPLACE_BZ`, `REPLACE_XZ`) | verified | A real 18-partition OTA: every image equals `payload-dumper-go`'s and the hash decoded from the manifest by `protoc`; about 2.5x faster than `payload-dumper-go` on that file |
+| A/B `payload.bin`: `ZERO`, `DISCARD`, `ZSTD` operations | synthetic | The real sample has none; checked against an independent payload builder and against `payload-dumper-go` on those payloads |
 | Block OTA, brotli (`*.new.dat.br`) | verified | Two real OTAs, sha256 equal to `brotli -d` + sdat2img |
 | Block OTA, raw (`*.new.dat`) and numbered pieces | verified | Real partitions split into pieces rebuild to the reference hashes |
 | Raw images inside an OTA (boot, recovery, ...) | verified | Byte-identical to the zip entries |
 | Filesystem detection: ext2/3/4 | verified | Four real images, cross-checked with an independent superblock parse |
 | Filesystem detection: erofs | verified | Real `mkfs.erofs` images (plain and lz4hc) |
-| Android sparse images | planned | |
-| A/B `payload.bin` (full OTA) | planned | |
+| Android sparse images (`unsparse`), single and split files | verified | Real partitions converted by `img2simg` (block sizes 1024 to 65536) and split by `simg2simg`: sha256 equal to the original and to `simg2img` |
+| File identification (`identify`) | verified | 27 real files, from OTA zips to boot images to xz/zstd/lz4 output |
 | `super.img` (dynamic partitions) | planned | |
 | Reading files out of ext4 / erofs images | planned | Today use `7z x system.img` |
 | Boot / recovery / vendor_boot images | planned | |
@@ -40,6 +55,7 @@ Status: **verified** = checked against an independent reference tool on real fir
 | AVB / vbmeta inspection | planned | |
 | Vendor containers (`.ozip`, `.pac`, Qualcomm `rawprogram`, Amlogic, ...) | planned | Without real samples these will be marked unverified |
 | Incremental OTAs (`*.patch.dat`, delta payloads) | no | Fails with a clear error |
+| dm-verity hash tree and FEC regeneration for A/B partitions | planned | Needed to check the whole-image hash of partitions that declare those extents |
 | f2fs | no | No permissive reader exists |
 | `.ofp` and other key-protected containers | no | |
 
