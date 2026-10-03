@@ -5,6 +5,7 @@ use std::path::PathBuf;
 mod detect;
 mod extract;
 mod info;
+mod payload;
 mod report;
 mod sdat;
 mod sparse;
