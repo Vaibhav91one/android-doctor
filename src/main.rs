@@ -40,6 +40,14 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Say what each file is, by its magic bytes (never by name)
+    Identify {
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        /// Print the result as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Staleness verdict from the OTA's build metadata
     Report {
         input: PathBuf,
@@ -47,6 +55,47 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+}
+
+fn identify(paths: &[PathBuf], json: bool) -> anyhow::Result<()> {
+    let mut failed = 0;
+    let mut rows = Vec::new();
+    for path in paths {
+        match detect::identify_path(path) {
+            Ok(i) => rows.push(serde_json::json!({
+                "path": path.display().to_string(),
+                "id": i.id,
+                "description": i.description,
+            })),
+            Err(e) => {
+                failed += 1;
+                rows.push(serde_json::json!({
+                    "path": path.display().to_string(),
+                    "error": format!("{e:#}"),
+                }));
+            }
+        }
+    }
+    let text = if json {
+        serde_json::to_string_pretty(&rows)?
+    } else {
+        rows.iter()
+            .map(|r| match r["error"].as_str() {
+                Some(e) => format!("{}: error: {e}", r["path"].as_str().unwrap_or("")),
+                None => format!(
+                    "{}: {}",
+                    r["path"].as_str().unwrap_or(""),
+                    r["description"].as_str().unwrap_or("")
+                ),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    print_out(&text)?;
+    if failed > 0 {
+        anyhow::bail!("{failed} of {} paths could not be read", paths.len());
+    }
+    Ok(())
 }
 
 fn print_out(text: &str) -> anyhow::Result<()> {
@@ -73,6 +122,7 @@ fn main() -> anyhow::Result<()> {
             extract::run(&input, &output, &opts)
         }
         Command::Info { input, json } => print_out(&info::render(&info::read(&input)?, json)?),
+        Command::Identify { paths, json } => identify(&paths, json),
         Command::Report { input, json } => {
             let meta = info::read(&input)?;
             let parts = extract::partition_names(&input)?;

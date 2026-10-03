@@ -1,4 +1,5 @@
-//! Recognise filesystems by their on-disk magic (more formats arrive with the identify command).
+//! Recognise firmware files and filesystems by their magic bytes (never by file name).
+use anyhow::{Context, Result};
 use std::fmt;
 use std::fs::File;
 use std::io::Read;
@@ -70,6 +71,165 @@ pub fn filesystem(head: &[u8]) -> Option<Filesystem> {
             Filesystem::Ext2
         },
     )
+}
+
+/// Bytes read from the start of a file to identify it (the LP geometry sits at offset 4096).
+pub const SNIFF_LEN: usize = 4100;
+
+const LP_GEOMETRY_MAGIC: [u8; 4] = *b"gDla"; // 0x616c4467, little-endian, at offset 4096
+
+/// What a file is, by magic bytes. `id` is stable (used in `--json`), `description` is for people.
+#[derive(Debug, PartialEq, Clone)]
+pub struct Identified {
+    pub id: &'static str,
+    pub description: String,
+}
+
+fn found(id: &'static str, description: &str) -> Option<Identified> {
+    Some(Identified {
+        id,
+        description: description.to_string(),
+    })
+}
+
+/// Identify a file from its first `SNIFF_LEN` bytes. Magic at offset 0 is checked first, then
+/// the formats whose magic sits deeper (tar at 257, filesystems at 1024, LP at 4096).
+/// Zip contents are not looked at here, see `identify_path`.
+pub fn sniff(head: &[u8]) -> Option<Identified> {
+    let at0 = |magic: &[u8]| head.starts_with(magic);
+    if at0(b"PK\x03\x04") || at0(b"PK\x05\x06") {
+        return found("zip", "zip archive");
+    }
+    if at0(b"CrAU") {
+        return found("payload-bin", "A/B update payload (CrAU)");
+    }
+    if at0(b"ANDROID!") {
+        return found("boot-image", "Android boot image");
+    }
+    if at0(b"VNDRBOOT") {
+        return found("vendor-boot", "Android vendor boot image");
+    }
+    if at0(b"AVB0") {
+        return found("avb-vbmeta", "AVB vbmeta image");
+    }
+    if at0(&[0x3A, 0xFF, 0x26, 0xED]) {
+        return found("android-sparse", "Android sparse image");
+    }
+    if at0(&[0xD7, 0xB7, 0xAB, 0x1E]) {
+        return found("dtbo", "Android dtbo table");
+    }
+    if at0(b"OPPOENCRYPT!") {
+        return found("ozip", "Oppo ozip (encrypted zip)");
+    }
+    if at0(&[0x1F, 0x8B, 0x08]) {
+        return found("gzip", "gzip compressed data");
+    }
+    if at0(&[0xFD, b'7', b'z', b'X', b'Z', 0x00]) {
+        return found("xz", "xz compressed data");
+    }
+    if at0(b"BZh") && head.get(3).is_some_and(|b| (b'1'..=b'9').contains(b)) {
+        return found("bzip2", "bzip2 compressed data");
+    }
+    if at0(&[0x04, 0x22, 0x4D, 0x18]) {
+        return found("lz4", "lz4 compressed data (frame)");
+    }
+    if at0(&[0x28, 0xB5, 0x2F, 0xFD]) {
+        return found("zstd", "zstd compressed data");
+    }
+    if head.len() >= 262 && &head[257..262] == b"ustar" {
+        return found("tar", "tar archive");
+    }
+    if let Some(fs) = filesystem(head) {
+        let id = match fs {
+            Filesystem::Ext2 => "ext2",
+            Filesystem::Ext3 => "ext3",
+            Filesystem::Ext4 => "ext4",
+            Filesystem::Erofs => "erofs",
+        };
+        return found(id, &format!("{fs} filesystem"));
+    }
+    if head.len() >= 4100 && head[4096..4100] == LP_GEOMETRY_MAGIC {
+        return found("lp-super", "Android super image (dynamic partitions)");
+    }
+    None
+}
+
+/// Opening a FIFO blocks until someone writes to it, and a socket cannot be read as a file, so
+/// both are refused up front. Regular files and block/character devices are fine.
+fn refuse_blocking_file(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        let kind = std::fs::metadata(path)
+            .with_context(|| format!("opening {}", path.display()))?
+            .file_type();
+        if kind.is_fifo() || kind.is_socket() {
+            anyhow::bail!("{} is a FIFO or socket, not a file", path.display());
+        }
+    }
+    let _ = path;
+    Ok(())
+}
+
+/// Identify a file or directory. A zip is opened to tell block OTAs (`*.transfer.list` at the
+/// top level) and A/B OTAs (`payload.bin`) from ordinary archives; a directory is a block OTA
+/// when it holds transfer lists.
+pub fn identify_path(path: &Path) -> Result<Identified> {
+    if path.is_dir() {
+        let has_lists = std::fs::read_dir(path)?
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().ends_with(".transfer.list"));
+        return Ok(if has_lists {
+            Identified {
+                id: "block-ota-dir",
+                description: "directory holding a block OTA".into(),
+            }
+        } else {
+            Identified {
+                id: "directory",
+                description: "directory".into(),
+            }
+        });
+    }
+    refuse_blocking_file(path)?;
+    let mut head = Vec::with_capacity(SNIFF_LEN);
+    File::open(path)
+        .with_context(|| format!("opening {}", path.display()))?
+        .take(SNIFF_LEN as u64)
+        .read_to_end(&mut head)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let identified = sniff(&head).unwrap_or(Identified {
+        id: "unknown",
+        description: "unknown format".into(),
+    });
+    if identified.id != "zip" {
+        return Ok(identified);
+    }
+    let names = File::open(path)
+        .map_err(anyhow::Error::from)
+        .and_then(|f| Ok(zip::ZipArchive::new(f)?))
+        .map(|z| z.file_names().map(String::from).collect::<Vec<_>>());
+    Ok(match names {
+        Ok(names) if names.iter().any(|n| n == "payload.bin") => Identified {
+            id: "ab-ota-zip",
+            description: "zip: A/B OTA (payload.bin)".into(),
+        },
+        Ok(names)
+            if names
+                .iter()
+                .any(|n| !n.contains('/') && n.ends_with(".transfer.list")) =>
+        {
+            Identified {
+                id: "block-ota-zip",
+                description: "zip: block OTA (*.transfer.list)".into(),
+            }
+        }
+        Ok(_) => identified,
+        Err(e) => Identified {
+            id: "zip",
+            description: format!("zip archive (entries unreadable: {e})"),
+        },
+    })
 }
 
 /// `filesystem()` for a file on disk; unreadable or short files are simply unrecognised.
@@ -242,5 +402,234 @@ mod tests {
         assert_eq!(filesystem_of_file(&dir.join("tiny.img")), None);
         assert_eq!(filesystem_of_file(&dir.join("missing.img")), None);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn head_with(at: usize, magic: &[u8]) -> Vec<u8> {
+        // a little longer than SNIFF_LEN so a magic can be probed just past the expected offset
+        let mut b = vec![0u8; SNIFF_LEN + 8];
+        b[at..at + magic.len()].copy_from_slice(magic);
+        b
+    }
+
+    fn id_of(head: &[u8]) -> &'static str {
+        sniff(head).map_or("none", |i| i.id)
+    }
+
+    #[test]
+    fn every_magic_maps_to_its_id() {
+        let table: &[(usize, &[u8], &str)] = &[
+            (0, b"PK\x03\x04", "zip"),
+            (0, b"PK\x05\x06", "zip"),
+            (0, b"CrAU", "payload-bin"),
+            (0, b"ANDROID!", "boot-image"),
+            (0, b"VNDRBOOT", "vendor-boot"),
+            (0, b"AVB0", "avb-vbmeta"),
+            (0, &[0x3A, 0xFF, 0x26, 0xED], "android-sparse"),
+            (0, &[0xD7, 0xB7, 0xAB, 0x1E], "dtbo"),
+            (0, b"OPPOENCRYPT!", "ozip"),
+            (0, &[0x1F, 0x8B, 0x08], "gzip"),
+            (0, &[0xFD, b'7', b'z', b'X', b'Z', 0x00], "xz"),
+            (0, b"BZh9", "bzip2"),
+            (0, b"BZh1", "bzip2"),
+            (0, &[0x04, 0x22, 0x4D, 0x18], "lz4"),
+            (0, &[0x28, 0xB5, 0x2F, 0xFD], "zstd"),
+            (257, b"ustar", "tar"),
+            (4096, b"gDla", "lp-super"),
+        ];
+        for (at, magic, id) in table {
+            assert_eq!(id_of(&head_with(*at, magic)), *id, "{id} at {at}");
+        }
+    }
+
+    #[test]
+    fn near_misses_are_not_recognised() {
+        for (at, magic) in [
+            (0usize, &b"PK\x03\x05"[..]),
+            (0, b"CrAV"),
+            (0, b"ANDROID?"),
+            (0, b"BZh0"),
+            (0, b"BZhx"),
+            (0, &[0x1F, 0x8B, 0x07]),
+            (0, &[0xFD, b'7', b'z', b'X', b'Z', 0x01]),
+            (1, b"CrAU"),
+            (256, b"ustar"),
+            (258, b"ustar"),
+            (4095, b"gDla"),
+            (4097, b"gDla"),
+        ] {
+            assert_eq!(id_of(&head_with(at, magic)), "none", "{magic:?} at {at}");
+        }
+        assert!(sniff(&[]).is_none());
+        assert!(sniff(&vec![0u8; SNIFF_LEN]).is_none());
+    }
+
+    #[test]
+    fn filesystems_keep_their_specific_ids() {
+        assert_eq!(id_of(&ext(0x38, 0x242, 0x7b)), "ext4");
+        assert_eq!(id_of(&ext(0, 0, 0)), "ext2");
+        assert_eq!(id_of(&ext(COMPAT_HAS_JOURNAL, 0x2, 0x3)), "ext3");
+        let mut e = vec![0u8; SNIFF_LEN];
+        e[1024..1028].copy_from_slice(&EROFS_MAGIC.to_le_bytes());
+        assert_eq!(id_of(&e), "erofs");
+    }
+
+    #[test]
+    fn no_input_length_makes_sniff_panic() {
+        let mut full = head_with(4096, b"gDla");
+        full[257..262].copy_from_slice(b"ustar");
+        for n in 0..=SNIFF_LEN + 4 {
+            let _ = sniff(&full[..n.min(full.len())]);
+        }
+        assert_eq!(
+            id_of(&full[..4099]),
+            "tar",
+            "lp needs all 4100 bytes; tar needs 262"
+        );
+        assert_eq!(id_of(&full[..261]), "none");
+        assert_eq!(id_of(&head_with(4096, b"gDla")[..4099]), "none");
+        assert_eq!(id_of(&head_with(4096, b"gDla")[..SNIFF_LEN]), "lp-super");
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("android-doctor-id-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_zip(path: &Path, names: &[&str]) {
+        let mut w = zip::ZipWriter::new(File::create(path).unwrap());
+        for n in names {
+            w.start_file(*n, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            std::io::Write::write_all(&mut w, b"x").unwrap();
+        }
+        w.finish().unwrap();
+    }
+
+    #[test]
+    fn zips_are_told_apart_by_their_contents() {
+        let dir = scratch("zips");
+        let cases: &[(&str, &[&str], &str)] = &[
+            (
+                "block.zip",
+                &[
+                    "META-INF/com/android/metadata",
+                    "system.transfer.list",
+                    "system.new.dat.br",
+                ],
+                "block-ota-zip",
+            ),
+            (
+                "ab.zip",
+                &["payload.bin", "payload_properties.txt"],
+                "ab-ota-zip",
+            ),
+            (
+                "both.zip",
+                &["payload.bin", "system.transfer.list"],
+                "ab-ota-zip",
+            ),
+            ("plain.zip", &["readme.txt", "docs/x.pdf"], "zip"),
+            ("nested.zip", &["sub/system.transfer.list"], "zip"),
+            (
+                "lookalike.zip",
+                &["system.transfer.list.bak", "my_payload.bin"],
+                "zip",
+            ),
+        ];
+        for (file, names, id) in cases {
+            write_zip(&dir.join(file), names);
+            assert_eq!(identify_path(&dir.join(file)).unwrap().id, *id, "{file}");
+        }
+        // an empty zip has only the end-of-central-directory record
+        write_zip(&dir.join("empty.zip"), &[]);
+        assert_eq!(identify_path(&dir.join("empty.zip")).unwrap().id, "zip");
+    }
+
+    #[test]
+    fn a_damaged_zip_is_still_a_zip_with_a_note() {
+        let dir = scratch("badzip");
+        std::fs::write(dir.join("bad.zip"), b"PK\x03\x04 and then garbage").unwrap();
+        let i = identify_path(&dir.join("bad.zip")).unwrap();
+        assert_eq!(i.id, "zip");
+        assert!(i.description.contains("unreadable"), "{}", i.description);
+    }
+
+    #[test]
+    fn directories_and_files_on_disk() {
+        let dir = scratch("paths");
+        let ota = dir.join("ota");
+        std::fs::create_dir(&ota).unwrap();
+        assert_eq!(identify_path(&ota).unwrap().id, "directory");
+        std::fs::write(ota.join("system.transfer.list"), b"4\n").unwrap();
+        assert_eq!(identify_path(&ota).unwrap().id, "block-ota-dir");
+        std::fs::write(dir.join("boot.img"), head_with(0, b"ANDROID!")).unwrap();
+        assert_eq!(
+            identify_path(&dir.join("boot.img")).unwrap().id,
+            "boot-image"
+        );
+        std::fs::write(dir.join("random.bin"), b"hello").unwrap();
+        assert_eq!(
+            identify_path(&dir.join("random.bin")).unwrap().id,
+            "unknown"
+        );
+        std::fs::write(dir.join("empty"), b"").unwrap();
+        assert_eq!(identify_path(&dir.join("empty")).unwrap().id, "unknown");
+        let e = identify_path(&dir.join("missing")).unwrap_err();
+        assert!(e.to_string().contains("opening"), "{e}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_is_refused_at_once_instead_of_blocking() {
+        let dir = scratch("fifo");
+        let fifo = dir.join("pipe");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let path = fifo.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(identify_path(&path).map_err(|e| e.to_string()));
+        });
+        let res = rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("identify blocked on a FIFO");
+        assert!(res.unwrap_err().contains("FIFO or socket"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_unix_socket_is_refused_with_the_same_clear_message() {
+        let dir = scratch("sock");
+        let sock = dir.join("s");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let e = identify_path(&sock).unwrap_err();
+        assert!(e.to_string().contains("FIFO or socket"), "{e}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn character_devices_and_missing_paths_still_behave() {
+        // /dev/null reads as empty: unknown, not an error and not a hang
+        assert_eq!(identify_path(Path::new("/dev/null")).unwrap().id, "unknown");
+        let e = identify_path(Path::new("/definitely/not/here")).unwrap_err();
+        assert!(e.to_string().contains("opening"), "{e}");
+    }
+
+    #[test]
+    fn the_name_never_matters_only_the_bytes() {
+        let dir = scratch("names");
+        std::fs::write(dir.join("system.img"), head_with(0, &[0x1F, 0x8B, 0x08])).unwrap();
+        std::fs::write(dir.join("firmware.zip"), b"not a zip at all").unwrap();
+        assert_eq!(identify_path(&dir.join("system.img")).unwrap().id, "gzip");
+        assert_eq!(
+            identify_path(&dir.join("firmware.zip")).unwrap().id,
+            "unknown"
+        );
     }
 }
