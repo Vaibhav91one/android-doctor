@@ -357,8 +357,12 @@ fn select<'a>(
     only: &Option<Vec<String>>,
 ) -> Result<(Vec<&'a str>, Vec<&'a str>)> {
     let mut parts = partitions_in(names);
-    if parts.is_empty() {
-        bail!("no *{LIST_SUFFIX} files found and no payload.bin: not a block OTA or an A/B OTA");
+    // A JioSTB-style update directory holds nothing but a tar of its partition images.
+    let has_archive = names.iter().any(|n| is_archive_name(n));
+    if parts.is_empty() && !has_archive {
+        bail!(
+            "no *{LIST_SUFFIX} files found, no payload.bin and no tar archive: not a block OTA, an A/B OTA or an archive"
+        );
     }
     if let Some(bad) = parts.iter().find(|p| !is_safe_name(p)) {
         bail!("unsafe partition name {bad:?}");
@@ -497,12 +501,18 @@ pub fn extract_all(input: &Path, out_dir: &Path, opts: &ExtractOptions) -> Resul
         if is_tar_family(&head) {
             // A JioSTB-style update keeps its partition images in a tar (optionally
             // .tar.md5 or wrapped in gzip/xz); unpack it instead of copying the blob.
-            let tmp = out_dir.join(format!("{name}.archive"));
+            // Stage under the original name: the .md5 suffix is how the archive knows it
+            // must verify the trailing hash, so renaming it would skip that check.
+            let incoming = out_dir.join(format!(".incoming-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&incoming);
+            std::fs::create_dir_all(&incoming)?;
+            let staged = incoming.join(name);
             copy_raw(&mut src, name, out_dir)?;
-            let _ = std::fs::rename(out_dir.join(name), &tmp);
+            let _ = std::fs::rename(out_dir.join(name), &staged);
             let target = out_dir.join(archive_stem(name));
-            crate::archive::extract(&tmp, &target)?;
-            let _ = std::fs::remove_file(&tmp);
+            let unpacked = crate::archive::extract(&staged, &target);
+            let _ = std::fs::remove_dir_all(&incoming);
+            unpacked?;
             paths.push(target);
         } else if head.len() >= 4100 && head[4096..4100] == *b"gDla" {
             // super.img holds dynamic partitions: split it into <partition>.img files.
@@ -640,6 +650,42 @@ mod tests {
 
     fn fresh_dir(tag: &str) -> crate::testutil::Scratch {
         crate::testutil::Scratch::new(&format!("x-{tag}"))
+    }
+
+    /// A `.tar.md5` whose tar has been altered must be refused: the recorded hash covers the
+    /// tar bytes, so a flip anywhere in the body fails the check and nothing is written.
+    #[test]
+    fn a_tar_md5_whose_body_was_edited_is_refused() {
+        let s = fresh_dir("tarmd5-bad");
+        let mut tar_bytes = tar::Builder::new(Vec::new());
+        let body: &[u8] = b"BOOT";
+        let mut h = tar::Header::new_gnu();
+        h.set_size(body.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        tar_bytes.append_data(&mut h, "boot.img", body).unwrap();
+        let tar_bytes = tar_bytes.into_inner().unwrap();
+        use md5::Digest;
+        let digest: String = md5::Md5::digest(&tar_bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let mut blob = tar_bytes.clone();
+        blob.extend_from_slice(format!("{digest}  - -\n").as_bytes());
+        blob[600] ^= 0xff; // edit the tar, leaving the recorded hash alone
+        let mut files = sample_files();
+        files.push(("SUPER.tar.md5", blob));
+        write_dir(&s, &files);
+        let out = fresh_dir("tarmd5-bad-out");
+        let e = format!(
+            "{:#}",
+            extract_all(&s, &out, &ExtractOptions::default()).unwrap_err()
+        );
+        assert!(e.contains("MD5 mismatch"), "{e}");
+        assert!(
+            !out.join("SUPER").exists(),
+            "nothing is unpacked when the hash does not match"
+        );
     }
 
     /// An OTA directory holding a JioSTB-style `SUPER.tar.md5` unpacks into its partition
