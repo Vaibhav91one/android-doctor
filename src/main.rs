@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 mod bootimg;
 mod detect;
+mod ext4fs;
 mod extract;
 mod info;
 mod payload;
@@ -12,6 +13,7 @@ mod report;
 mod sdat;
 mod sparse;
 mod transfer_list;
+mod treeout;
 
 #[derive(Parser)]
 #[command(version, about = "Extract and audit Android OTA/ROM images")]
@@ -69,6 +71,16 @@ enum Command {
         /// Also list every entry
         #[arg(long)]
         list: bool,
+    },
+    /// List or extract the files of an ext2/3/4 image (with SELinux labels), no root needed
+    Files {
+        image: PathBuf,
+        /// Extract into this new directory (files/ plus manifest.json); without it, list only
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Print JSON instead of text
+        #[arg(long)]
+        json: bool,
     },
     /// Turn Android sparse image(s) into a raw image
     Unsparse {
@@ -228,6 +240,11 @@ fn main() -> anyhow::Result<()> {
             json,
             list,
         } => ramdisk_command(&input, output.as_deref(), json, list),
+        Command::Files {
+            image,
+            output,
+            json,
+        } => files_command(&image, output.as_deref(), json),
         Command::Unsparse {
             inputs,
             output,
@@ -241,6 +258,50 @@ fn main() -> anyhow::Result<()> {
             print_out(&report::render(&report, json)?)
         }
     }
+}
+
+fn files_command(
+    image: &std::path::Path,
+    output: Option<&std::path::Path>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let fs = ext4fs::Fs::open(image)?;
+    let entries = match output {
+        Some(out) => fs.extract(out, None)?,
+        None => fs.entries()?.into_iter().map(|(e, _)| e).collect(),
+    };
+    let text = if json {
+        serde_json::to_string_pretty(&ext4fs::manifest(&entries))?
+    } else {
+        entries
+            .iter()
+            .map(|e| {
+                let label = e
+                    .xattrs
+                    .iter()
+                    .find(|(k, _)| k == "security.selinux")
+                    .map_or("", |(_, v)| v.as_str());
+                let link = e
+                    .link
+                    .as_deref()
+                    .map(|l| format!(" -> {l}"))
+                    .unwrap_or_default();
+                format!(
+                    "{:7} {:04o} {:>5} {:>5} {:>11} {}{} {}",
+                    e.kind.name(),
+                    e.mode,
+                    e.uid,
+                    e.gid,
+                    e.size,
+                    e.path,
+                    link,
+                    label
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    print_out(&text)
 }
 
 #[cfg(test)]

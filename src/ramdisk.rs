@@ -5,13 +5,14 @@
 //! gzip, bzip2, xz, zstd and the two lz4 variants Android uses. Written from those descriptions
 //! and checked against `bsdtar` and the standard compression tools.
 use crate::detect::refuse_blocking_file;
+use crate::treeout::{Sink, clean_path, prepare_staging, publish};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
 const CPIO_HEADER_LEN: usize = 110;
 const MAX_NAME: u32 = 4096;
@@ -298,35 +299,6 @@ pub struct Report {
     pub properties: BTreeMap<String, Vec<(String, String)>>,
 }
 
-/// A path from an archive, made safe: no leading `./`, no absolute paths, no `..`.
-pub fn clean_path(raw: &str) -> Result<String> {
-    ensure!(
-        !raw.is_empty() && !raw.contains('\0'),
-        "empty or NUL-containing path"
-    );
-    let mut parts = Vec::new();
-    for comp in Path::new(raw).components() {
-        match comp {
-            Component::Normal(p) => parts.push(p.to_string_lossy().into_owned()),
-            Component::CurDir => {}
-            Component::RootDir | Component::Prefix(_) => bail!("absolute path {raw:?}"),
-            Component::ParentDir => bail!("path {raw:?} climbs out of the archive"),
-        }
-    }
-    Ok(parts.join("/"))
-}
-
-/// A long path, shortened for an error message.
-fn short(p: &str) -> String {
-    let n = p.chars().count();
-    if n <= 120 {
-        return p.to_string();
-    }
-    let head: String = p.chars().take(60).collect();
-    let tail: String = p.chars().skip(n - 40).collect();
-    format!("{head}...{tail}")
-}
-
 fn hex8(b: &[u8]) -> Result<u32> {
     let s = std::str::from_utf8(b).map_err(|_| anyhow!("cpio header is not ASCII hex"))?;
     ensure!(
@@ -395,128 +367,6 @@ fn resolve(path: &str, links: &HashMap<String, String>) -> Option<String> {
     None
 }
 
-/// Where extracted files go, and the state needed to do it safely.
-struct Sink {
-    root: PathBuf,
-    /// path -> is_dir, for every path created
-    created: BTreeMap<String, bool>,
-    /// paths the archive makes symlinks: recorded, never created
-    symlinks: BTreeSet<String>,
-    lowered: BTreeSet<String>,
-}
-
-impl Sink {
-    fn target(&self, path: &str) -> PathBuf {
-        self.root.join(path)
-    }
-
-    /// Make every parent directory of `path`, refusing to pass through anything that is a file.
-    fn make_parents(&mut self, path: &str) -> Result<()> {
-        let mut at = String::new();
-        let parts: Vec<&str> = path.split('/').collect();
-        for part in &parts[..parts.len() - 1] {
-            if !at.is_empty() {
-                at.push('/');
-            }
-            at.push_str(part);
-            ensure!(
-                !self.symlinks.contains(&at),
-                "{path} goes through the symlink {at}, which is recorded but never created"
-            );
-            match self.created.get(&at) {
-                Some(true) => {}
-                Some(false) => bail!("{at} is a file but {path} needs it to be a directory"),
-                None => self.add_dir(&at.clone())?,
-            }
-        }
-        Ok(())
-    }
-
-    fn claim(&mut self, path: &str, is_dir: bool) -> Result<bool> {
-        ensure!(
-            !self.symlinks.contains(path),
-            "{path} is listed as both a symlink and something else"
-        );
-        match self.created.get(path) {
-            Some(&was_dir) if was_dir == is_dir => return Ok(false), // listed again
-            Some(_) => bail!("{path} is listed as both a file and a directory"),
-            None => {}
-        }
-        ensure!(
-            self.lowered.insert(path.to_lowercase()),
-            "{path} differs only by case from another path and would overwrite it"
-        );
-        self.created.insert(path.to_string(), is_dir);
-        Ok(true)
-    }
-
-    fn add_dir(&mut self, path: &str) -> Result<()> {
-        if self.claim(path, true)? {
-            let t = self.target(path);
-            std::fs::create_dir(&t)
-                .with_context(|| format!("creating {}", short(&t.display().to_string())))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&t, std::fs::Permissions::from_mode(0o755))?;
-            }
-        }
-        Ok(())
-    }
-
-    fn write_file(&mut self, e: &Entry, data: &mut dyn Read) -> Result<()> {
-        self.make_parents(&e.path)?;
-        let again = !self.claim(&e.path, false)?;
-        let t = self.target(&e.path);
-        if again {
-            std::fs::remove_file(&t).ok();
-        }
-        let mut f = File::options()
-            .write(true)
-            .create_new(true)
-            .open(&t)
-            .with_context(|| format!("creating {}", short(&t.display().to_string())))?;
-        std::io::copy(data, &mut f)?;
-        self.set_mode(&t, e.mode)
-    }
-
-    /// Create `to` as a copy of the already written `from` (a hardlink: same content, own mode).
-    fn copy_file(&mut self, from: &str, to: &str, mode: u32) -> Result<()> {
-        self.make_parents(to)?;
-        let again = !self.claim(to, false)?;
-        let t = self.target(to);
-        if again {
-            std::fs::remove_file(&t).ok();
-        }
-        std::fs::copy(self.target(from), &t).with_context(|| format!("linking {}", short(to)))?;
-        self.set_mode(&t, mode)
-    }
-
-    /// Create an empty file (a hardlink name whose group never carried any data).
-    fn empty_file(&mut self, path: &str, mode: u32) -> Result<()> {
-        self.make_parents(path)?;
-        self.claim(path, false)?;
-        let t = self.target(path);
-        File::options()
-            .write(true)
-            .create_new(true)
-            .open(&t)
-            .with_context(|| format!("creating {}", short(&t.display().to_string())))?;
-        self.set_mode(&t, mode)
-    }
-
-    /// Permission bits only: setuid, setgid and sticky are dropped (the manifest keeps them).
-    fn set_mode(&self, path: &Path, mode: u32) -> Result<()> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o777))?;
-        }
-        let _ = (path, mode);
-        Ok(())
-    }
-}
-
 /// Read one or more concatenated cpio archives from `r`. With `out` set, regular files and
 /// directories are written under it (symlinks, devices, fifos and sockets are never created,
 /// only recorded).
@@ -525,12 +375,7 @@ fn read_cpio<R: Read>(mut r: R, compression: Compression, out: Option<&Path>) ->
     let mut links: HashMap<String, String> = HashMap::new();
     let mut hard: HashMap<(u32, u32, u32), LinkGroup> = HashMap::new();
     let mut prop_texts: Vec<(String, String)> = Vec::new();
-    let mut sink = out.map(|root| Sink {
-        root: root.to_path_buf(),
-        created: BTreeMap::new(),
-        symlinks: BTreeSet::new(),
-        lowered: BTreeSet::new(),
-    });
+    let mut sink = out.map(Sink::new);
     let mut header = [0u8; CPIO_HEADER_LEN];
     loop {
         // between archives there can be zero padding; end of input here is a clean stop
@@ -609,13 +454,7 @@ fn read_cpio<R: Read>(mut r: R, compression: Compression, out: Option<&Path>) ->
                 let target = String::from_utf8_lossy(&t).into_owned();
                 links.insert(e.path.clone(), target.clone());
                 if let Some(s) = sink.as_mut() {
-                    s.make_parents(&e.path)?;
-                    ensure!(
-                        !s.created.contains_key(&e.path),
-                        "{} is listed as both a file or directory and a symlink",
-                        e.path
-                    );
-                    s.symlinks.insert(e.path.clone());
+                    s.note_symlink(&e.path)?;
                 }
                 e.link = Some(target);
             }
@@ -650,7 +489,7 @@ fn read_cpio<R: Read>(mut r: R, compression: Compression, out: Option<&Path>) ->
                         keep: keep.then_some(&mut buf),
                     };
                     match sink.as_mut() {
-                        Some(s) => s.write_file(&e, &mut tee)?,
+                        Some(s) => s.write_file(&e.path, e.mode, &mut tee)?,
                         None => {
                             std::io::copy(&mut tee, &mut std::io::sink())?;
                         }
@@ -980,52 +819,12 @@ pub fn read_input(input: &Path, out: Option<&Path>) -> Result<Vec<Found>> {
     Ok(found)
 }
 
-fn staging_path(out: &Path) -> PathBuf {
-    let mut s = out.as_os_str().to_owned();
-    s.push(".part");
-    PathBuf::from(s)
-}
-
-/// The output directory must not exist (or be empty); work happens in `<out>.part`.
-fn prepare_staging(out: &Path) -> Result<PathBuf> {
-    if let Ok(meta) = out.symlink_metadata() {
-        ensure!(
-            meta.is_dir(),
-            "{} exists and is not a directory",
-            out.display()
-        );
-        ensure!(
-            std::fs::read_dir(out)?.next().is_none(),
-            "{} already exists and is not empty",
-            out.display()
-        );
-    }
-    let staging = staging_path(out);
-    if let Ok(meta) = staging.symlink_metadata() {
-        if meta.is_dir() {
-            std::fs::remove_dir_all(&staging)?;
-        } else {
-            std::fs::remove_file(&staging)?;
-        }
-    }
-    if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::create_dir(&staging).with_context(|| format!("creating {}", staging.display()))?;
-    Ok(staging)
-}
-
-fn publish(staging: &Path, out: &Path) -> Result<()> {
-    if out.symlink_metadata().is_ok() {
-        std::fs::remove_dir(out)?; // only an empty directory gets here
-    }
-    std::fs::rename(staging, out).with_context(|| format!("publishing {}", out.display()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::treeout::staging_path;
     use std::io::Write;
+    use std::path::PathBuf;
 
     /// One entry for the in-test cpio builder.
     #[derive(Clone)]
