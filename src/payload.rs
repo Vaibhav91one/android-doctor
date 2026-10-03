@@ -986,31 +986,32 @@ mod tests {
         (out, expected)
     }
 
-    fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "android-doctor-payload-{}-{tag}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(tag: &str) -> crate::testutil::Scratch {
+        crate::testutil::Scratch::new(&format!("payload-{tag}"))
     }
 
-    fn as_dir(tag: &str, payload: &[u8]) -> PathBuf {
-        let d = scratch(tag).join("ota");
+    fn as_dir(tag: &str, payload: &[u8]) -> (crate::testutil::Scratch, PathBuf) {
+        let g = scratch(tag);
+        let d = g.join("ota");
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join("payload.bin"), payload).unwrap();
-        d
+        (g, d)
     }
 
-    fn as_file(tag: &str, payload: &[u8]) -> PathBuf {
-        let f = scratch(tag).join("whatever.bin");
+    fn as_file(tag: &str, payload: &[u8]) -> (crate::testutil::Scratch, PathBuf) {
+        let g = scratch(tag);
+        let f = g.join("whatever.bin");
         std::fs::write(&f, payload).unwrap();
-        f
+        (g, f)
     }
 
-    fn as_zip(tag: &str, payload: &[u8], method: zip::CompressionMethod) -> PathBuf {
-        let z = scratch(tag).join("ota.zip");
+    fn as_zip(
+        tag: &str,
+        payload: &[u8],
+        method: zip::CompressionMethod,
+    ) -> (crate::testutil::Scratch, PathBuf) {
+        let g = scratch(tag);
+        let z = g.join("ota.zip");
         let mut w = zip::ZipWriter::new(File::create(&z).unwrap());
         let opts = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Stored);
@@ -1025,7 +1026,7 @@ mod tests {
         w.start_file("payload_properties.txt", opts).unwrap();
         w.write_all(b"FILE_HASH=x\n").unwrap();
         w.finish().unwrap();
-        z
+        (g, z)
     }
 
     /// Run an extraction on a thread with a watchdog, so a hang fails the test instead of the run.
@@ -1043,7 +1044,7 @@ mod tests {
             .map_err(|e| anyhow!(e))
     }
 
-    fn go(input: &Path, tag: &str) -> Result<(PathBuf, Vec<(PathBuf, String)>)> {
+    fn go(input: &Path, tag: &str) -> Result<(crate::testutil::Scratch, Vec<(PathBuf, String)>)> {
         let out = scratch(&format!("{tag}-out"));
         let r = run(input, &out, &ExtractOptions::default())?;
         Ok((out, r))
@@ -1094,7 +1095,7 @@ mod tests {
     #[test]
     fn every_operation_type_rebuilds_the_image_and_is_verified() {
         let (payload, expected) = build(&mixed());
-        for (tag, input) in [
+        for (tag, (_g, input)) in [
             ("dir", as_dir("t1d", &payload)),
             ("file", as_file("t1f", &payload)),
             (
@@ -1127,7 +1128,7 @@ mod tests {
         let mut parts = mixed();
         parts[0].ops.reverse(); // operations listed back to front, blobs laid out in that order
         let (payload, expected) = build(&parts);
-        let (out, _) = go(&as_dir("t2", &payload), "t2").unwrap();
+        let (out, _) = go(&as_dir("t2", &payload).1, "t2").unwrap();
         images_match(&out, &expected);
     }
 
@@ -1142,7 +1143,7 @@ mod tests {
             ],
         )];
         let (payload, expected) = build(&parts);
-        let (out, _) = go(&as_dir("t3", &payload), "t3").unwrap();
+        let (out, _) = go(&as_dir("t3", &payload).1, "t3").unwrap();
         images_match(&out, &expected);
     }
 
@@ -1158,7 +1159,7 @@ mod tests {
             })
             .collect();
         let (payload, expected) = build(&[part("big", ops)]);
-        let (out, res) = go(&as_dir("t4", &payload), "t4").unwrap();
+        let (out, res) = go(&as_dir("t4", &payload).1, "t4").unwrap();
         images_match(&out, &expected);
         assert_eq!(res[0].1, "sha256 verified");
     }
@@ -1168,7 +1169,7 @@ mod tests {
         let mut p = part("p", vec![op(Kind::Raw, &[(0, 2)], 1)]);
         p.size = Some(10 * BS);
         let (payload, expected) = build(&[p]);
-        let (out, _) = go(&as_dir("t5", &payload), "t5").unwrap();
+        let (out, _) = go(&as_dir("t5", &payload).1, "t5").unwrap();
         images_match(&out, &expected);
         assert_eq!(std::fs::metadata(out.join("p.img")).unwrap().len(), 10 * BS);
     }
@@ -1176,7 +1177,7 @@ mod tests {
     #[test]
     fn only_and_list_select_partitions_and_report_sizes() {
         let (payload, expected) = build(&mixed());
-        let input = as_dir("t6", &payload);
+        let (_g, input) = as_dir("t6", &payload);
         let list = list(&input, &ExtractOptions::default()).unwrap().unwrap();
         assert_eq!(
             list,
@@ -1280,7 +1281,7 @@ mod tests {
             let (payload, _) = build(&parts);
             let out = scratch(&format!("t9-{}", what.replace(' ', "")));
             let e = run(
-                &as_dir(&format!("t9{}", what.replace(' ', "")), &payload),
+                &as_dir(&format!("t9{}", what.replace(' ', "")), &payload).1,
                 &out,
                 &ExtractOptions::default(),
             )
@@ -1308,7 +1309,7 @@ mod tests {
             only: Some(vec!["boot".into()]),
             ..Default::default()
         };
-        run(&as_dir("t9b", &payload), &out, &only).unwrap();
+        run(&as_dir("t9b", &payload).1, &out, &only).unwrap();
         assert_eq!(std::fs::read(out.join("boot.img")).unwrap(), expected[1].1);
     }
 
@@ -1318,7 +1319,7 @@ mod tests {
         parts[0].ops[1].bad_op_hash = true;
         let (payload, _) = build(&parts);
         let out = scratch("t10-out");
-        let e = run(&as_dir("t10", &payload), &out, &ExtractOptions::default())
+        let e = run(&as_dir("t10", &payload).1, &out, &ExtractOptions::default())
             .unwrap_err()
             .to_string();
         assert!(
@@ -1338,7 +1339,7 @@ mod tests {
         parts[1].hash = Hash::Bad;
         let (payload, _) = build(&parts);
         let out = scratch("t11-out");
-        let e = run(&as_dir("t11", &payload), &out, &ExtractOptions::default())
+        let e = run(&as_dir("t11", &payload).1, &out, &ExtractOptions::default())
             .unwrap_err()
             .to_string();
         assert!(
@@ -1359,7 +1360,7 @@ mod tests {
         parts[1].verity = true;
         parts[1].hash = Hash::Bad; // would fail if it were checked
         let (payload, expected) = build(&parts);
-        let (out, res) = go(&as_dir("t12", &payload), "t12").unwrap();
+        let (out, res) = go(&as_dir("t12", &payload).1, "t12").unwrap();
         images_match(&out, &expected);
         assert_eq!(
             res[0].1,
@@ -1379,7 +1380,7 @@ mod tests {
                 let (payload, _) = build(&[p]);
                 let out = scratch(&format!("t13-{kind:?}-{data_blocks}"));
                 let e = run(
-                    &as_dir(&format!("t13{kind:?}{data_blocks}"), &payload),
+                    &as_dir(&format!("t13{kind:?}{data_blocks}"), &payload).1,
                     &out,
                     &ExtractOptions::default(),
                 )
@@ -1408,7 +1409,7 @@ mod tests {
             });
             let out = scratch(&format!("t14-{kind:?}-out"));
             let e = run(
-                &as_dir(&format!("t14{kind:?}"), &payload),
+                &as_dir(&format!("t14{kind:?}"), &payload).1,
                 &out,
                 &ExtractOptions::default(),
             );
@@ -1439,7 +1440,7 @@ mod tests {
 
     fn rejects(tag: &str, payload: Vec<u8>, want: &str) {
         let out = scratch(&format!("{tag}-out"));
-        let e = run(&as_dir(tag, &payload), &out, &ExtractOptions::default())
+        let e = run(&as_dir(tag, &payload).1, &out, &ExtractOptions::default())
             .unwrap_err()
             .to_string();
         assert!(e.contains(want), "{tag}: expected {want:?} in {e}");
@@ -1586,14 +1587,14 @@ mod tests {
             .extend((0..40u64).map(|i| op(Kind::Xz, &[(40 + i, 1)], i as u8)));
         let (payload, _) = build(&parts);
         let out = scratch("t16-out");
-        assert!(run(&as_dir("t16", &payload), &out, &ExtractOptions::default()).is_err());
+        assert!(run(&as_dir("t16", &payload).1, &out, &ExtractOptions::default()).is_err());
         assert!(files_in(&out).is_empty(), "{:?}", files_in(&out));
     }
 
     #[test]
     fn existing_output_is_refused_without_force_and_replaced_with_it() {
         let (payload, expected) = build(&mixed());
-        let input = as_dir("t17", &payload);
+        let (_g, input) = as_dir("t17", &payload);
         let out = scratch("t17-out");
         std::fs::write(out.join("boot.img"), b"precious").unwrap();
         let e = run(&input, &out, &ExtractOptions::default())
@@ -1622,11 +1623,13 @@ mod tests {
     fn planted_symlinks_are_never_written_through() {
         use std::os::unix::fs::symlink;
         let (payload, expected) = build(&mixed());
-        let input = as_dir("t18", &payload);
+        let (_g, input) = as_dir("t18", &payload);
         let out = scratch("t18-out");
-        let victim = scratch("t18-victim").join("v");
+        let gv = scratch("t18-victim");
+        let victim = gv.join("v");
         symlink(&victim, out.join("boot.img.part")).unwrap();
-        symlink(scratch("t18-victim2").join("w"), out.join("system.img")).unwrap(); // dangling
+        let gv2 = scratch("t18-victim2");
+        symlink(gv2.join("w"), out.join("system.img")).unwrap(); // dangling
         let e = run(&input, &out, &ExtractOptions::default())
             .unwrap_err()
             .to_string();
@@ -1641,7 +1644,7 @@ mod tests {
     #[test]
     fn a_deflated_payload_in_a_zip_gets_a_clear_message() {
         let (payload, _) = build(&mixed());
-        let z = as_zip("t19", &payload, zip::CompressionMethod::Deflated);
+        let (_g, z) = as_zip("t19", &payload, zip::CompressionMethod::Deflated);
         let e = format!("{:#}", locate(&z).unwrap_err());
         assert!(
             e.contains("compressed inside the zip") && e.contains("unzip"),
@@ -1680,7 +1683,7 @@ mod tests {
     #[test]
     fn locate_finds_the_payload_inside_a_stored_zip_entry() {
         let (payload, _) = build(&mixed());
-        let z = as_zip("t21", &payload, zip::CompressionMethod::Stored);
+        let (_g, z) = as_zip("t21", &payload, zip::CompressionMethod::Stored);
         let loc = locate(&z).unwrap().unwrap();
         assert_eq!(loc.len, payload.len() as u64);
         let raw = std::fs::read(&z).unwrap();
@@ -1740,7 +1743,7 @@ mod tests {
                 num_blocks: None,
             });
         });
-        let (out, res) = go(&as_dir("t24", &payload), "t24").unwrap();
+        let (out, res) = go(&as_dir("t24", &payload).1, "t24").unwrap();
         images_match(&out, &expected);
         assert!(res.iter().all(|(_, n)| n == "sha256 verified"), "{res:?}");
         let with_data = with_manifest(build(&mixed()).0, |m| {
@@ -1749,7 +1752,7 @@ mod tests {
                 num_blocks: Some(1),
             })
         });
-        let (_, res) = go(&as_dir("t24b", &with_data), "t24b").unwrap();
+        let (_, res) = go(&as_dir("t24b", &with_data).1, "t24b").unwrap();
         assert!(
             res[0].1.starts_with("sha256 not checked"),
             "boot has fec data: {res:?}"
@@ -1761,7 +1764,7 @@ mod tests {
             })
         });
         assert!(
-            go(&as_dir("t24c", &with_fec), "t24c").unwrap().1[0]
+            go(&as_dir("t24c", &with_fec).1, "t24c").unwrap().1[0]
                 .1
                 .starts_with("sha256 not checked")
         );
@@ -1772,7 +1775,7 @@ mod tests {
             })
         });
         assert!(
-            go(&as_dir("t24d", &with_tree_data), "t24d").unwrap().1[0]
+            go(&as_dir("t24d", &with_tree_data).1, "t24d").unwrap().1[0]
                 .1
                 .starts_with("sha256 not checked")
         );
@@ -1785,7 +1788,7 @@ mod tests {
         let mut p = part("p", vec![o, op(Kind::Zero, &[(3, 0)], 0)]);
         p.size = Some(8 * BS);
         let (payload, expected) = build(&[p]);
-        let (out, res) = go(&as_dir("t27", &payload), "t27").unwrap();
+        let (out, res) = go(&as_dir("t27", &payload).1, "t27").unwrap();
         images_match(&out, &expected);
         assert_eq!(res[0].1, "sha256 verified");
     }
@@ -1857,7 +1860,10 @@ mod tests {
             only: Some(vec!["p0".into(), "p1023".into()]),
             ..Default::default()
         };
-        assert_eq!(run(&as_dir("c2", &at_limit), &out, &only).unwrap().len(), 2);
+        assert_eq!(
+            run(&as_dir("c2", &at_limit).1, &out, &only).unwrap().len(),
+            2
+        );
     }
 
     #[test]
@@ -1965,7 +1971,7 @@ mod tests {
     #[test]
     fn the_command_prints_a_note_per_image() {
         let (payload, _) = build(&mixed());
-        let input = as_dir("t23", &payload);
+        let (_g, input) = as_dir("t23", &payload);
         let out = scratch("t23-out");
         let done =
             crate::extract::extract_all_noted(&input, &out, &ExtractOptions::default()).unwrap();

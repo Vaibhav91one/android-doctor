@@ -1143,9 +1143,7 @@ service plain /system/bin/plain
     #[cfg(unix)]
     #[test]
     fn every_tree_command_refuses_a_fifo_at_once_instead_of_blocking() {
-        let d = std::env::temp_dir().join(format!("ad-fifo-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        let d = crate::testutil::Scratch::new("audit-fifo");
         let fifo = d.join("pipe");
         assert!(
             std::process::Command::new("mkfifo")
@@ -1178,9 +1176,7 @@ service plain /system/bin/plain
 
     #[test]
     fn images_are_collected_from_files_and_directories() {
-        let d = std::env::temp_dir().join(format!("ad-audit-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        let d = crate::testutil::Scratch::new("audit-images");
         let mut ext = vec![0u8; 4096];
         ext[1024 + 0x38..1024 + 0x3A].copy_from_slice(&0xEF53u16.to_le_bytes());
         std::fs::write(d.join("system.img"), &ext).unwrap();
@@ -1198,9 +1194,10 @@ service plain /system/bin/plain
             [d.join("boot.img")],
             "a named file is taken as given"
         );
-        let empty = std::env::temp_dir().join(format!("ad-audit-empty-{}", std::process::id()));
-        std::fs::create_dir_all(&empty).unwrap();
-        assert!(format!("{:#}", image_list(&[empty]).unwrap_err()).contains("no images"));
+        let empty = crate::testutil::Scratch::new("audit-empty");
+        assert!(
+            format!("{:#}", image_list(&[empty.to_path_buf()]).unwrap_err()).contains("no images")
+        );
         assert!(
             image_list(&[d.join("missing")]).is_ok(),
             "a missing file fails later with a clear open error"

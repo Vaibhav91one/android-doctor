@@ -927,13 +927,11 @@ mod tests {
         );
     }
 
-    fn write_tmp(tag: &str, bytes: &[u8]) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("ad-avb-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        let p = d.join("x.img");
+    fn write_tmp(tag: &str, bytes: &[u8]) -> (crate::testutil::Scratch, std::path::PathBuf) {
+        let g = crate::testutil::Scratch::new(&format!("avb-{tag}"));
+        let p = g.join("x.img");
         std::fs::write(&p, bytes).unwrap();
-        p
+        (g, p)
     }
 
     #[test]
@@ -941,7 +939,8 @@ mod tests {
         let v = vbmeta(0, 0, &[prop("a", "b")], &[]);
         let mut padded = v.clone();
         padded.resize(8192, 0);
-        let m = read_input(&write_tmp("pad", &padded)).unwrap();
+        let (_g, p) = write_tmp("pad", &padded);
+        let m = read_input(&p).unwrap();
         assert_eq!(m.descriptors.len(), 1);
         assert!(m.footer.is_none());
 
@@ -957,7 +956,8 @@ mod tests {
         footer.resize(64, 0);
         let n = part.len();
         part[n - 64..].copy_from_slice(&footer);
-        let m = read_input(&write_tmp("footer", &part)).unwrap();
+        let (_g, p) = write_tmp("footer", &part);
+        let m = read_input(&p).unwrap();
         let f = m.footer.unwrap();
         assert_eq!(
             (f.original_image_size, f.vbmeta_offset, f.vbmeta_size),
@@ -969,15 +969,18 @@ mod tests {
         let mut bad = part.clone();
         bad[n - 64 + 20..n - 64 + 28].copy_from_slice(&(1u64 << 50).to_be_bytes());
         assert!(
-            format!("{:#}", read_input(&write_tmp("badfoot", &bad)).unwrap_err())
-                .contains("outside the image")
+            format!(
+                "{:#}",
+                read_input(&write_tmp("badfoot", &bad).1).unwrap_err()
+            )
+            .contains("outside the image")
         );
         let e = format!(
             "{:#}",
-            read_input(&write_tmp("none", &vec![1u8; 4096])).unwrap_err()
+            read_input(&write_tmp("none", &vec![1u8; 4096]).1).unwrap_err()
         );
         assert!(e.contains("not an AVB image"), "{e}");
-        assert!(read_input(&write_tmp("tiny", b"AVB")).is_err());
+        assert!(read_input(&write_tmp("tiny", b"AVB").1).is_err());
         assert!(read_input(Path::new("/definitely/not/here")).is_err());
     }
 
@@ -999,7 +1002,8 @@ mod tests {
             tree_desc("system"),
         ];
         let m = parse(&vbmeta(0, 0, &d, &[])).unwrap();
-        let outer = write_tmp("verify", b"").parent().unwrap().to_path_buf();
+        let (_g, tmp) = write_tmp("verify", b"");
+        let outer = tmp.parent().unwrap().to_path_buf();
         let dir = outer.join("inner");
         std::fs::create_dir_all(&dir).unwrap();
         for n in ["good", "bad", "short"] {

@@ -402,9 +402,7 @@ mod tests {
 
     #[test]
     fn files_on_disk_are_read_from_the_start_and_short_files_are_fine() {
-        let dir =
-            std::env::temp_dir().join(format!("android-doctor-detect-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testutil::Scratch::new("detect-disk");
         let mut image = ext(0, 0x40, 0);
         image.extend(vec![0xAB; 8192]); // data after the header must not matter
         std::fs::write(dir.join("a.img"), &image).unwrap();
@@ -415,7 +413,6 @@ mod tests {
         );
         assert_eq!(filesystem_of_file(&dir.join("tiny.img")), None);
         assert_eq!(filesystem_of_file(&dir.join("missing.img")), None);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn head_with(at: usize, magic: &[u8]) -> Vec<u8> {
@@ -524,12 +521,8 @@ mod tests {
         assert_eq!(id_of(&head_with(4096, b"gDla")[..SNIFF_LEN]), "lp-super");
     }
 
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("android-doctor-id-{}-{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(tag: &str) -> crate::testutil::Scratch {
+        crate::testutil::Scratch::new(&format!("id-{tag}"))
     }
 
     fn write_zip(path: &Path, names: &[&str]) {

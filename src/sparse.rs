@@ -803,14 +803,8 @@ mod tests {
         assert!(run(vec![]).is_err());
     }
 
-    fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "android-doctor-sparse-{}-{tag}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(tag: &str) -> crate::testutil::Scratch {
+        crate::testutil::Scratch::new(&format!("sparse-{tag}"))
     }
 
     #[test]
