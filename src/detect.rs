@@ -133,6 +133,18 @@ pub fn sniff(head: &[u8]) -> Option<Identified> {
     if at0(&[0x04, 0x22, 0x4D, 0x18]) {
         return found("lz4", "lz4 compressed data (frame)");
     }
+    if at0(&[0x02, 0x21, 0x4C, 0x18]) {
+        return found("lz4-legacy", "lz4 compressed data (legacy format)");
+    }
+    if at0(b"070701") || at0(b"070702") {
+        return found("cpio", "cpio archive (newc)");
+    }
+    if at0(b"@AML") {
+        return found(
+            "aml-container",
+            "Amlogic container (secure-boot images are encrypted)",
+        );
+    }
     if at0(&[0x28, 0xB5, 0x2F, 0xFD]) {
         return found("zstd", "zstd compressed data");
     }
@@ -461,6 +473,26 @@ mod tests {
         }
         assert!(sniff(&[]).is_none());
         assert!(sniff(&vec![0u8; SNIFF_LEN]).is_none());
+    }
+
+    #[test]
+    fn cpio_legacy_lz4_and_amlogic_magics() {
+        assert_eq!(id_of(&head_with(0, b"070701")), "cpio");
+        assert_eq!(id_of(&head_with(0, b"070702")), "cpio");
+        assert_eq!(
+            id_of(&head_with(0, &[0x02, 0x21, 0x4C, 0x18])),
+            "lz4-legacy"
+        );
+        assert_eq!(id_of(&head_with(0, b"@AML")), "aml-container");
+        for (m, what) in [
+            (&b"070703"[..], "cpio"),
+            (&[0x02, 0x21, 0x4C, 0x19][..], "lz4-legacy"),
+            (&b"@AMX"[..], "amlogic"),
+            (&b"07070"[..], "short cpio"),
+        ] {
+            assert_eq!(id_of(&head_with(0, m)), "none", "{what} near miss");
+        }
+        assert_eq!(id_of(&head_with(1, b"@AML")), "none", "only at the start");
     }
 
     #[test]

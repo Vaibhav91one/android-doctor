@@ -15,6 +15,8 @@ const BOOT_MAGIC: &[u8; 8] = b"ANDROID!";
 const VENDOR_MAGIC: &[u8; 8] = b"VNDRBOOT";
 /// Enough to hold the largest header (vendor boot v4 is 2128 bytes).
 const HEAD_LEN: usize = 4096;
+/// How much of a section is looked at to say what it is.
+const SAMPLE_LEN: u64 = 65536;
 /// Boot image v3 and v4 always use 4096-byte pages.
 const V3_PAGE_SIZE: u32 = 4096;
 const MAX_TABLE_ENTRIES: u32 = 4096;
@@ -26,6 +28,8 @@ pub struct Section {
     pub name: String,
     pub offset: u64,
     pub size: u64,
+    /// What the data looks like (`gzip`, `dtb`, `unknown-high-entropy`, ...), filled in by `read`.
+    pub format: Option<(String, String)>,
 }
 
 #[derive(Debug)]
@@ -94,6 +98,7 @@ fn section(name: &str, offset: u64, size: u64) -> Section {
         name: name.to_string(),
         offset,
         size,
+        format: None,
     }
 }
 
@@ -357,13 +362,24 @@ pub fn read(path: &Path) -> Result<Image> {
     f.try_clone()?
         .take(HEAD_LEN as u64)
         .read_to_end(&mut head)?;
-    parse(&head, len, |at, n| {
+    let mut image = parse(&head, len, |at, n| {
         let mut buf = vec![0u8; n];
         f.seek(SeekFrom::Start(at))?;
         f.read_exact(&mut buf)
             .context("file ends inside the table")?;
         Ok(buf)
-    })
+    })?;
+    // look at the start of every section to say what it is (the size is already checked)
+    for s in &mut image.sections {
+        let mut sample = Vec::new();
+        f.seek(SeekFrom::Start(s.offset))?;
+        (&mut f)
+            .take(s.size.min(SAMPLE_LEN))
+            .read_to_end(&mut sample)?;
+        let (id, why) = crate::ramdisk::classify_section(&sample);
+        s.format = Some((id.to_string(), why));
+    }
+    Ok(image)
 }
 
 /// Write each section of `image` (read from `input`) into `out_dir` as a file named after it.
@@ -431,7 +447,14 @@ pub fn to_json(image: &Image) -> Value {
             image
                 .sections
                 .iter()
-                .map(|s| json!({"name": s.name, "offset": s.offset, "size": s.size}))
+                .map(|s| {
+                    let mut v = json!({"name": s.name, "offset": s.offset, "size": s.size});
+                    if let Some((id, why)) = &s.format {
+                        v["format"] = json!(id);
+                        v["format_description"] = json!(why);
+                    }
+                    v
+                })
                 .collect(),
         ),
     );
@@ -473,10 +496,19 @@ pub fn to_text(image: &Image) -> String {
     }
     lines.push("sections:".to_string());
     for s in &image.sections {
+        let shown = s
+            .format
+            .as_ref()
+            .map_or(String::new(), |(id, _)| format!("  [{id}]"));
         lines.push(format!(
-            "  {:<16} offset {:<10} size {}",
+            "  {:<16} offset {:<10} size {:<10}{shown}",
             s.name, s.offset, s.size
         ));
+        if let Some((id, why)) = &s.format
+            && matches!(id.as_str(), "unknown-high-entropy" | "aml-container")
+        {
+            lines.push(format!("    note: {why}"));
+        }
     }
     lines.join("\n")
 }
@@ -1228,6 +1260,76 @@ mod tests {
                 .to_string()
                 .contains("too short")
         );
+    }
+
+    #[test]
+    fn read_labels_every_section_with_what_it_looks_like() {
+        let noise: Vec<u8> = (0..70_000u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
+        let mut b = Boot::new(2);
+        b.kernel = 70_000;
+        b.ramdisk = 3000;
+        b.second = 100;
+        b.dtb = 100;
+        let mut img = b.build();
+        let page = b.page;
+        let put = |img: &mut Vec<u8>, at: usize, data: &[u8]| {
+            img[at..at + data.len()].copy_from_slice(data)
+        };
+        put(&mut img, page, &noise[..70_000]); // kernel: noise
+        let ramdisk_at = page * (1 + 70_000usize.div_ceil(page));
+        put(&mut img, ramdisk_at, &[0x1F, 0x8B, 0x08, 0, 1, 2]); // ramdisk: gzip
+        let second_at = ramdisk_at + 3000usize.div_ceil(page) * page;
+        put(&mut img, second_at, b"@AML\x04\0\0\0");
+        let dir = scratch("formats");
+        let path = dir.join("boot.img");
+        std::fs::write(&path, &img).unwrap();
+        let image = read(&path).unwrap();
+        let fmt = |n: &str| {
+            image
+                .sections
+                .iter()
+                .find(|s| s.name == n)
+                .unwrap()
+                .format
+                .clone()
+                .unwrap()
+                .0
+        };
+        assert_eq!(fmt("kernel"), "unknown-high-entropy");
+        assert_eq!(fmt("ramdisk"), "gzip");
+        assert_eq!(fmt("second"), "aml-container");
+        let j = to_json(&image);
+        assert_eq!(j["sections"][1]["format"], "gzip");
+        assert!(
+            j["sections"][0]["format_description"]
+                .as_str()
+                .unwrap()
+                .contains("entropy")
+        );
+        let text = to_text(&image);
+        assert!(
+            text.contains("[gzip]") && text.contains("[aml-container]"),
+            "{text}"
+        );
+        assert!(
+            text.contains("note: Amlogic container") && text.contains("note: no known format"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("note: gzip"),
+            "ordinary formats get no note: {text}"
+        );
+    }
+
+    #[test]
+    fn parse_alone_leaves_formats_out_of_the_output() {
+        let i = parse_bytes(&Boot::new(0).build()).unwrap();
+        assert!(i.sections.iter().all(|s| s.format.is_none()));
+        let j = to_json(&i);
+        assert!(j["sections"][0].get("format").is_none());
+        assert!(!to_text(&i).contains('['));
     }
 
     #[test]

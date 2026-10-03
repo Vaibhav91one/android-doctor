@@ -5,6 +5,7 @@ Command-line tool to extract and audit Android firmware packages.
 ```
 android-doctor extract  <ota.zip|dir|payload.bin> [-o out] [--only a,b] [--list] [--force]
 android-doctor unpack   <boot.img|vendor_boot.img> [-o dir] [--json] [--force]   # header, and with -o the sections
+android-doctor ramdisk  <boot.img|vendor_boot.img|ramdisk> [-o dir] [--json] [--list]   # ramdisk contents and ADB properties
 android-doctor unsparse <file>... -o out.img [--force]   # Android sparse image(s) to a raw image
 android-doctor identify <path>... [--json]               # what is this file, by magic bytes
 android-doctor info     <ota.zip|dir> [--json]           # build metadata (META-INF/com/android/metadata)
@@ -52,7 +53,9 @@ Status: **verified** = checked against an independent reference tool on real fir
 | `super.img` (dynamic partitions) | planned | |
 | Reading files out of ext4 / erofs images | planned | Today use `7z x system.img` |
 | Boot / recovery / vendor_boot images: header and sections (`unpack`) | verified | Real STB boot and recovery (header v1) and a real A/B boot (v2): every section and header field equals AOSP's `unpack_bootimg.py`. Boot v0, v3, v4 and vendor_boot v3, v4 on images built by AOSP's `mkbootimg.py`: identical |
-| Ramdisk decompression and cpio extraction | planned | The rest of the boot-image work |
+| Ramdisk (`ramdisk`): gzip, bzip2, xz, zstd, lz4 (frame and legacy), plain cpio | verified | A real 37 MB gzip ramdisk (486 entries): every file sha256, directory, symlink target, mode and size equals `bsdtar`'s; archives built by `bsdtar` and compressed with the standard tools in all six formats; a `vendor_boot` with gzip, lz4 and xz fragments built by `mkbootimg.py` |
+| ADB/debug properties from a ramdisk (`ro.secure`, `ro.adb.secure`, `ro.debuggable`, ...) | verified | Found through the `default.prop -> prop.default` symlink on the real ramdisk, equal to the values read from the extracted file |
+| Encrypted boot sections (Amlogic `@AML` containers and ciphertext) | detected only | `unpack` labels them (`aml-container`, `unknown-high-entropy`) and `ramdisk` explains why it cannot read them; there is no way to decrypt without the vendor's keys. The real STB recovery image is one of these |
 | tar, `.tar.md5`, gzip, bzip2, xz, lz4 wrappers | planned | |
 | AVB / vbmeta inspection | planned | |
 | Vendor containers (`.ozip`, `.pac`, Qualcomm `rawprogram`, Amlogic, ...) | planned | Without real samples these will be marked unverified |
