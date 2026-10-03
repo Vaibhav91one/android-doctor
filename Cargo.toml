@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+am-fs-erofs = "0.3"
+am-fs-core = "0.2"
 anyhow = "1.0.104"
 brotli = "9.0.0"
 bzip2 = "0.6.1"
