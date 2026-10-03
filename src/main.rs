@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use std::io::Write;
 use std::path::PathBuf;
 
+mod bootimg;
 mod detect;
 mod extract;
 mod info;
@@ -41,6 +42,19 @@ enum Command {
         /// Print all metadata as JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Show a boot or vendor_boot image's header, and with -o write its kernel, ramdisk, dtb, ...
+    Unpack {
+        input: PathBuf,
+        /// Write the sections (kernel, ramdisk, second, dtb, ...) into this directory
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Print the header as JSON
+        #[arg(long)]
+        json: bool,
+        /// Replace existing files instead of refusing
+        #[arg(long)]
+        force: bool,
     },
     /// Turn Android sparse image(s) into a raw image
     Unsparse {
@@ -135,6 +149,23 @@ fn main() -> anyhow::Result<()> {
             extract::run(&input, &output, &opts)
         }
         Command::Info { input, json } => print_out(&info::render(&info::read(&input)?, json)?),
+        Command::Unpack {
+            input,
+            output,
+            json,
+            force,
+        } => {
+            let image = bootimg::read(&input)?;
+            if let Some(dir) = &output {
+                bootimg::write_sections(&input, &image, dir, force)?;
+            }
+            let text = if json {
+                serde_json::to_string_pretty(&bootimg::to_json(&image))?
+            } else {
+                bootimg::to_text(&image)
+            };
+            print_out(&text)
+        }
         Command::Unsparse {
             inputs,
             output,

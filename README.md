@@ -4,6 +4,7 @@ Command-line tool to extract and audit Android firmware packages.
 
 ```
 android-doctor extract  <ota.zip|dir|payload.bin> [-o out] [--only a,b] [--list] [--force]
+android-doctor unpack   <boot.img|vendor_boot.img> [-o dir] [--json] [--force]   # header, and with -o the sections
 android-doctor unsparse <file>... -o out.img [--force]   # Android sparse image(s) to a raw image
 android-doctor identify <path>... [--json]               # what is this file, by magic bytes
 android-doctor info     <ota.zip|dir> [--json]           # build metadata (META-INF/com/android/metadata)
@@ -50,7 +51,8 @@ Status: **verified** = checked against an independent reference tool on real fir
 | File identification (`identify`) | verified | 27 real files, from OTA zips to boot images to xz/zstd/lz4 output |
 | `super.img` (dynamic partitions) | planned | |
 | Reading files out of ext4 / erofs images | planned | Today use `7z x system.img` |
-| Boot / recovery / vendor_boot images | planned | |
+| Boot / recovery / vendor_boot images: header and sections (`unpack`) | verified | Real STB boot and recovery (header v1) and a real A/B boot (v2): every section and header field equals AOSP's `unpack_bootimg.py`. Boot v0, v3, v4 and vendor_boot v3, v4 on images built by AOSP's `mkbootimg.py`: identical |
+| Ramdisk decompression and cpio extraction | planned | The rest of the boot-image work |
 | tar, `.tar.md5`, gzip, bzip2, xz, lz4 wrappers | planned | |
 | AVB / vbmeta inspection | planned | |
 | Vendor containers (`.ozip`, `.pac`, Qualcomm `rawprogram`, Amlogic, ...) | planned | Without real samples these will be marked unverified |
