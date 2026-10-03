@@ -19,6 +19,7 @@ None so far. Every source file in this repository was written for this project.
 | Android Open Source Project | Apache-2.0 | On-disk formats: boot and vendor_boot headers (`bootimg.h`), the sparse image format and the update payload (`update_metadata.proto`, whose messages are hand-written in `src/payload.rs`) are implemented from the AOSP definitions; LP metadata, boot images and AVB will follow |
 | [payload-dumper-go](https://github.com/ssut/payload-dumper-go) | Apache-2.0 | Read for how operations map onto extents; used as the independent check for A/B payload extraction (its output must equal ours). No code copied |
 | AOSP `unpack_bootimg.py` and `mkbootimg.py` | Apache-2.0 | Independent checks for boot image support, downloaded when the checks run and never bundled |
+| `bsdtar` (libarchive) and the standard `gzip`, `bzip2`, `xz`, `zstd`, `lz4` tools | various | Independent checks for ramdisk extraction while developing; not linked or bundled. The cpio newc layout follows the Linux kernel's initramfs buffer-format documentation |
 | `simg2img`/`img2simg`, `erofs-utils` (`mkfs.erofs`, `fsck.erofs`), 7-Zip, `brotli` | various | Used only as external checks while developing; not linked or bundled |
 
 ## Rust dependencies (direct)
@@ -28,7 +29,9 @@ None so far. Every source file in this repository was written for this project.
 | anyhow | MIT OR Apache-2.0 |
 | brotli | BSD-3-Clause AND MIT |
 | bzip2 | MIT OR Apache-2.0 |
+| flate2 | MIT OR Apache-2.0 |
 | crc32fast | MIT OR Apache-2.0 |
+| lz4_flex | MIT |
 | lzma-rust2 | Apache-2.0 |
 | clap | MIT OR Apache-2.0 |
 | indicatif | MIT |

@@ -7,6 +7,7 @@ mod detect;
 mod extract;
 mod info;
 mod payload;
+mod ramdisk;
 mod report;
 mod sdat;
 mod sparse;
@@ -55,6 +56,19 @@ enum Command {
         /// Replace existing files instead of refusing
         #[arg(long)]
         force: bool,
+    },
+    /// List a boot image's ramdisk (or a ramdisk file), report its ADB properties, and with -o extract it
+    Ramdisk {
+        input: PathBuf,
+        /// Extract the files into this new directory (symlinks and devices are recorded, not created)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Print the result as JSON
+        #[arg(long)]
+        json: bool,
+        /// Also list every entry
+        #[arg(long)]
+        list: bool,
     },
     /// Turn Android sparse image(s) into a raw image
     Unsparse {
@@ -125,6 +139,48 @@ fn identify(paths: &[PathBuf], json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn ramdisk_command(
+    input: &std::path::Path,
+    output: Option<&std::path::Path>,
+    json: bool,
+    list: bool,
+) -> anyhow::Result<()> {
+    let found = ramdisk::read_input(input, output)?;
+    let mut failed = 0;
+    let text = if json {
+        let rows: Vec<_> = found
+            .iter()
+            .map(|f| match &f.report {
+                Ok(r) => serde_json::json!({"ramdisk": f.name, "result": r.to_json()}),
+                Err(e) => {
+                    failed += 1;
+                    serde_json::json!({"ramdisk": f.name, "error": format!("{e:#}")})
+                }
+            })
+            .collect();
+        serde_json::to_string_pretty(&rows)?
+    } else {
+        found
+            .iter()
+            .map(|f| match &f.report {
+                Ok(r) => format!("{}:\n{}", f.name, r.to_text(list)),
+                Err(e) => {
+                    failed += 1;
+                    format!("{}: error: {e:#}", f.name)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    };
+    print_out(&text)?;
+    anyhow::ensure!(
+        failed == 0,
+        "{failed} of {} ramdisks could not be read",
+        found.len()
+    );
+    Ok(())
+}
+
 fn print_out(text: &str) -> anyhow::Result<()> {
     match writeln!(std::io::stdout(), "{text}") {
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()), // e.g. `| head`
@@ -166,6 +222,12 @@ fn main() -> anyhow::Result<()> {
             };
             print_out(&text)
         }
+        Command::Ramdisk {
+            input,
+            output,
+            json,
+            list,
+        } => ramdisk_command(&input, output.as_deref(), json, list),
         Command::Unsparse {
             inputs,
             output,
