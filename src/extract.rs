@@ -1,5 +1,5 @@
 //! Extract partition images from a block OTA (a zip or an already unpacked directory).
-use crate::{detect, payload, sdat, transfer_list};
+use crate::{detect, pac, payload, sdat, transfer_list};
 use anyhow::{Context, Result, anyhow, bail};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::fs::File;
@@ -364,6 +364,9 @@ pub fn list_images(input: &Path, opts: &ExtractOptions) -> Result<Vec<(String, u
     if let Some(images) = payload::list(input, opts)? {
         return Ok(images);
     }
+    if pac::is_pac(input) {
+        return pac::list(input, opts);
+    }
     let mut src = Source::open(input)?;
     let names = src.names()?;
     let (parts, raw) = select(&names, &opts.only)?;
@@ -515,6 +518,10 @@ pub fn extract_all_noted(
 ) -> Result<Vec<(PathBuf, String)>> {
     if let Some(done) = payload::extract(input, out_dir, opts)? {
         return Ok(done);
+    }
+    if pac::is_pac(input) {
+        let paths = pac::extract(input, out_dir, opts)?;
+        return Ok(paths.into_iter().map(|p| (p, String::new())).collect());
     }
     Ok(extract_all(input, out_dir, opts)?
         .into_iter()

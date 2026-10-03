@@ -66,7 +66,8 @@ Status: **verified** = checked against an independent reference tool on real fir
 | Encrypted boot sections (Amlogic `@AML` containers and ciphertext) | detected only | `unpack` labels them (`aml-container`, `unknown-high-entropy`) and `ramdisk` explains why it cannot read them; there is no way to decrypt without the vendor's keys. The real STB recovery image is one of these |
 | tar, `.tar.md5`, gzip, bzip2, xz, lz4 wrappers | planned | |
 | AVB / vbmeta inspection | planned | |
-| Vendor containers (`.ozip`, `.pac`, Qualcomm `rawprogram`, Amlogic, ...) | planned | Without real samples these will be marked unverified |
+| Vendor containers (`.ozip`, Qualcomm `rawprogram`, Amlogic, ...) | planned | Without real samples these will be marked unverified |
+| Spreadtrum/MediaTek `.pac` containers | synthetic | Parser and extractor (adapted from SR Labs PacHandler, Apache-2.0); tested with generated fixtures, not yet verified on real firmware |
 | Incremental OTAs (`*.patch.dat`, delta payloads) | no | Fails with a clear error |
 | dm-verity hash tree and FEC regeneration for A/B partitions | planned | Needed to check the whole-image hash of partitions that declare those extents |
 | f2fs | detected | Detected by magic, but not readable: the Linux kernel f2fs driver is GPL-licensed and no permissive Rust reader exists; commands that read a filesystem (`files`, `ls`, `cat`, `audit`, `extract --files`) fail with "f2fs is not supported" |

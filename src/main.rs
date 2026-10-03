@@ -11,6 +11,7 @@ mod ext4fs;
 mod extract;
 mod info;
 mod otameta;
+mod pac;
 mod payload;
 mod ramdisk;
 mod report;
