@@ -448,7 +448,34 @@ pub fn extract_all(input: &Path, out_dir: &Path, opts: &ExtractOptions) -> Resul
     let mut paths = results.into_iter().collect::<Result<Vec<_>>>()?;
     let mut src = Source::open(input)?;
     for name in raw {
-        paths.push(copy_raw(&mut src, name, out_dir)?);
+        // super.img holds dynamic partitions: split it into <partition>.img files.
+        let head = {
+            let mut r = src.open_file(name)?;
+            let mut v = vec![0u8; detect::SNIFF_LEN];
+            let n = r.read(&mut v)?;
+            v.truncate(n);
+            v
+        };
+        let is_super = head.len() >= 4100 && head[4096..4100] == [b'g', b'D', b'l', b'a'];
+        if is_super {
+            let bytes = {
+                let mut r = src.open_file(name)?;
+                let mut v = Vec::new();
+                r.read_to_end(&mut v)?;
+                v
+            };
+            let parsed = crate::lp::parse_metadata(&bytes)?;
+            let only = opts.only.as_deref();
+            for (part, body) in crate::lp::split_partitions(&bytes, &parsed, only)? {
+                let part_path = out_dir.join(format!("{part}.img"));
+                let tmp_path = out_dir.join(format!("{part}.img.part"));
+                std::fs::write(&tmp_path, &body)?;
+                std::fs::rename(&tmp_path, &part_path)?;
+                paths.push(part_path);
+            }
+        } else {
+            paths.push(copy_raw(&mut src, name, out_dir)?);
+        }
     }
     Ok(paths)
 }
