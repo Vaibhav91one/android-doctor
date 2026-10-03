@@ -228,6 +228,14 @@ pub fn identify_path(path: &Path) -> Result<Identified> {
         description: "unknown format".into(),
     });
     if identified.id != "zip" {
+        // `.pac` files have no magic bytes, so they are matched by extension with a
+        // structural probe after the magic sniff has ruled out everything else.
+        if crate::pac::is_pac(path) {
+            return Ok(Identified {
+                id: "pac",
+                description: "Spreadtrum/MediaTek .pac firmware container".into(),
+            });
+        }
         return Ok(identified);
     }
     let names = File::open(path)
@@ -723,5 +731,27 @@ mod tests {
             identify_path(&dir.join("firmware.zip")).unwrap().id,
             "unknown"
         );
+    }
+
+    #[test]
+    fn pac_files_are_recognised_by_extension_and_structure() {
+        let dir = scratch("pac");
+        // A .pac file with a non-empty name field at offset 60 is identified as pac.
+        let pac = crate::pac::build_pac_for_test(&dir.join("firmware.pac"));
+        assert_eq!(identify_path(&pac).unwrap().id, "pac");
+        // The `.PAC` extension is case-insensitive.
+        let pac_ci = crate::pac::build_pac_for_test(&dir.join("firmware.PAC"));
+        assert_eq!(identify_path(&pac_ci).unwrap().id, "pac");
+        // A non-.pac file, even with a valid PAC structure, is not identified as pac.
+        let not_pac = crate::pac::build_pac_for_test(&dir.join("firmware.bin"));
+        assert_eq!(identify_path(&not_pac).unwrap().id, "unknown");
+        // A .pac file with an all-zero name field is not a real PAC.
+        let empty_pac = dir.join("empty.pac");
+        std::fs::write(
+            &empty_pac,
+            vec![0u8; crate::pac::TABLE_START + crate::pac::ENTRY_SIZE],
+        )
+        .unwrap();
+        assert_eq!(identify_path(&empty_pac).unwrap().id, "unknown");
     }
 }
