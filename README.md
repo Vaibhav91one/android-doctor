@@ -6,6 +6,7 @@ Command-line tool to extract and audit Android firmware packages.
 android-doctor extract  <ota.zip|dir|payload.bin> [-o out] [--only a,b] [--list] [--force]
 android-doctor unpack   <boot.img|vendor_boot.img> [-o dir] [--json] [--force]   # header, and with -o the sections
 android-doctor ramdisk  <boot.img|vendor_boot.img|ramdisk> [-o dir] [--json] [--list]   # ramdisk contents and ADB properties
+android-doctor vbmeta   <vbmeta.img|image-with-footer> [--images dir] [--json]   # AVB header, key, descriptors, partition hashes
 android-doctor files    <image.img> [-o dir] [--json]   # list or extract an ext2/3/4 image (no root), with SELinux labels
 android-doctor unsparse <file>... -o out.img [--force]   # Android sparse image(s) to a raw image
 android-doctor identify <path>... [--json]               # what is this file, by magic bytes
@@ -53,6 +54,7 @@ Status: **verified** = checked against an independent reference tool on real fir
 | File identification (`identify`) | verified | 27 real files, from OTA zips to boot images to xz/zstd/lz4 output |
 | `super.img` (dynamic partitions) | planned | |
 | Files out of ext2/3/4 images (`files`) | verified | Four real partition images (3,553 entries) equal `7z`'s path list and file hashes, and SELinux labels and file capabilities of every inode equal an independent scanner; images built by `mke2fs -d` from a known tree in six variants (ext2, ext3, ext4, 128-byte inodes with 1 KiB blocks, 64bit, no extents) equal the source tree in content, mode, hardlinks, sparse files and xattrs. Written from the on-disk format: no root, no mount, bounded memory (23 MB peak on 540 hostile images). Case-colliding names are renamed `name~case2` on case-insensitive hosts. Not supported: `inline_data`, encrypted files, `meta_bg`, xattr values stored in their own inode |
+| AVB `vbmeta` (`vbmeta`): header, public key, hash/hashtree/property/cmdline/chain descriptors, footer, authentication digest, partition hashes | verified | Every field equals AOSP `avbtool info_image` on four real images (a signed RSA-4096 vbmeta with 22 descriptors, a boot and a dtbo image read through their footers, and an unsigned vbmeta with verification disabled); the boot and dtbo hashes equal the descriptors and a flipped byte is caught. The RSA signature itself is not verified, nor are hashtrees |
 | Files out of erofs images | planned | Today use `fsck.erofs --extract` |
 | Boot / recovery / vendor_boot images: header and sections (`unpack`) | verified | Real STB boot and recovery (header v1) and a real A/B boot (v2): every section and header field equals AOSP's `unpack_bootimg.py`. Boot v0, v3, v4 and vendor_boot v3, v4 on images built by AOSP's `mkbootimg.py`: identical |
 | Ramdisk (`ramdisk`): gzip, bzip2, xz, zstd, lz4 (frame and legacy), plain cpio | verified | A real 37 MB gzip ramdisk (486 entries): every file sha256, directory, symlink target, mode and size equals `bsdtar`'s; archives built by `bsdtar` and compressed with the standard tools in all six formats; a `vendor_boot` with gzip, lz4 and xz fragments built by `mkbootimg.py` |
