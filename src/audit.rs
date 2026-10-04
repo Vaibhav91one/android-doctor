@@ -50,7 +50,7 @@ impl Severity {
     fn to_term(self) -> TermSeverity {
         match self {
             Severity::High => TermSeverity::Error,
-            Severity::Medium => TermSeverity::Warn,
+            Severity::Medium | Severity::Warn => TermSeverity::Warn,
             Severity::Info => TermSeverity::Info,
         }
     }
