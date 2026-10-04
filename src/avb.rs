@@ -1,16 +1,27 @@
 //! Android Verified Boot (AVB) `vbmeta` inspection: the header, the public key, every descriptor,
-//! the authentication digest, and (with a directory of images) the hash of each hashed partition.
+//! the authentication digest, the RSA signature over the header and auxiliary block, and (with a
+//! directory of images) the hash of each hashed partition.
 //!
 //! Layout from AOSP libavb (`avb_vbmeta_image.h`, `avb_descriptor.h`, `avb_footer.h`, Apache-2.0)
-//! and checked against AOSP's `avbtool info_image`. The RSA signature itself is not verified: the
-//! digest in the authentication block is, and so are partition hashes. All integers are big-endian.
+//! and checked against AOSP's `avbtool info_image`. The authentication digest is checked, the RSA
+//! signature is verified with the embedded public key (PKCS#1 v1.5), and partition hashes are checked.
+//! All integers are big-endian.
 use crate::detect::refuse_blocking_file;
 use anyhow::{Context, Result, bail, ensure};
+use rsa::RsaPublicKey;
+use rsa::pkcs1v15::Pkcs1v15Sign;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256, Sha512};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+
+#[cfg(test)]
+use rand::rngs::OsRng;
+#[cfg(test)]
+use rsa::RsaPrivateKey;
+#[cfg(test)]
+use rsa::traits::PublicKeyParts;
 
 const HEADER_LEN: usize = 256;
 const FOOTER_LEN: usize = 64;
@@ -88,6 +99,20 @@ pub struct Footer {
     pub vbmeta_size: u64,
 }
 
+/// Result of checking the vbmeta RSA signature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignatureStatus {
+    /// The signature verified successfully.
+    Valid,
+    /// The signature is present but does not verify (tampered or corrupted data).
+    Invalid,
+    /// Algorithm NONE (0): no signature is present.
+    Absent,
+    /// The algorithm is not supported (e.g. ECDSA, or an unknown id). The signature
+    /// is left unchecked — this is NOT a failure.
+    Unsupported(u32),
+}
+
 #[derive(Debug, Clone)]
 pub struct Vbmeta {
     pub libavb: (u32, u32),
@@ -104,6 +129,9 @@ pub struct Vbmeta {
     pub public_key_metadata_len: u64,
     /// `Some(true)` if the hash in the authentication block matches, `None` for algorithm NONE.
     pub digest_ok: Option<bool>,
+    /// Whether the RSA signature over the header + auxiliary block verifies with the
+    /// embedded public key. See `SignatureStatus`.
+    pub signature_verified: SignatureStatus,
     pub descriptors: Vec<Descriptor>,
     pub footer: Option<Footer>,
 }
@@ -135,6 +163,153 @@ fn auth_hash(algorithm: u32, data: &[u8]) -> Option<Vec<u8>> {
         1..=3 => Some(Sha256::digest(data).to_vec()),
         4..=6 => Some(Sha512::digest(data).to_vec()),
         _ => None,
+    }
+}
+
+/// The RSA key size in bits for a given algorithm type.
+fn algorithm_key_bits(algorithm: u32) -> Option<usize> {
+    match algorithm {
+        1 | 4 => Some(2048),
+        2 | 5 => Some(4096),
+        3 | 6 => Some(8192),
+        _ => None,
+    }
+}
+
+/// PKCS#1 v1.5 DigestInfo prefix for SHA-256.
+fn pkcs1v15_sha256_prefix() -> Vec<u8> {
+    vec![
+        0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
+        0x05, 0x00, 0x04, 0x20,
+    ]
+}
+
+/// PKCS#1 v1.5 DigestInfo prefix for SHA-512.
+fn pkcs1v15_sha512_prefix() -> Vec<u8> {
+    vec![
+        0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03,
+        0x05, 0x00, 0x04, 0x40,
+    ]
+}
+
+/// Verify an RSA signature against the signed data (header + auxiliary block).
+///
+/// The public key blob in the auxiliary block starts with a 4-byte big-endian
+/// key size in bits, followed by the big-endian RSA modulus padded to that
+/// size. The exponent is always 65537 (0x10001) per AVB convention. The
+/// signature uses PKCS#1 v1.5 padding with the hash algorithm determined by
+/// the AVB algorithm type.
+fn verify_rsa_signature(
+    algorithm: u32,
+    key: &[u8],
+    signature: &[u8],
+    signed: &[u8],
+) -> SignatureStatus {
+    let key_bits = match algorithm_key_bits(algorithm) {
+        Some(k) => k,
+        None => return SignatureStatus::Unsupported(algorithm),
+    };
+    let key_bytes = key_bits / 8;
+
+    // The key blob must contain at least the 4-byte size prefix plus the modulus.
+    if key.len() < 4 + key_bytes {
+        return SignatureStatus::Invalid;
+    }
+
+    // Read the key size from the blob and verify it matches the algorithm.
+    let blob_bits = be32(key, 0) as usize;
+    if blob_bits != key_bits {
+        return SignatureStatus::Invalid;
+    }
+
+    // Extract the RSA modulus (n).
+    let modulus = &key[4..4 + key_bytes];
+
+    // AVB always uses the standard RSA public exponent 65537 (0x10001).
+    let exponent = rsa::BigUint::from_bytes_be(&65537u64.to_be_bytes());
+    let n = rsa::BigUint::from_bytes_be(modulus);
+
+    // Build the RSA public key. For >4096-bit keys (RSA-8192) we bypass the
+    // default size check, since the crate caps RsaPublicKey::new at 4096 bits.
+    let pubkey = if key_bits <= 4096 {
+        match RsaPublicKey::new(n, exponent) {
+            Ok(k) => k,
+            Err(_) => return SignatureStatus::Invalid,
+        }
+    } else {
+        RsaPublicKey::new_unchecked(n, exponent)
+    };
+
+    // Compute the raw hash that was signed.
+    let digest = match auth_hash(algorithm, signed) {
+        Some(d) => d,
+        None => return SignatureStatus::Invalid,
+    };
+
+    // PKCS#1 v1.5 with the standard DigestInfo prefix for the matching hash.
+    let (prefix, hash_len) = match algorithm {
+        1..=3 => (pkcs1v15_sha256_prefix(), 32),
+        4..=6 => (pkcs1v15_sha512_prefix(), 64),
+        _ => return SignatureStatus::Invalid,
+    };
+
+    let scheme = Pkcs1v15Sign {
+        hash_len: Some(hash_len),
+        prefix: prefix.into_boxed_slice(),
+    };
+
+    if pubkey.verify(scheme, &digest, signature).is_ok() {
+        SignatureStatus::Valid
+    } else {
+        SignatureStatus::Invalid
+    }
+}
+
+/// Read a PEM-encoded RSA public key from a file, returning the key for
+/// external verification. Supports both PKCS#1 (`BEGIN RSA PUBLIC KEY`) and
+/// PKCS#8 / SubjectPublicKeyInfo (`BEGIN PUBLIC KEY`) formats.
+pub fn read_key(path: &Path) -> Result<RsaPublicKey> {
+    refuse_blocking_file(path)?;
+    ensure!(
+        !path.is_dir(),
+        "{} is a directory, not a key file",
+        path.display()
+    );
+    let mut f = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut pem = String::new();
+    f.read_to_string(&mut pem)?;
+    // Try PKCS#8 / SubjectPublicKeyInfo first (BEGIN PUBLIC KEY), then PKCS#1 (BEGIN RSA PUBLIC KEY).
+    rsa::pkcs8::DecodePublicKey::from_public_key_pem(&pem)
+        .or_else(|_| rsa::pkcs1::DecodeRsaPublicKey::from_pkcs1_pem(&pem))
+        .with_context(|| "invalid PEM RSA public key")
+}
+
+/// Verify an RSA signature using an externally supplied public key instead of
+/// the key embedded in the vbmeta image.
+fn verify_with_external_key(
+    algorithm: u32,
+    pubkey: &RsaPublicKey,
+    signature: &[u8],
+    signed: &[u8],
+) -> SignatureStatus {
+    // Determine the hash algorithm from the AVB algorithm type.
+    let (prefix, hash_len) = match algorithm {
+        1..=3 => (pkcs1v15_sha256_prefix(), 32),
+        4..=6 => (pkcs1v15_sha512_prefix(), 64),
+        _ => return SignatureStatus::Unsupported(algorithm),
+    };
+    let digest = match auth_hash(algorithm, signed) {
+        Some(d) => d,
+        None => return SignatureStatus::Invalid,
+    };
+    let scheme = Pkcs1v15Sign {
+        hash_len: Some(hash_len),
+        prefix: prefix.into_boxed_slice(),
+    };
+    if pubkey.verify(scheme, &digest, signature).is_ok() {
+        SignatureStatus::Valid
+    } else {
+        SignatureStatus::Invalid
     }
 }
 
@@ -308,7 +483,7 @@ fn block_len(head: &[u8]) -> Result<u64> {
     Ok(total)
 }
 
-pub fn parse(data: &[u8]) -> Result<Vbmeta> {
+pub fn parse(data: &[u8], external_key: Option<&RsaPublicKey>) -> Result<Vbmeta> {
     let total = block_len(data)?;
     ensure!(
         total <= data.len() as u64,
@@ -330,6 +505,13 @@ pub fn parse(data: &[u8]) -> Result<Vbmeta> {
     let mut signed = data[..HEADER_LEN].to_vec();
     signed.extend_from_slice(aux);
     let digest_ok = auth_hash(algorithm, &signed).map(|d| d == hash);
+    let signature_verified = if algorithm == 0 {
+        SignatureStatus::Absent
+    } else if let Some(ext_key) = external_key {
+        verify_with_external_key(algorithm, ext_key, signature, &signed)
+    } else {
+        verify_rsa_signature(algorithm, key, signature, &signed)
+    };
 
     let mut descriptors = Vec::new();
     let mut p = 0usize;
@@ -373,6 +555,7 @@ pub fn parse(data: &[u8]) -> Result<Vbmeta> {
         public_key_sha256: (!key.is_empty()).then(|| hex(&Sha256::digest(key))),
         public_key_metadata_len: metadata.len() as u64,
         digest_ok,
+        signature_verified,
         descriptors,
         footer: None,
     })
@@ -388,7 +571,7 @@ fn parse_footer(b: &[u8]) -> Option<Footer> {
 }
 
 /// Read the vbmeta of a `vbmeta.img`-style file or of a partition image with an AVB footer.
-pub fn read_input(path: &Path) -> Result<Vbmeta> {
+pub fn read_input(path: &Path, external_key: Option<&RsaPublicKey>) -> Result<Vbmeta> {
     refuse_blocking_file(path)?;
     ensure!(
         !path.is_dir(),
@@ -404,7 +587,7 @@ pub fn read_input(path: &Path) -> Result<Vbmeta> {
         let mut data = vec![0u8; total as usize];
         f.seek(SeekFrom::Start(0))?;
         f.read_exact(&mut data)?;
-        return parse(&data);
+        return parse(&data, external_key);
     }
     ensure!(
         len >= FOOTER_LEN as u64,
@@ -429,7 +612,8 @@ pub fn read_input(path: &Path) -> Result<Vbmeta> {
     let mut data = vec![0u8; footer.vbmeta_size as usize];
     f.seek(SeekFrom::Start(footer.vbmeta_offset))?;
     f.read_exact(&mut data)?;
-    let mut meta = parse(&data).context("reading the vbmeta block the footer points to")?;
+    let mut meta =
+        parse(&data, external_key).context("reading the vbmeta block the footer points to")?;
     meta.footer = Some(footer);
     Ok(meta)
 }
@@ -520,6 +704,27 @@ fn descriptor_json(d: &Descriptor) -> Value {
     }
 }
 
+impl SignatureStatus {
+    /// Serialize to a JSON value for the `signature_verified` field.
+    fn to_json(&self) -> Value {
+        match self {
+            SignatureStatus::Valid => json!("valid"),
+            SignatureStatus::Invalid => json!("invalid"),
+            SignatureStatus::Absent => json!("absent"),
+            SignatureStatus::Unsupported(n) => json!({"unsupported": n}),
+        }
+    }
+    /// Human-readable one-liner for text output.
+    fn to_text(&self) -> String {
+        match self {
+            SignatureStatus::Valid => "ok".into(),
+            SignatureStatus::Invalid => "FAILED".into(),
+            SignatureStatus::Absent => "n/a (no signature)".into(),
+            SignatureStatus::Unsupported(n) => format!("not checked (algorithm {n} not supported)"),
+        }
+    }
+}
+
 impl Vbmeta {
     pub fn to_json(&self, checks: &[(String, Check)]) -> Value {
         json!({
@@ -537,7 +742,7 @@ impl Vbmeta {
             "public_key_sha256": self.public_key_sha256,
             "public_key_metadata_bytes": self.public_key_metadata_len,
             "digest_ok": self.digest_ok,
-            "signature_verified": false,
+            "signature_verified": self.signature_verified.to_json(),
             "footer": self.footer.as_ref().map(|f| json!({
                 "version": format!("{}.{}", f.version.0, f.version.1),
                 "original_image_size": f.original_image_size,
@@ -561,14 +766,15 @@ impl Vbmeta {
         )];
         o.push(format!("release string: {:?}", self.release));
         o.push(format!(
-            "authentication block {} bytes, auxiliary block {} bytes; digest check: {}; signature: not verified",
+            "authentication block {} bytes, auxiliary block {} bytes; digest check: {}; signature: {}",
             self.auth_size,
             self.aux_size,
             match self.digest_ok {
                 Some(true) => "ok",
                 Some(false) => "MISMATCH",
                 None => "n/a (no signature)",
-            }
+            },
+            self.signature_verified.to_text()
         ));
         if let (Some(bits), Some(sha)) = (self.public_key_bits, &self.public_key_sha256) {
             o.push(format!("public key: {bits} bits, sha256 {sha}"));
@@ -606,7 +812,9 @@ impl Vbmeta {
     }
 
     pub fn any_failure(&self, checks: &[(String, Check)]) -> bool {
-        self.digest_ok == Some(false) || checks.iter().any(|(_, c)| *c == Check::Mismatch)
+        self.digest_ok == Some(false)
+            || self.signature_verified == SignatureStatus::Invalid
+            || checks.iter().any(|(_, c)| *c == Check::Mismatch)
     }
 }
 
@@ -736,10 +944,95 @@ mod tests {
         [h, auth, aux].concat()
     }
 
+    /// Create an AVB-format public key blob from an RSA private key.
+    /// The blob is: 4-byte big-endian key size in bits, followed by the raw modulus.
+    fn key_blob_from_key(key: &RsaPrivateKey) -> Vec<u8> {
+        let bits = key.n().bits() as u32;
+        let n_bytes = key.n().to_bytes_be();
+        let mut k = bits.to_be_bytes().to_vec();
+        k.extend(n_bytes);
+        k
+    }
+
+    /// Create an AVB-format public key blob with a fake key of the given bit size.
+    /// Only the 4-byte header is real; the modulus is zeros. Used for tests that
+    /// don't exercise RSA verification.
     fn key_blob(bits: u32) -> Vec<u8> {
         let mut k = bits.to_be_bytes().to_vec();
-        k.extend([5u8; 60]);
+        let key_bytes = (bits as usize) / 8;
+        k.extend(vec![5u8; 60]);
+        k.resize(4 + key_bytes, 5u8);
         k
+    }
+
+    /// Build a properly signed vbmeta block using a real RSA private key.
+    /// The key blob, authentication hash, and signature are all computed from scratch.
+    fn vbmeta_signed(
+        algorithm: u32,
+        flags: u32,
+        descs: &[Vec<u8>],
+        priv_key: &RsaPrivateKey,
+    ) -> Vec<u8> {
+        let key_blob = key_blob_from_key(priv_key);
+        let key_bits = algorithm_key_bits(algorithm).unwrap();
+        let sig_len = key_bits / 8;
+        let hash_len = match algorithm {
+            1..=3 => 32,
+            4..=6 => 64,
+            _ => 0,
+        };
+
+        // Build the auxiliary block: descriptors + public key, padded to 64 bytes.
+        let mut aux: Vec<u8> = descs.concat();
+        let desc_len = aux.len();
+        aux.extend(&key_blob);
+        aux.resize(aux.len().div_ceil(64) * 64, 0);
+
+        let auth_len = (hash_len + sig_len).div_ceil(64) * 64;
+
+        // Build the header.
+        let mut h = vec![0u8; HEADER_LEN];
+        h[..4].copy_from_slice(b"AVB0");
+        h[4..8].copy_from_slice(&1u32.to_be_bytes()); // libavb major
+        h[8..12].copy_from_slice(&0u32.to_be_bytes()); // libavb minor
+        h[12..20].copy_from_slice(&(auth_len as u64).to_be_bytes());
+        h[20..28].copy_from_slice(&(aux.len() as u64).to_be_bytes());
+        h[28..32].copy_from_slice(&algorithm.to_be_bytes());
+        h[40..48].copy_from_slice(&(hash_len as u64).to_be_bytes()); // hash offset in auth
+        h[48..56].copy_from_slice(&(hash_len as u64).to_be_bytes()); // hash size
+        h[56..64].copy_from_slice(&(sig_len as u64).to_be_bytes()); // signature size
+        h[64..72].copy_from_slice(&(desc_len as u64).to_be_bytes());
+        h[72..80].copy_from_slice(&(key_blob.len() as u64).to_be_bytes());
+        h[80..88].copy_from_slice(&((desc_len + key_blob.len()) as u64).to_be_bytes());
+        h[96..104].copy_from_slice(&0u64.to_be_bytes());
+        h[104..112].copy_from_slice(&(desc_len as u64).to_be_bytes());
+        h[112..120].copy_from_slice(&1234u64.to_be_bytes());
+        h[120..124].copy_from_slice(&flags.to_be_bytes());
+        h[124..128].copy_from_slice(&3u32.to_be_bytes());
+        h[128..128 + 9].copy_from_slice(b"test 1.0\0");
+
+        // Compute the data that is signed: header + auxiliary block.
+        let mut signed_data = h.clone();
+        signed_data.extend(&aux);
+        let digest = auth_hash(algorithm, &signed_data).unwrap();
+
+        // Sign with PKCS#1 v1.5 using the appropriate DigestInfo prefix.
+        let (prefix, _) = match algorithm {
+            1..=3 => (pkcs1v15_sha256_prefix(), 32),
+            4..=6 => (pkcs1v15_sha512_prefix(), 64),
+            _ => unreachable!(),
+        };
+        let scheme = Pkcs1v15Sign {
+            hash_len: Some(hash_len),
+            prefix: prefix.into_boxed_slice(),
+        };
+        let signature = priv_key.sign(scheme, &digest).unwrap();
+
+        let mut auth = vec![0u8; auth_len];
+        auth[..hash_len].copy_from_slice(&digest);
+        auth[hash_len..hash_len + sig_len].copy_from_slice(&signature);
+
+        [h, auth, aux].concat()
     }
 
     #[test]
@@ -753,7 +1046,7 @@ mod tests {
             chain("vbmeta_system", 2, &[8u8; 40]),
             desc(99, &[1, 2, 3]),
         ];
-        let m = parse(&vbmeta(1, 0, &d, &key_blob(2048))).unwrap();
+        let m = parse(&vbmeta(1, 0, &d, &key_blob(2048)), None).unwrap();
         assert_eq!(m.libavb, (1, 0));
         assert_eq!(
             (m.rollback_index, m.rollback_index_location, m.flags),
@@ -831,7 +1124,7 @@ mod tests {
 
     #[test]
     fn an_unsigned_image_has_no_digest_and_flags_are_named() {
-        let m = parse(&vbmeta(0, 2, &[], &[])).unwrap();
+        let m = parse(&vbmeta(0, 2, &[], &[]), None).unwrap();
         assert_eq!(
             (m.digest_ok, m.public_key_bits, m.public_key_sha256.clone()),
             (None, None, None)
@@ -847,14 +1140,14 @@ mod tests {
     #[test]
     fn a_changed_byte_breaks_the_digest() {
         let mut v = vbmeta(1, 0, &[prop("k", "v")], &key_blob(2048));
-        assert_eq!(parse(&v).unwrap().digest_ok, Some(true));
+        assert_eq!(parse(&v, None).unwrap().digest_ok, Some(true));
         let last = v.len() - 1;
         v[last] ^= 1; // padding byte of the auxiliary block
-        assert_eq!(parse(&v).unwrap().digest_ok, Some(false));
+        assert_eq!(parse(&v, None).unwrap().digest_ok, Some(false));
         let mut w = vbmeta(1, 0, &[prop("k", "v")], &key_blob(2048));
         w[112] ^= 1; // rollback index in the header
-        assert_eq!(parse(&w).unwrap().digest_ok, Some(false));
-        assert!(parse(&w).unwrap().any_failure(&[]));
+        assert_eq!(parse(&w, None).unwrap().digest_ok, Some(false));
+        assert!(parse(&w, None).unwrap().any_failure(&[]));
     }
 
     #[test]
@@ -869,7 +1162,7 @@ mod tests {
     #[test]
     fn hostile_headers_are_refused_with_a_reason() {
         let good = vbmeta(1, 0, &[prop("k", "v")], &key_blob(2048));
-        let err = |v: Vec<u8>| format!("{:#}", parse(&v).unwrap_err());
+        let err = |v: Vec<u8>| format!("{:#}", parse(&v, None).unwrap_err());
         assert!(err(vec![0; 10]).contains("too short"));
         let mut bad_magic = good.clone();
         bad_magic[0] = b'X';
@@ -896,7 +1189,8 @@ mod tests {
 
     #[test]
     fn malformed_descriptors_are_refused() {
-        let err = |d: Vec<Vec<u8>>| format!("{:#}", parse(&vbmeta(0, 0, &d, &[])).unwrap_err());
+        let err =
+            |d: Vec<Vec<u8>>| format!("{:#}", parse(&vbmeta(0, 0, &d, &[]), None).unwrap_err());
         // length not a multiple of 8
         let mut odd = prop("k", "v");
         odd[8..16].copy_from_slice(&5u64.to_be_bytes());
@@ -921,7 +1215,7 @@ mod tests {
         assert!(
             format!(
                 "{:#}",
-                parse(&vbmeta(0, 0, &[vec![0u8; 8]], &[])).unwrap_err()
+                parse(&vbmeta(0, 0, &[vec![0u8; 8]], &[]), None).unwrap_err()
             )
             .contains("header runs past")
         );
@@ -940,7 +1234,7 @@ mod tests {
         let mut padded = v.clone();
         padded.resize(8192, 0);
         let (_g, p) = write_tmp("pad", &padded);
-        let m = read_input(&p).unwrap();
+        let m = read_input(&p, None).unwrap();
         assert_eq!(m.descriptors.len(), 1);
         assert!(m.footer.is_none());
 
@@ -957,7 +1251,7 @@ mod tests {
         let n = part.len();
         part[n - 64..].copy_from_slice(&footer);
         let (_g, p) = write_tmp("footer", &part);
-        let m = read_input(&p).unwrap();
+        let m = read_input(&p, None).unwrap();
         let f = m.footer.unwrap();
         assert_eq!(
             (f.original_image_size, f.vbmeta_offset, f.vbmeta_size),
@@ -971,17 +1265,17 @@ mod tests {
         assert!(
             format!(
                 "{:#}",
-                read_input(&write_tmp("badfoot", &bad).1).unwrap_err()
+                read_input(&write_tmp("badfoot", &bad).1, None).unwrap_err()
             )
             .contains("outside the image")
         );
         let e = format!(
             "{:#}",
-            read_input(&write_tmp("none", &vec![1u8; 4096]).1).unwrap_err()
+            read_input(&write_tmp("none", &vec![1u8; 4096]).1, None).unwrap_err()
         );
         assert!(e.contains("not an AVB image"), "{e}");
-        assert!(read_input(&write_tmp("tiny", b"AVB").1).is_err());
-        assert!(read_input(Path::new("/definitely/not/here")).is_err());
+        assert!(read_input(&write_tmp("tiny", b"AVB").1, None).is_err());
+        assert!(read_input(Path::new("/definitely/not/here"), None).is_err());
     }
 
     #[test]
@@ -1001,7 +1295,7 @@ mod tests {
             hash_desc("../escape", 8192, &salt, &digest),
             tree_desc("system"),
         ];
-        let m = parse(&vbmeta(0, 0, &d, &[])).unwrap();
+        let m = parse(&vbmeta(0, 0, &d, &[]), None).unwrap();
         let (_g, tmp) = write_tmp("verify", b"");
         let outer = tmp.parent().unwrap().to_path_buf();
         let dir = outer.join("inner");
@@ -1041,25 +1335,28 @@ mod tests {
 
     #[test]
     fn json_and_text_carry_the_main_fields() {
-        let m = parse(&vbmeta(
-            1,
-            1,
-            &[
-                prop("k", "v"),
-                hash_desc("boot", 1, &[], &[0; 32]),
-                tree_desc("s"),
-                cmdline(0, "c"),
-                chain("p", 1, &[1]),
-            ],
-            &key_blob(4096),
-        ))
+        let m = parse(
+            &vbmeta(
+                1,
+                1,
+                &[
+                    prop("k", "v"),
+                    hash_desc("boot", 1, &[], &[0; 32]),
+                    tree_desc("s"),
+                    cmdline(0, "c"),
+                    chain("p", 1, &[1]),
+                ],
+                &key_blob(4096),
+            ),
+            None,
+        )
         .unwrap();
         let j = m.to_json(&[("boot".into(), Check::Ok)]);
         assert_eq!(j["algorithm"], "SHA256_RSA2048");
         assert_eq!(j["flag_names"], "HASHTREE_DISABLED");
         assert_eq!(j["public_key_bits"], 4096);
         assert_eq!(j["digest_ok"], true);
-        assert_eq!(j["signature_verified"], false);
+        assert_eq!(j["signature_verified"], "invalid");
         assert_eq!(j["descriptors"].as_array().unwrap().len(), 5);
         assert_eq!(j["partition_checks"][0]["result"], "ok");
         let t = m.to_text(&[]);
@@ -1097,12 +1394,99 @@ mod tests {
             for val in [0x00u8, 0xFF, 0x80, 0x01] {
                 let mut w = v.clone();
                 w[at] = val;
-                match parse(&w) {
+                match parse(&w, None) {
                     Ok(_) => ok += 1,
                     Err(_) => err += 1,
                 }
             }
         }
         assert!(ok > 100 && err > 100, "ok={ok} err={err}");
+    }
+
+    #[test]
+    fn rsa_signature_verifies_for_a_signed_block() {
+        let mut rng = OsRng;
+        let priv_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let v = vbmeta_signed(1, 0, &[prop("k", "v")], &priv_key);
+        let m = parse(&v, None).unwrap();
+        assert_eq!(m.algorithm, 1);
+        assert_eq!(m.signature_verified, SignatureStatus::Valid);
+        assert_eq!(m.digest_ok, Some(true));
+        assert_eq!(m.public_key_bits, Some(2048));
+        assert!(m.to_text(&[]).contains("signature: ok"));
+        assert_eq!(m.to_json(&[])["signature_verified"], "valid");
+    }
+
+    #[test]
+    fn a_flipped_signature_byte_breaks_rsa_verification() {
+        let mut rng = OsRng;
+        let priv_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let mut v = vbmeta_signed(1, 0, &[prop("k", "v")], &priv_key);
+        // The digest is first 32 bytes of auth, then the 256-byte signature.
+        let auth_start = HEADER_LEN + 64;
+        let sig_start = auth_start + 32;
+        v[sig_start] ^= 0x01;
+        let m = parse(&v, None).unwrap();
+        assert_eq!(m.digest_ok, Some(true));
+        assert_eq!(m.signature_verified, SignatureStatus::Invalid);
+        assert!(m.to_text(&[]).contains("signature: FAILED"));
+    }
+
+    #[test]
+    fn a_flipped_header_byte_breaks_digest_and_signature() {
+        let mut rng = OsRng;
+        let priv_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let mut v = vbmeta_signed(1, 0, &[prop("k", "v")], &priv_key);
+        // Flip a byte in the rollback_index field (offset 112) — structural fields
+        // like auth_size/aux_size are untouched, so the block still parses.
+        v[112] ^= 0x01;
+        let m = parse(&v, None).unwrap();
+        assert_eq!(m.digest_ok, Some(false));
+        assert_eq!(m.signature_verified, SignatureStatus::Invalid);
+        assert!(m.to_text(&[]).contains("digest check: MISMATCH"));
+        assert!(m.to_text(&[]).contains("signature: FAILED"));
+    }
+
+    #[test]
+    fn sha512_rsa4096_signature_verifies() {
+        let mut rng = OsRng;
+        let priv_key = RsaPrivateKey::new(&mut rng, 4096).unwrap();
+        let v = vbmeta_signed(5, 0, &[prop("k", "v")], &priv_key);
+        let m = parse(&v, None).unwrap();
+        assert_eq!(m.algorithm, 5);
+        assert_eq!(m.signature_verified, SignatureStatus::Valid);
+        assert_eq!(m.digest_ok, Some(true));
+        assert_eq!(m.public_key_bits, Some(4096));
+        assert!(m.to_text(&[]).contains("signature: ok"));
+    }
+
+    #[test]
+    fn an_unsupported_algorithm_is_not_a_failure() {
+        // AVB algorithm 5 is actually SHA512_RSA4096, but use an unknown id (99)
+        // to exercise the Unsupported path.
+        let v = vbmeta(99, 0, &[prop("k", "v")], &[]);
+        let m = parse(&v, None).unwrap();
+        assert_eq!(m.algorithm, 99);
+        assert_eq!(m.signature_verified, SignatureStatus::Unsupported(99));
+        assert!(!m.to_text(&[]).contains("signature: FAILED"));
+        assert!(
+            m.to_text(&[])
+                .contains("signature: not checked (algorithm 99 not supported)")
+        );
+        assert_eq!(
+            m.to_json(&[])["signature_verified"],
+            json!({"unsupported": 99})
+        );
+        assert!(!m.any_failure(&[]));
+    }
+
+    #[test]
+    fn an_unsigned_block_has_no_signature_check() {
+        let v = vbmeta(0, 0, &[prop("k", "v")], &[]);
+        let m = parse(&v, None).unwrap();
+        assert_eq!(m.algorithm, 0);
+        assert_eq!(m.signature_verified, SignatureStatus::Absent);
+        assert!(m.to_text(&[]).contains("signature: n/a (no signature)"));
+        assert_eq!(m.to_json(&[])["signature_verified"], "absent");
     }
 }

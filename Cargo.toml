@@ -22,4 +22,8 @@ sha2 = "0.11.0"
 zip = "8.6.0"
 tar = "0.4"
 md-5 = "0.11"
-rsa = { version = "0.9.10", default-features = false, features = ["std", "u64_digit"] }
+rsa = { version = "0.9.10", default-features = false, features = ["std", "u64_digit", "getrandom", "pem"] }
+
+[dev-dependencies]
+rand = "0.8"
+rsa = { version = "0.9.10" }
