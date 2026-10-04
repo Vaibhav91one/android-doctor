@@ -6,6 +6,7 @@ mod archive;
 mod audit;
 mod avb;
 mod bootimg;
+mod content;
 mod detect;
 mod erofsfs;
 mod ext4fs;

@@ -5,6 +5,7 @@
 //! world-writable files, and the services declared in init `.rc` files (adbd and anything running
 //! as root or in a shell or `su` SELinux domain), then turns what it found into findings with a
 //! severity. It only reads: nothing is extracted or executed.
+use crate::content::{Hit as ContentHit, MAX_SCAN_FILE_BYTES, MAX_SCAN_TOTAL_BYTES, scan_bytes};
 use crate::ramdisk::{MAX_PROP_FILE, REPORTED_PROPS, is_prop_file};
 use crate::term::{Renderer, Severity as TermSeverity, Style};
 use crate::tree::{Entry, Kind, Tree};
@@ -100,6 +101,8 @@ pub struct ImageAudit {
     pub su: Vec<String>,
     pub services: Vec<Service>,
     pub findings: Vec<Finding>,
+    pub content_findings: Vec<ContentHit>,
+    pub content_bytes_scanned: u64,
 }
 
 fn label_of(e: &Entry) -> String {
@@ -256,12 +259,47 @@ fn analyse_with(
             }
         }
     }
+    let (hits, scanned) = scan_content(entries, read);
+    a.content_findings = hits;
+    a.content_bytes_scanned = scanned;
     a.findings = findings(&a);
     Ok(a)
 }
 
 fn prop_values<'a>(a: &'a ImageAudit, key: &str) -> Vec<&'a PropHit> {
     a.props.iter().filter(|p| p.key == key).collect()
+}
+
+/// Walk every regular file under MAX_SCAN_FILE_BYTES, reading at most that many
+/// bytes per file, and scan it for indicators. Returns de-duplicated hits and the
+/// total bytes read.
+fn scan_content(
+    entries: &[Entry],
+    read: &mut dyn FnMut(&str) -> Result<Vec<u8>>,
+) -> (Vec<ContentHit>, u64) {
+    let mut hits = Vec::new();
+    let mut scanned: u64 = 0;
+    let mut budget = MAX_SCAN_TOTAL_BYTES;
+    for e in entries {
+        if e.kind != Kind::File || e.size == 0 || e.size > MAX_SCAN_FILE_BYTES {
+            continue;
+        }
+        if budget == 0 {
+            break;
+        }
+        let bytes = match read(&e.path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        scanned += bytes.len() as u64;
+        budget = budget.saturating_sub(bytes.len() as u64);
+        for hit in scan_bytes(&e.path, &bytes) {
+            if !hits.contains(&hit) {
+                hits.push(hit);
+            }
+        }
+    }
+    (hits, scanned)
 }
 
 fn findings(a: &ImageAudit) -> Vec<Finding> {
@@ -463,6 +501,28 @@ fn findings(a: &ImageAudit) -> Vec<Finding> {
             format!("{} files carry file capabilities", a.capabilities.len()),
         );
     }
+    if !a.content_findings.is_empty() {
+        let rule = match a.content_findings[0].rule.as_str() {
+            "hardcoded_credentials" => "hardcoded_credentials",
+            "cloud_credentials" => "cloud_credentials",
+            "debug_endpoints" => "debug_endpoints",
+            _ => "content-indicator",
+        };
+        let sev = match a.content_findings[0].severity.as_str() {
+            "high" => Severity::High,
+            "medium" => Severity::Medium,
+            _ => Severity::Info,
+        };
+        add(
+            sev,
+            rule,
+            format!(
+                "{} content finding(s) across image (scanned {} bytes)",
+                a.content_findings.len(),
+                a.content_bytes_scanned
+            ),
+        );
+    }
     f.sort_by_key(|x| x.severity);
     f
 }
@@ -539,11 +599,12 @@ pub fn audit_image(path: &Path) -> Result<ImageAudit> {
         .and_then(|s| s.to_str())
         .unwrap_or("image")
         .to_string();
-    analyse(&name, &entries, &mut |p| {
+    let a = analyse(&name, &entries, &mut |p| {
         let mut buf = Vec::new();
         tree.cat_path(p, &mut buf)?;
         Ok(buf)
-    })
+    })?;
+    Ok(a)
 }
 
 fn special_json(s: &Special) -> Value {
@@ -568,6 +629,10 @@ pub fn to_json(audits: &[ImageAudit]) -> Value {
             "findings": a.findings.iter().map(|f| json!({
                 "severity": f.severity.name(), "rule": f.rule, "detail": f.detail,
             })).collect::<Vec<_>>(),
+            "content_findings": a.content_findings.iter().map(|f| json!({
+                "severity": f.severity, "rule": f.rule, "detail": f.detail,
+            })).collect::<Vec<_>>(),
+            "content_bytes_scanned": a.content_bytes_scanned,
         })).collect::<Vec<_>>(),
     })
 }
@@ -642,6 +707,16 @@ pub fn to_text(audits: &[ImageAudit], no_color: bool) -> String {
                     },
                     s.file
                 )
+            }));
+        }
+        if !a.content_findings.is_empty() {
+            o.push(format!(
+                "content findings ({} found, {} bytes scanned):",
+                a.content_findings.len(),
+                a.content_bytes_scanned
+            ));
+            o.extend(capped(&a.content_findings, |c| {
+                format!("  [{}] {} {}: {}", c.severity, c.rule, c.path, c.detail)
             }));
         }
     }
@@ -1050,7 +1125,12 @@ service plain /system/bin/plain
             Ok(Vec::new())
         })
         .unwrap();
-        assert_eq!(calls, ["system/build.prop", "system/etc/init/x.rc"]);
+        // analyse_with reads prop/rc files; scan_content reads all small files
+        assert_eq!(calls.len(), 6);
+        assert!(calls.contains(&"system/build.prop".to_string()));
+        assert!(calls.contains(&"system/etc/init/x.rc".to_string()));
+        assert!(calls.contains(&"system/bin/app".to_string()));
+        assert!(calls.contains(&"system/big.prop".to_string()));
     }
 
     #[test]
@@ -1064,9 +1144,10 @@ service plain /system/bin/plain
         assert!(e.contains("more than 4 property and init files"), "{e}");
         let e = format!("{:#}", ok(5, 499).unwrap_err());
         assert!(e.contains("499 bytes"), "{e}");
-        // files over the per-file cap are never read, so they do not count
+        // files over the per-file cap are never read by text parsing, so they do not count
+        // (scan_content reads them but does not count them against the text-file budget)
         let big = vec![entry("x.prop", Kind::File, 0o644, MAX_PROP_FILE + 1)];
-        assert!(analyse_with("t", &big, &mut |_| unreachable!(), 0, 0).is_ok());
+        assert!(analyse_with("t", &big, &mut |_| Ok(Vec::new()), 0, 0).is_ok());
     }
 
     #[test]
@@ -1135,6 +1216,34 @@ service plain /system/bin/plain
             assert!(t.contains(want), "{want} in {t}");
         }
         assert!(to_text(&[run(vec![], &[])], true).contains("no findings"));
+    }
+
+    #[test]
+    fn content_findings_are_collected() {
+        let key = "BEGIN RSA PRIVATE KEY verysecret";
+        let a = run(
+            vec![file("secrets/key.pem", 0o644)],
+            &[("secrets/key.pem", key)],
+        );
+        assert_eq!(a.content_findings.len(), 1);
+        assert_eq!(a.content_findings[0].rule, "hardcoded_credentials");
+        assert_eq!(a.content_findings[0].severity, "high");
+        assert!(
+            a.content_findings[0]
+                .detail
+                .contains("BEGIN RSA PRIVATE KEY")
+        );
+        assert!(a.content_bytes_scanned > 0);
+        assert!(rules(&a).contains(&"hardcoded_credentials"));
+        let j = to_json(std::slice::from_ref(&a));
+        assert_eq!(
+            j["images"][0]["content_findings"].as_array().unwrap().len(),
+            1
+        );
+        assert!(j["images"][0]["content_bytes_scanned"].as_u64().unwrap() > 0);
+        let t = to_text(&[a], true);
+        assert!(t.contains("hardcoded_credentials"));
+        assert!(t.contains("content findings"));
     }
 
     #[test]
