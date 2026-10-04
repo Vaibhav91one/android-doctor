@@ -2023,7 +2023,7 @@ mod tests {
         std::fs::write(&broken, &bad).unwrap();
         let images = [sys.as_path(), vend.as_path(), boot.as_path(), ero.as_path()];
         let out = dir.join("files");
-        extract_trees(&images, &out, false).unwrap();
+        extract_trees(&images, &out, &crate::extract::ExtractOptions::default()).unwrap();
         assert_eq!(
             std::fs::read(out.join("system/files/d/b")).unwrap(),
             vec![7u8; 5000]
@@ -2047,7 +2047,12 @@ mod tests {
         );
         let e = format!(
             "{:#}",
-            extract_trees(&[broken.as_path()], &dir.join("b"), false).unwrap_err()
+            extract_trees(
+                &[broken.as_path()],
+                &dir.join("b"),
+                &crate::extract::ExtractOptions::default()
+            )
+            .unwrap_err()
         );
         assert!(e.contains("not a readable erofs image"), "{e}");
         assert!(
@@ -2055,10 +2060,21 @@ mod tests {
             "a failed tree leaves nothing"
         );
         // a second run refuses to merge into an existing tree, --force replaces it
-        let e = format!("{:#}", extract_trees(&images, &out, false).unwrap_err());
+        let e = format!(
+            "{:#}",
+            extract_trees(&images, &out, &crate::extract::ExtractOptions::default()).unwrap_err()
+        );
         assert!(e.contains("not empty"), "{e}");
         std::fs::write(out.join("system/files/stale"), b"x").unwrap();
-        extract_trees(&images, &out, true).unwrap();
+        extract_trees(
+            &images,
+            &out,
+            &crate::extract::ExtractOptions {
+                force: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert!(!out.join("system/files/stale").exists());
         assert_eq!(
             std::fs::read(out.join("system/files/a")).unwrap(),

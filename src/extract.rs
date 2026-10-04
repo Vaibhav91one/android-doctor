@@ -11,6 +11,30 @@ const LIST_SUFFIX: &str = ".transfer.list";
 /// Transfer lists are a few KiB; the cap stops a hostile zip from exhausting memory.
 const MAX_LIST_BYTES: u64 = 16 << 20;
 
+/// A top-level file from the OTA that no handler recognised.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Skipped {
+    pub name: String,
+    pub reason: String,
+}
+
+impl std::fmt::Display for Skipped {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{} ({})", self.name, self.reason)
+    }
+}
+
+/// Result of an extraction run: written image paths (with verification notes) and the
+/// top-level inputs that were skipped or unrecognised.
+#[derive(Debug, Default, Clone)]
+pub struct ExtractResult {
+    pub done: Vec<(PathBuf, String)>,
+    /// Recognised OTA scaffolding we looked at and deliberately did not extract.
+    pub ignored: Vec<Skipped>,
+    /// Top-level inputs with no handler and no scaffolding match: the security-relevant case.
+    pub unhandled: Vec<Skipped>,
+}
+
 /// Where the OTA files come from.
 enum Source {
     Zip(zip::ZipArchive<File>),
@@ -277,6 +301,18 @@ pub struct ExtractOptions {
     pub list: bool,
     /// Also extract the file tree of every ext2/3/4 image into `<out>/files/<image>/`.
     pub files: bool,
+    /// Do not fail when some inputs are skipped; print a summary and exit 0.
+    pub allow_partial: bool,
+    /// Treat unrecognised top-level files as an error instead of a warning.
+    pub strict: bool,
+    /// Suppress progress bars and per-image summary lines; errors still show.
+    pub quiet: bool,
+    /// Print debug traces to stderr.
+    #[allow(dead_code)]
+    pub verbose: bool,
+    /// Never emit ANSI colour escapes.
+    #[allow(dead_code)]
+    pub no_color: bool,
 }
 
 /// Create a fresh `.part` file. A stale one (or a planted symlink) is removed first and the new
@@ -426,9 +462,89 @@ pub fn list_images(input: &Path, opts: &ExtractOptions) -> Result<Vec<(String, u
 /// return the image paths sorted by partition name, followed by the other top-level `*.img`
 /// files (boot, recovery, ...) copied as they are. Every partition is attempted; the first
 /// error (in partition order) is returned.
+#[allow(dead_code)]
 pub fn extract_all(input: &Path, out_dir: &Path, opts: &ExtractOptions) -> Result<Vec<PathBuf>> {
+    extract_all_tracked(input, out_dir, opts).map(|r| r.done.into_iter().map(|(p, _)| p).collect())
+}
+
+/// Files a block OTA legitimately ships that are neither partitions nor partition data. These are
+/// looked at, understood, and deliberately not extracted: reporting them as failures would make
+/// the tool fail on every real update.
+const KNOWN_OTA_FILES: &[&str] = &["cert.pem", "payload_properties.txt"];
+
+/// Suffixes of OTA scaffolding. These arrive named after the partition they belong to
+/// (`system.patch.dat`, `vendor.inf`), so they must be matched as suffixes, not names.
+const KNOWN_OTA_SUFFIXES: &[&str] = &[
+    // the zero-length delta half of a partition; present in every block OTA
+    ".patch.dat",
+    ".patch.dat.br",
+    ".inf",
+    ".properties",
+    ".signature",
+    ".signature1",
+    ".signature2",
+    ".rsa",
+    ".dsa",
+];
+
+/// Directories that ship inside an OTA and hold signing metadata rather than partitions.
+const KNOWN_OTA_DIRS: &[&str] = &["META-INF"];
+
+/// Helper scripts some vendors include alongside the images (e.g. `sdat2img.py`).
+const KNOWN_OTA_SCRIPTS: &[&str] = &["sdat2img.py", "sdat2img.sh", "extractor.sh"];
+
+/// True when `name` is recognised OTA scaffolding: something we looked at on purpose and
+/// deliberately did not extract, as opposed to a file we simply have no handler for.
+pub(crate) fn is_known_scaffolding(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if KNOWN_OTA_FILES.iter().any(|f| lower == *f) {
+        return true;
+    }
+    // The delta half of a partition, named after the partition: `system.patch.dat`.
+    if lower.ends_with(".patch.dat") || lower.ends_with(".patch.dat.br") {
+        return true;
+    }
+    if KNOWN_OTA_SUFFIXES.iter().any(|e| lower.ends_with(e)) {
+        return true;
+    }
+    if KNOWN_OTA_SCRIPTS.iter().any(|f| lower == *f) {
+        return true;
+    }
+    let first = lower.split('/').next().unwrap_or(&lower);
+    if KNOWN_OTA_DIRS.contains(&first) {
+        return true;
+    }
+    false
+}
+
+/// Like `extract_all` but also returns which top-level inputs were skipped or unrecognised.
+pub(crate) fn extract_all_tracked(
+    input: &Path,
+    out_dir: &Path,
+    opts: &ExtractOptions,
+) -> Result<ExtractResult> {
     let names = Source::open(input)?.names()?;
     let (parts, raw) = select(&names, &opts.only)?;
+    // Determine which top-level inputs were skipped (not a partition, raw image, or
+    // partition data file like *.transfer.list / *.new.dat*).
+    let recognised: std::collections::HashSet<&str> =
+        parts.iter().chain(raw.iter()).copied().collect();
+    let skipped: Vec<Skipped> = names
+        .iter()
+        .map(String::as_str)
+        .filter(|n| !recognised.contains(n) && !n.ends_with(LIST_SUFFIX) && !n.contains(".new.dat"))
+        .map(|n| Skipped {
+            name: n.to_string(),
+            reason: if is_known_scaffolding(n) {
+                "known OTA file".to_string()
+            } else {
+                "no handler".to_string()
+            },
+        })
+        .collect();
+    let (ignored, unhandled): (Vec<Skipped>, Vec<Skipped>) = skipped
+        .into_iter()
+        .partition(|s| s.reason == "known OTA file");
     // Names that differ only by case would overwrite each other on case-insensitive filesystems.
     let out_names: Vec<String> = parts
         .iter()
@@ -457,8 +573,12 @@ pub fn extract_all(input: &Path, out_dir: &Path, opts: &ExtractOptions) -> Resul
     }
     std::fs::create_dir_all(out_dir)?;
 
-    // Hidden automatically when stderr is not a terminal.
-    let multi = MultiProgress::new();
+    // Hidden automatically when stderr is not a terminal, or when --quiet is passed.
+    let multi = if opts.quiet {
+        MultiProgress::with_draw_target(indicatif::ProgressDrawTarget::hidden())
+    } else {
+        MultiProgress::new()
+    };
     let style = ProgressStyle::with_template("{prefix:>10} [{bar:30}] {bytes}/{total_bytes}")
         .expect("valid progress template")
         .progress_chars("=> ");
@@ -535,7 +655,19 @@ pub fn extract_all(input: &Path, out_dir: &Path, opts: &ExtractOptions) -> Resul
             paths.push(copy_raw(&mut src, name, out_dir)?);
         }
     }
-    Ok(paths)
+    if opts.strict && !unhandled.is_empty() {
+        let names: Vec<String> = unhandled.iter().map(|s| s.name.clone()).collect();
+        bail!(
+            "strict mode: cannot classify {} file(s): {}",
+            unhandled.len(),
+            names.join(", ")
+        );
+    }
+    Ok(ExtractResult {
+        done: paths.into_iter().map(|p| (p, String::new())).collect(),
+        ignored,
+        unhandled,
+    })
 }
 
 /// `extract` command: extract all partitions and print one line per image.
@@ -546,50 +678,91 @@ pub fn run(input: &Path, out_dir: &Path, opts: &ExtractOptions) -> Result<()> {
         }
         return Ok(());
     }
-    let done = extract_all_noted(input, out_dir, opts)?;
-    for (path, note) in &done {
-        let line = describe(path)?;
-        println!(
-            "{}",
-            if note.is_empty() {
-                line
-            } else {
-                format!("{line}  {note}")
-            }
-        );
+    let result = extract_all_noted(input, out_dir, opts)?;
+    let done = &result.done;
+    if !opts.quiet {
+        for (path, note) in done {
+            let line = describe(path)?;
+            println!(
+                "{}",
+                if note.is_empty() {
+                    line
+                } else {
+                    format!("{line}  {note}")
+                }
+            );
+        }
     }
     if opts.files {
         let images: Vec<&Path> = done.iter().map(|(p, _)| p.as_path()).collect();
-        extract_trees(&images, &out_dir.join("files"), opts.force)?;
+        extract_trees(&images, &out_dir.join("files"), opts)?;
+    }
+    // End-of-run summary (issue #80): account for every top-level input in one of three
+    // buckets. Only genuinely unrecognised input is a failure.
+    let say = |msg: &str| {
+        if opts.quiet {
+            eprintln!("{msg}")
+        } else {
+            println!("{msg}")
+        }
+    };
+    let ignored_note = if result.ignored.is_empty() {
+        String::new()
+    } else {
+        format!("; ignored {} known OTA file(s)", result.ignored.len())
+    };
+    say(&format!("wrote {} partition(s){ignored_note}", done.len()));
+    if !result.unhandled.is_empty() {
+        let names: Vec<String> = result.unhandled.iter().map(|s| s.name.clone()).collect();
+        say(&format!(
+            "unhandled {} input(s): {}",
+            result.unhandled.len(),
+            names.join(", ")
+        ));
+        if !opts.allow_partial {
+            return Err(anyhow!(
+                "{} input(s) had no handler ({}); pass --allow-partial to accept this",
+                result.unhandled.len(),
+                names.join(", ")
+            ));
+        }
     }
     Ok(())
 }
 
 /// `--files`: write the file tree and manifest of every ext2/3/4 image under `<dir>/<image name>/`.
-pub(crate) fn extract_trees(images: &[&Path], dir: &Path, force: bool) -> Result<()> {
+pub(crate) fn extract_trees(images: &[&Path], dir: &Path, opts: &ExtractOptions) -> Result<()> {
+    let mut nothing = Vec::new();
     for image in images {
-        if detect::filesystem_of_file(image).is_none() {
-            continue;
-        }
+        let kind = detect::filesystem_of_file(image);
         let name = image
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("image");
         let target = dir.join(name);
-        if force && target.symlink_metadata().is_ok_and(|m| m.is_dir()) {
+        if opts.force && target.symlink_metadata().is_ok_and(|m| m.is_dir()) {
             std::fs::remove_dir_all(&target)?;
         }
-        let entries = crate::tree::Tree::open(image)?
-            .extract(&target, None)
-            .with_context(|| format!("extracting the files of {}", image.display()))?;
-        let count = |k| entries.iter().filter(|e| e.kind == k).count();
-        println!(
-            "files: {name}  {} entries ({} files, {} symlinks) -> {}",
-            entries.len(),
-            count(crate::tree::Kind::File),
-            count(crate::tree::Kind::Symlink),
-            target.display()
-        );
+        if let Some(_fs) = kind {
+            let entries = crate::tree::Tree::open(image)?
+                .extract(&target, None)
+                .with_context(|| format!("extracting the files of {}", image.display()))?;
+            let count = |k| entries.iter().filter(|e| e.kind == k).count();
+            if !opts.quiet {
+                println!(
+                    "files: {name}  {} entries ({} files, {} symlinks) -> {}",
+                    entries.len(),
+                    count(crate::tree::Kind::File),
+                    count(crate::tree::Kind::Symlink),
+                    target.display()
+                );
+            }
+        } else {
+            nothing.push(name.to_string());
+        }
+    }
+    if !nothing.is_empty() && !opts.quiet {
+        eprintln!("no extractable file tree in: {}", nothing.join(", "));
     }
     Ok(())
 }
@@ -600,18 +773,28 @@ pub fn extract_all_noted(
     input: &Path,
     out_dir: &Path,
     opts: &ExtractOptions,
-) -> Result<Vec<(PathBuf, String)>> {
+) -> Result<ExtractResult> {
     if let Some(done) = payload::extract(input, out_dir, opts)? {
-        return Ok(done);
+        return Ok(ExtractResult {
+            done,
+            ignored: Vec::new(),
+            unhandled: Vec::new(),
+        });
     }
     if pac::is_pac(input) {
         let paths = pac::extract(input, out_dir, opts)?;
-        return Ok(paths.into_iter().map(|p| (p, String::new())).collect());
+        return Ok(ExtractResult {
+            done: paths.into_iter().map(|p| (p, String::new())).collect(),
+            ignored: Vec::new(),
+            unhandled: Vec::new(),
+        });
     }
-    Ok(extract_all(input, out_dir, opts)?
-        .into_iter()
-        .map(|p| (p, String::new()))
-        .collect())
+    let result = extract_all_tracked(input, out_dir, opts)?;
+    Ok(ExtractResult {
+        done: result.done,
+        ignored: result.ignored,
+        unhandled: result.unhandled,
+    })
 }
 
 /// One result line: path, size, and the filesystem when the image holds one we recognise.
@@ -1561,5 +1744,180 @@ mod tests {
         write_dir(&ota, &[("we ird.transfer.list", b"4\n0\n0\n0\n".to_vec())]);
         let e = run(&ota, &out, &ExtractOptions::default()).unwrap_err();
         assert!(e.to_string().contains("unsafe partition name"), "{e}");
+    }
+
+    #[test]
+    fn known_ota_scaffolding_is_ignored_not_unhandled() {
+        // Everything a normal block OTA ships that is not a partition image. Treating any of
+        // these as a failure would make the tool fail on every real update.
+        for name in [
+            "system.patch.dat",
+            "vendor.patch.dat",
+            "system.patch.dat.br",
+            "sdat2img.py",
+            "META-INF/CERT.RSA",
+            "payload_properties.txt",
+            "system.inf",
+        ] {
+            assert!(
+                is_known_scaffolding(name),
+                "{name} should be recognised as scaffolding"
+            );
+        }
+    }
+
+    #[test]
+    fn a_partition_or_unknown_file_is_not_scaffolding() {
+        for name in [
+            "mystery.bin",
+            "boot.img",
+            "system.transfer.list",
+            "random.txt",
+        ] {
+            assert!(
+                !is_known_scaffolding(name),
+                "{name} must not be treated as scaffolding"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_top_level_file_fails_the_run_and_scaffolding_does_not() {
+        let src = fresh_dir("unknown-in");
+        let mut files = sample_files();
+        files.push(("mystery.bin", b"???".to_vec()));
+        files.push(("system.patch.dat", Vec::new()));
+        write_dir(&src, &files);
+        let out = fresh_dir("unknown-out");
+        let e = format!(
+            "{:#}",
+            run(&src, &out, &ExtractOptions::default()).unwrap_err()
+        );
+        assert!(
+            e.contains("mystery.bin"),
+            "the unknown file must be named: {e}"
+        );
+        assert!(
+            !e.contains("patch.dat"),
+            "scaffolding must never be an error: {e}"
+        );
+    }
+
+    #[test]
+    fn allow_partial_succeeds_but_still_reports_the_unhandled_file() {
+        let src = fresh_dir("partial-in");
+        let mut files = sample_files();
+        files.push(("mystery.bin", b"???".to_vec()));
+        write_dir(&src, &files);
+        let out = fresh_dir("partial-out");
+        let opts = ExtractOptions {
+            allow_partial: true,
+            ..ExtractOptions::default()
+        };
+        let result = extract_all_noted(&src, &out, &opts).unwrap();
+        assert_eq!(
+            result.unhandled.len(),
+            1,
+            "the unknown file is still reported"
+        );
+        assert_eq!(result.unhandled[0].name, "mystery.bin");
+        check_sample_output(&out);
+    }
+
+    #[test]
+    fn skipped_files_are_reported_and_fail_without_allow_partial() {
+        let (ota, out) = (fresh_dir("skip-in"), fresh_dir("skip-out"));
+        let mut files = sample_files();
+        files.push(("readme.txt", b"documentation".to_vec()));
+        write_dir(&ota, &files);
+        // Without --allow-partial, the run fails
+        let e = run(&ota, &out, &ExtractOptions::default()).unwrap_err();
+        assert!(
+            e.to_string().contains("no handler") && e.to_string().contains("readme.txt"),
+            "{e}"
+        );
+        // The files that were extracted are still present
+        check_sample_output(&out);
+    }
+
+    #[test]
+    fn allow_partial_silences_the_skip_error() {
+        let (ota, out) = (fresh_dir("allow-in"), fresh_dir("allow-out"));
+        let mut files = sample_files();
+        files.push(("readme.txt", b"documentation".to_vec()));
+        write_dir(&ota, &files);
+        let opts = ExtractOptions {
+            allow_partial: true,
+            ..Default::default()
+        };
+        run(&ota, &out, &opts).unwrap();
+        check_sample_output(&out);
+    }
+
+    #[test]
+    fn extract_all_tracked_reports_skipped_files() {
+        let (ota, out) = (fresh_dir("tracked-in"), fresh_dir("tracked-out"));
+        let mut files = sample_files();
+        files.push(("readme.txt", b"documentation".to_vec()));
+        write_dir(&ota, &files);
+        let result = extract_all_tracked(&ota, &out, &ExtractOptions::default()).unwrap();
+        assert_eq!(result.unhandled.len(), 1);
+        assert_eq!(result.unhandled[0].name, "readme.txt");
+        assert_eq!(result.unhandled[0].reason, "no handler");
+        assert_eq!(result.done.len(), 2);
+    }
+
+    #[test]
+    fn extract_all_tracked_reports_no_skips_when_all_files_are_recognised() {
+        let (ota, out) = (fresh_dir("noskip-in"), fresh_dir("noskip-out"));
+        write_dir(&ota, &sample_files());
+        let result = extract_all_tracked(&ota, &out, &ExtractOptions::default()).unwrap();
+        assert!(result.unhandled.is_empty() && result.ignored.is_empty());
+        assert_eq!(result.done.len(), 2);
+    }
+
+    #[test]
+    fn quiet_mode_suppresses_per_image_lines() {
+        let (ota, out) = (fresh_dir("quiet-in"), fresh_dir("quiet-out"));
+        let mut files = sample_files();
+        files.push(("readme.txt", b"documentation".to_vec()));
+        write_dir(&ota, &files);
+        let opts = ExtractOptions {
+            allow_partial: true,
+            quiet: true,
+            ..Default::default()
+        };
+        // Should succeed without printing anything to stdout
+        run(&ota, &out, &opts).unwrap();
+        check_sample_output(&out);
+    }
+
+    #[test]
+    fn strict_mode_fails_on_unrecognised_files() {
+        let (ota, out) = (fresh_dir("strict-in"), fresh_dir("strict-out"));
+        let mut files = sample_files();
+        files.push(("readme.txt", b"documentation".to_vec()));
+        write_dir(&ota, &files);
+        let opts = ExtractOptions {
+            strict: true,
+            ..Default::default()
+        };
+        let e = extract_all_tracked(&ota, &out, &opts).unwrap_err();
+        assert!(
+            e.to_string().contains("strict mode") && e.to_string().contains("readme.txt"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn strict_mode_passes_when_no_unrecognised_files() {
+        let (ota, out) = (fresh_dir("strict-ok-in"), fresh_dir("strict-ok-out"));
+        write_dir(&ota, &sample_files());
+        let opts = ExtractOptions {
+            strict: true,
+            ..Default::default()
+        };
+        extract_all_tracked(&ota, &out, &opts).unwrap();
+        check_sample_output(&out);
     }
 }
