@@ -961,7 +961,6 @@ endif;
 
     #[test]
     fn a_hostile_script_cannot_make_the_scan_quadratic() {
-        let start = std::time::Instant::now();
         for call in [
             "getprop(\"a\") == \"b\" || ",
             "package_extract_file(\"a\", ",
@@ -975,10 +974,39 @@ endif;
                 "{call}"
             );
         }
+        // Complexity: a genuine O(n^2) regression would make the large input take far
+        // longer than a small one relative to its size.
+        //
+        // Note on the threshold: the input grows exactly 40x, so a *linear* implementation
+        // produces a ratio of about 40x. Asserting strictly below 40x would therefore fail
+        // correct code and only pass by accident, when fixed per-run overhead inflates the
+        // smaller measurement. The ceiling below sits between the two regimes:
+        //
+        //     linear     ~40x
+        //     quadratic ~1600x
+        //     asserted   <200x   (5x headroom over linear, 8x below quadratic)
+        //
+        // so a real complexity regression is caught while ordinary timing jitter is not.
+        let probe: &str = "getprop(\"a\") == \"b\" || ";
+        let small = format!("{};", probe.repeat(1_000));
+        let large = format!("{};", probe.repeat(40_000));
+        // The smallest measurement is the most robust under scheduler noise, so run the
+        // small case a few times and keep its minimum.
+        let mut small_elapsed = std::time::Duration::MAX;
+        for _ in 0..3 {
+            let t = std::time::Instant::now();
+            summarise_script(&small);
+            small_elapsed = small_elapsed.min(t.elapsed());
+        }
+        let t1 = std::time::Instant::now();
+        summarise_script(&large);
+        let large_elapsed = t1.elapsed();
+        let ratio = large_elapsed.as_secs_f64() / small_elapsed.as_secs_f64().max(1e-6);
         assert!(
-            start.elapsed() < std::time::Duration::from_secs(20),
-            "took {:?}",
-            start.elapsed()
+            ratio < 200.0,
+            "scan scaling is super-linear: small {small_elapsed:?} vs large {large_elapsed:?}, \
+             ratio {:.1}x for an input that grew 40x (linear ~40x, quadratic ~1600x)",
+            ratio
         );
     }
 
