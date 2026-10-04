@@ -19,6 +19,7 @@ mod ramdisk;
 mod report;
 mod sdat;
 mod sparse;
+mod term;
 #[cfg(test)]
 mod testutil;
 mod transfer_list;
@@ -28,6 +29,10 @@ mod treeout;
 #[derive(Parser)]
 #[command(version, about = "Extract and audit Android OTA/ROM images")]
 struct Cli {
+    /// Never emit colour, even on a terminal (also honours the NO_COLOR environment variable)
+    #[arg(long, global = true)]
+    no_color: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -266,7 +271,9 @@ fn print_out(text: &str) -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
-    let result = match Cli::parse().command {
+    let cli = Cli::parse();
+    let no_color = cli.no_color;
+    let result = match cli.command {
         Command::Extract {
             input,
             output,
@@ -348,12 +355,14 @@ fn main() -> anyhow::Result<()> {
             print_out(&report::render(&report, json)?)
         }
     };
-    // Issue #77: unified error output - a one-line headline, then the cause chain.
+    // Unified error rendering (issue #77): a one-line headline, then the indented cause
+    // chain. Printed once, here, and the process exits non-zero - returning the error as
+    // well would make the runtime print it a second time.
     match result {
         Ok(()) => Ok(()),
         Err(e) => {
-            eprintln!("error: {e}");
-            Err(e)
+            eprintln!("{}", term::Renderer::new(term::Style::detect(no_color)).error(&e));
+            std::process::exit(1);
         }
     }
 }

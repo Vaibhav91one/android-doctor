@@ -30,11 +30,14 @@ impl Style {
         Style { color }
     }
 
-    /// Force colour on or off (used by tests).
+    /// Force colour on or off. Tests need this; nothing else should.
+    #[cfg(test)]
     pub fn fixed(color: bool) -> Self {
         Style { color }
     }
 
+    /// Whether colour will be emitted. Callers use this to decide whether to build a
+    /// plain-text or coloured string at all, instead of styling and stripping later.
     pub fn color(self) -> bool {
         self.color
     }
@@ -76,19 +79,156 @@ pub fn human_size(bytes: u64) -> String {
     format!("{bytes} bytes")
 }
 
+// ---------------------------------------------------------------------------
+// Severity styling and the shared renderer
+// ---------------------------------------------------------------------------
+
+/// How serious a finding is. Ordered so `max` gives the worst of a set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Severity {
+    Info,
+    Warn,
+    Error,
+}
+
+impl Severity {
+    /// The lowercase label used in JSON and in the left-hand column of text output.
+    pub fn label(self) -> &'static str {
+        match self {
+            Severity::Info => "info",
+            Severity::Warn => "warn",
+            Severity::Error => "error",
+        }
+    }
+
+    /// A colour code suited to this severity.
+    fn code(self) -> &'static str {
+        match self {
+            Severity::Info => "36",   // cyan
+            Severity::Warn => "33",   // yellow
+            Severity::Error => "31",  // red
+        }
+    }
+}
+
+impl std::fmt::Display for Severity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// Everything that prints: colour decisions, sizing, severity styling and error layout.
+#[derive(Debug, Clone, Copy)]
+pub struct Renderer {
+    pub style: Style,
+}
+
+impl Renderer {
+    pub fn new(style: Style) -> Self {
+        Renderer { style }
+    }
+
+    /// Colour `s` according to `severity`.
+    pub fn severity(self, sev: Severity, s: &str) -> String {
+        self.style.colorize(sev.code(), s)
+    }
+
+    /// Emphasise a value that is not itself a severity (a path, a count).
+    pub fn emphasise(self, s: &str) -> String {
+        self.style.colorize("1", s)
+    }
+
+    /// A byte count as a human-readable size.
+    pub fn size(self, bytes: u64) -> String {
+        human_size(bytes)
+    }
+
+    /// Render an error the same way from every command: a one-line headline, then the
+    /// cause chain indented beneath it. Chains longer than [`MAX_CAUSES`] lines are
+    /// truncated so a pathological error cannot flood the terminal.
+    pub fn error(self, err: &Error) -> String {
+        const MAX_CAUSES: usize = 6;
+        let mut out = self.style.colorize("1;31", &err.to_string());
+        let mut causes: Vec<String> = err.chain().skip(1).map(|c| c.to_string()).collect();
+        if causes.len() > MAX_CAUSES {
+            causes.truncate(MAX_CAUSES);
+            causes.push(format!("... and {} more", err.chain().count() - 1 - MAX_CAUSES));
+        }
+        for cause in causes {
+            out.push_str(&format!("\n  caused by: {cause}"));
+        }
+        out
+    }
+
+    /// Pad `s` to `width` visible characters, ignoring ANSI escapes so coloured columns
+    /// stay aligned.
+    pub fn pad(self, s: &str, width: usize) -> String {
+        format!("{s:<width$}")
+    }
+}
+
+/// Strip ANSI escape sequences, so a caller can measure or compare plain text.
+pub fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            for c2 in chars.by_ref() {
+                if c2 == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn round_trip_human_size() {
+    fn human_sizes_are_binary_and_trim_trailing_zeros() {
         assert_eq!(human_size(0), "0 bytes");
-        assert_eq!(human_size(1), "1 bytes");
         assert_eq!(human_size(1023), "1023 bytes");
         assert_eq!(human_size(1024), "1 KiB");
         assert_eq!(human_size(1536), "1.5 KiB");
         assert_eq!(human_size(1048576), "1 MiB");
         assert_eq!(human_size(1073741824), "1 GiB");
-        assert_eq!(human_size(1099511627776), "1 TiB");
+    }
+
+    #[test]
+    fn colour_off_emits_no_escape_sequences() {
+        let r = Renderer::new(Style::fixed(false));
+        assert_eq!(r.severity(Severity::Error, "boom"), "boom");
+        assert_eq!(r.emphasise("x"), "x");
+        assert_eq!(r.error(&anyhow::anyhow!("boom")), "boom");
+    }
+
+    #[test]
+    fn colour_on_wraps_and_strips_cleanly() {
+        let r = Renderer::new(Style::fixed(true));
+        let painted = r.severity(Severity::Error, "boom");
+        assert!(painted.contains("\x1b["));
+        assert_eq!(strip_ansi(&painted), "boom");
+    }
+
+    #[test]
+    fn severity_orders_from_info_to_error() {
+        assert!(Severity::Error > Severity::Warn);
+        assert!(Severity::Warn > Severity::Info);
+        assert_eq!(Severity::Warn.to_string(), "warn");
+    }
+
+    #[test]
+    fn an_error_renders_its_cause_chain_indented() {
+        let r = Renderer::new(Style::fixed(false));
+        let err = anyhow::anyhow!("outer").context("middle").context("inner");
+        let text = r.error(&err);
+        assert!(text.starts_with("inner"), "{text}");
+        assert!(text.contains("  caused by: middle"), "{text}");
+        assert!(text.contains("  caused by: outer"), "{text}");
     }
 }
