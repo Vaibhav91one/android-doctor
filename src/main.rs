@@ -19,6 +19,7 @@ mod ramdisk;
 mod report;
 mod sdat;
 mod sparse;
+mod term;
 #[cfg(test)]
 mod testutil;
 mod transfer_list;
@@ -28,6 +29,10 @@ mod treeout;
 #[derive(Parser)]
 #[command(version, about = "Extract and audit Android OTA/ROM images")]
 struct Cli {
+    /// Never emit colour, even on a terminal (also honours the NO_COLOR environment variable)
+    #[arg(long, global = true)]
+    no_color: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -266,7 +271,9 @@ fn print_out(text: &str) -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
-    let result = match Cli::parse().command {
+    let cli = Cli::parse();
+    let no_color = cli.no_color;
+    let result = match cli.command {
         Command::Extract {
             input,
             output,
@@ -323,7 +330,7 @@ fn main() -> anyhow::Result<()> {
         } => ramdisk_command(&input, output.as_deref(), json, list),
         Command::Ls { image, path, json } => ls_command(&image, &path, json),
         Command::Cat { image, path } => cat_command(&image, &path),
-        Command::Audit { images, json } => audit_command(&images, json),
+        Command::Audit { images, json } => audit_command(&images, json, no_color),
         Command::Vbmeta {
             image,
             images,
@@ -348,12 +355,17 @@ fn main() -> anyhow::Result<()> {
             print_out(&report::render(&report, json)?)
         }
     };
-    // Issue #77: unified error output - a one-line headline, then the cause chain.
+    // Unified error rendering (issue #77): a one-line headline, then the indented cause
+    // chain. Printed once, here, and the process exits non-zero - returning the error as
+    // well would make the runtime print it a second time.
     match result {
         Ok(()) => Ok(()),
         Err(e) => {
-            eprintln!("error: {e}");
-            Err(e)
+            eprintln!(
+                "{}",
+                term::Renderer::new(term::Style::detect(no_color)).error(&e)
+            );
+            std::process::exit(1);
         }
     }
 }
@@ -466,7 +478,7 @@ fn cat_command(image: &std::path::Path, path: &str) -> anyhow::Result<()> {
     }
 }
 
-fn audit_command(images: &[PathBuf], json: bool) -> anyhow::Result<()> {
+fn audit_command(images: &[PathBuf], json: bool, no_color: bool) -> anyhow::Result<()> {
     let audits = audit::image_list(images)?
         .iter()
         .map(|p| audit::audit_image(p))
@@ -474,7 +486,7 @@ fn audit_command(images: &[PathBuf], json: bool) -> anyhow::Result<()> {
     let text = if json {
         serde_json::to_string_pretty(&audit::to_json(&audits))?
     } else {
-        audit::to_text(&audits)
+        audit::to_text(&audits, no_color)
     };
     print_out(&text)
 }

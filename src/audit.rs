@@ -6,6 +6,7 @@
 //! as root or in a shell or `su` SELinux domain), then turns what it found into findings with a
 //! severity. It only reads: nothing is extracted or executed.
 use crate::ramdisk::{MAX_PROP_FILE, REPORTED_PROPS, is_prop_file};
+use crate::term::{Renderer, Severity as TermSeverity, Style};
 use crate::tree::{Entry, Kind, Tree};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
@@ -40,6 +41,15 @@ impl Severity {
             Severity::High => "high",
             Severity::Medium => "medium",
             Severity::Info => "info",
+        }
+    }
+
+    /// Map `audit::Severity` to the terminal colour severity.
+    fn to_term(self) -> TermSeverity {
+        match self {
+            Severity::High => TermSeverity::Error,
+            Severity::Medium => TermSeverity::Warn,
+            Severity::Info => TermSeverity::Info,
         }
     }
 }
@@ -575,13 +585,15 @@ fn capped<T>(items: &[T], show: impl Fn(&T) -> String) -> Vec<String> {
     v
 }
 
-pub fn to_text(audits: &[ImageAudit]) -> String {
+pub fn to_text(audits: &[ImageAudit], no_color: bool) -> String {
+    let r = Renderer::new(Style::detect(no_color));
     let mut o = vec![adb_summary(audits)];
     for a in audits {
         o.push(String::new());
         o.push(format!("== {} ({} entries)", a.name, a.entries));
         for f in &a.findings {
-            o.push(format!("[{}] {}: {}", f.severity.name(), f.rule, f.detail));
+            let label = r.severity(f.severity.to_term(), f.severity.name());
+            o.push(format!("[{label}] {}: {}", f.rule, f.detail));
         }
         if a.findings.is_empty() {
             o.push("no findings".to_string());
@@ -1109,7 +1121,7 @@ service plain /system/bin/plain
                 .iter()
                 .any(|f| f["rule"] == "debuggable-build" && f["severity"] == "high")
         );
-        let t = to_text(&[a]);
+        let t = to_text(&[a], true);
         for want in [
             "ADB:",
             "== t (3 entries)",
@@ -1120,7 +1132,7 @@ service plain /system/bin/plain
         ] {
             assert!(t.contains(want), "{want} in {t}");
         }
-        assert!(to_text(&[run(vec![], &[])]).contains("no findings"));
+        assert!(to_text(&[run(vec![], &[])], true).contains("no findings"));
     }
 
     #[test]
@@ -1129,7 +1141,7 @@ service plain /system/bin/plain
             .map(|i| file(&format!("bin/s{i}"), 0o4755))
             .collect();
         let a = run(entries, &[]);
-        let t = to_text(std::slice::from_ref(&a));
+        let t = to_text(std::slice::from_ref(&a), true);
         assert!(t.contains("... and 15 more (use --json)"), "{t}");
         assert_eq!(
             to_json(&[a])["images"][0]["setuid_files"]

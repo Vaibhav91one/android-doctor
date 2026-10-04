@@ -3,6 +3,7 @@ use crate::{detect, pac, payload, sdat, transfer_list};
 use anyhow::{Context, Result, anyhow, bail};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::fs::File;
+use std::io::IsTerminal;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
@@ -308,10 +309,8 @@ pub struct ExtractOptions {
     /// Suppress progress bars and per-image summary lines; errors still show.
     pub quiet: bool,
     /// Print debug traces to stderr.
-    #[allow(dead_code)]
     pub verbose: bool,
     /// Never emit ANSI colour escapes.
-    #[allow(dead_code)]
     pub no_color: bool,
 }
 
@@ -674,11 +673,36 @@ pub(crate) fn extract_all_tracked(
 pub fn run(input: &Path, out_dir: &Path, opts: &ExtractOptions) -> Result<()> {
     if opts.list {
         for (name, size) in list_images(input, opts)? {
-            println!("{name}  {size} bytes");
+            println!("{name}  {}", crate::term::human_size(size));
         }
         return Ok(());
     }
+    let start = std::time::Instant::now();
+    let style = crate::term::Style::detect(opts.no_color);
+    if opts.verbose {
+        let fmt = if payload::locate(input).is_ok_and(|l| l.is_some()) {
+            "A/B OTA payload"
+        } else if pac::is_pac(input) {
+            "PAC"
+        } else {
+            "block OTA"
+        };
+        let tag = if style.color() {
+            "[2mtrace[0m"
+        } else {
+            "trace"
+        };
+        eprintln!("{tag} {}: detected format: {}", input.display(), fmt);
+    }
     let result = extract_all_noted(input, out_dir, opts)?;
+    if opts.verbose {
+        eprintln!(
+            "trace {}: extracted {} partition(s) in {}",
+            input.display(),
+            result.done.len(),
+            human_elapsed(start.elapsed()),
+        );
+    }
     let done = &result.done;
     if !opts.quiet {
         for (path, note) in done {
@@ -730,10 +754,32 @@ pub fn run(input: &Path, out_dir: &Path, opts: &ExtractOptions) -> Result<()> {
     Ok(())
 }
 
+/// Human-readable elapsed time for verbose traces (e.g. "1.23s").
+fn human_elapsed(d: std::time::Duration) -> String {
+    if d.as_millis() < 1000 {
+        format!("{}ms", d.as_millis())
+    } else {
+        format!("{:.2}s", d.as_secs_f64())
+    }
+}
+
 /// `--files`: write the file tree and manifest of every ext2/3/4 image under `<dir>/<image name>/`.
 pub(crate) fn extract_trees(images: &[&Path], dir: &Path, opts: &ExtractOptions) -> Result<()> {
+    let show_bar = std::io::stdout().is_terminal() && !opts.quiet;
+    let bar = if show_bar {
+        let b = ProgressBar::new(images.len() as u64);
+        b.set_style(
+            ProgressStyle::with_template("{prefix:>10} [{bar:30}] {pos}/{len}")
+                .expect("valid progress template")
+                .progress_chars("=> "),
+        );
+        b.set_prefix("files");
+        Some(b)
+    } else {
+        None
+    };
     let mut nothing = Vec::new();
-    for image in images {
+    for (i, image) in images.iter().enumerate() {
         let kind = detect::filesystem_of_file(image);
         let name = image
             .file_stem()
@@ -749,17 +795,33 @@ pub(crate) fn extract_trees(images: &[&Path], dir: &Path, opts: &ExtractOptions)
                 .with_context(|| format!("extracting the files of {}", image.display()))?;
             let count = |k| entries.iter().filter(|e| e.kind == k).count();
             if !opts.quiet {
-                println!(
-                    "files: {name}  {} entries ({} files, {} symlinks) -> {}",
-                    entries.len(),
-                    count(crate::tree::Kind::File),
-                    count(crate::tree::Kind::Symlink),
-                    target.display()
-                );
+                if let Some(ref bar) = bar {
+                    bar.println(format!(
+                        "files: {name}  {} entries ({} files, {} symlinks) -> {}",
+                        entries.len(),
+                        count(crate::tree::Kind::File),
+                        count(crate::tree::Kind::Symlink),
+                        target.display()
+                    ));
+                } else {
+                    println!(
+                        "files: {name}  {} entries ({} files, {} symlinks) -> {}",
+                        entries.len(),
+                        count(crate::tree::Kind::File),
+                        count(crate::tree::Kind::Symlink),
+                        target.display()
+                    );
+                }
             }
         } else {
             nothing.push(name.to_string());
         }
+        if let Some(ref bar) = bar {
+            bar.set_position((i + 1) as u64);
+        }
+    }
+    if let Some(bar) = &bar {
+        bar.finish_and_clear();
     }
     if !nothing.is_empty() && !opts.quiet {
         eprintln!("no extractable file tree in: {}", nothing.join(", "));
@@ -800,7 +862,7 @@ pub fn extract_all_noted(
 /// One result line: path, size, and the filesystem when the image holds one we recognise.
 pub(crate) fn describe(path: &Path) -> Result<String> {
     let size = std::fs::metadata(path)?.len();
-    let mut line = format!("{}  {size} bytes", path.display());
+    let mut line = format!("{}  {}", path.display(), crate::term::human_size(size));
     if let Some(fs) = detect::filesystem_of_file(path) {
         line.push_str(&format!("  {fs}"));
         if size % sdat::BLOCK_SIZE as u64 != 0 {
@@ -1430,9 +1492,9 @@ mod tests {
         std::fs::write(dir.join("system.img"), &ext4).unwrap();
         std::fs::write(dir.join("boot.img"), vec![7u8; 5000]).unwrap();
         let line = describe(&dir.join("system.img")).unwrap();
-        assert!(line.ends_with("system.img  8192 bytes  ext4"), "{line}");
+        assert!(line.ends_with("system.img  8 KiB  ext4"), "{line}");
         let line = describe(&dir.join("boot.img")).unwrap();
-        assert!(line.ends_with("boot.img  5000 bytes"), "{line}");
+        assert!(line.ends_with("boot.img  4.9 KiB"), "{line}");
         // a recognised filesystem whose size is not block aligned gets a warning
         ext4.truncate(5000);
         ext4.resize(5001, 0);
