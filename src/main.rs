@@ -111,7 +111,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Show an AVB vbmeta image (or a partition with an AVB footer): header, key, descriptors, hashes
+    /// Show an AVB vbmeta image (or a partition with an AVB footer): header, key, signature, descriptors, hashes
     Vbmeta {
         image: PathBuf,
         /// Also hash each hashed partition found as <DIR>/<partition>.img and compare
@@ -120,6 +120,9 @@ enum Command {
         /// Print JSON instead of text
         #[arg(long)]
         json: bool,
+        /// Verify the RSA signature against this PEM-encoded public key (overrides the key embedded in the image)
+        #[arg(short, long)]
+        key: Option<PathBuf>,
     },
     /// List a boot image's ramdisk (or a ramdisk file), report its ADB properties, and with -o extract it
     Ramdisk {
@@ -325,7 +328,8 @@ fn main() -> anyhow::Result<()> {
             image,
             images,
             json,
-        } => vbmeta_command(&image, images.as_deref(), json),
+            key,
+        } => vbmeta_command(&image, images.as_deref(), json, key.as_deref()),
         Command::Files {
             image,
             output,
@@ -380,8 +384,14 @@ fn vbmeta_command(
     image: &std::path::Path,
     images: Option<&std::path::Path>,
     json: bool,
+    key: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
-    let meta = avb::read_input(image)?;
+    let external_key = if let Some(k) = key {
+        Some(avb::read_key(k)?)
+    } else {
+        None
+    };
+    let meta = avb::read_input(image, external_key.as_ref())?;
     let checks = match images {
         Some(dir) => avb::verify_images(&meta, dir)?,
         None => Vec::new(),
@@ -394,7 +404,7 @@ fn vbmeta_command(
     print_out(&text)?;
     anyhow::ensure!(
         !meta.any_failure(&checks),
-        "the digest or a partition hash does not match"
+        "the digest, signature, or a partition hash does not match"
     );
     Ok(())
 }

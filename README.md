@@ -7,7 +7,7 @@ android-doctor extract  <ota.zip|dir|payload.bin> [-o out] [--only a,b] [--list]
 android-doctor unpack   <boot.img|vendor_boot.img> [-o dir] [--json] [--force]   # header, and with -o the sections
 android-doctor ramdisk  <boot.img|vendor_boot.img|ramdisk> [-o dir] [--json] [--list]   # ramdisk contents and ADB properties
 android-doctor audit    <image.img|dir>... [--json]   # ADB properties, setuid files, su binaries, init services, findings
-android-doctor vbmeta   <vbmeta.img|image-with-footer> [--images dir] [--json]   # AVB header, key, descriptors, partition hashes
+android-doctor vbmeta   <vbmeta.img|image-with-footer> [--images dir] [--json] [--key key.pem]   # AVB header, key, signature verification, descriptors, partition hashes
 android-doctor ls       <image.img> [path] [--json]   # list a directory inside an ext2/3/4 or erofs image
 android-doctor cat      <image.img> <path>   # print one file from an ext2/3/4 or erofs image to stdout
 android-doctor files    <image.img> [-o dir] [--json]   # list or extract an ext2/3/4 or erofs image (no root), with SELinux labels
@@ -65,7 +65,7 @@ Status: **verified** = checked against an independent reference tool on real fir
 | ADB/debug properties from a ramdisk (`ro.secure`, `ro.adb.secure`, `ro.debuggable`, ...) | verified | Found through the `default.prop -> prop.default` symlink on the real ramdisk, equal to the values read from the extracted file |
 | Encrypted boot sections (Amlogic `@AML` containers and ciphertext) | detected only | `unpack` labels them (`aml-container`, `unknown-high-entropy`) and `ramdisk` explains why it cannot read them; there is no way to decrypt without the vendor's keys. The real STB recovery image is one of these |
 | tar, `.tar.md5`, gzip, bzip2, xz, lz4 wrappers | verified | Synthetic tars built with `tar::Builder` and wrapped with `flate2`: plain, gzip and Samsung `.tar.md5` all round-trip `boot.img`/`system.img` byte-for-byte, and an `extract` run over an update directory unpacks `SUPER.tar.md5` into its partition images instead of copying the blob. A `.tar.md5` whose trailing MD5 does not match the tar is refused before anything is written; an entry named `../evil`, an absolute path or a NUL is rejected, and device and fifo entries are refused rather than created. Extraction stages into `<out>.part` and is published only on success |
-| AVB / vbmeta inspection | planned | |
+| AVB / vbmeta inspection | verified | RSA signature verification over the header + auxiliary block, matching `avbtool verify_image` |
 | Vendor containers (`.ozip`, Qualcomm `rawprogram`, Amlogic, ...) | planned | Without real samples these will be marked unverified |
 | Spreadtrum/MediaTek `.pac` containers | synthetic | Parser and extractor (adapted from SR Labs PacHandler, Apache-2.0); tested with generated fixtures, not yet verified on real firmware |
 | Incremental OTAs (`*.patch.dat`, delta payloads) | no | Fails with a clear error |
