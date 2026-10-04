@@ -330,7 +330,7 @@ fn main() -> anyhow::Result<()> {
         } => ramdisk_command(&input, output.as_deref(), json, list),
         Command::Ls { image, path, json } => ls_command(&image, &path, json),
         Command::Cat { image, path } => cat_command(&image, &path),
-        Command::Audit { images, json } => audit_command(&images, json),
+        Command::Audit { images, json } => audit_command(&images, json, no_color),
         Command::Vbmeta {
             image,
             images,
@@ -361,7 +361,10 @@ fn main() -> anyhow::Result<()> {
     match result {
         Ok(()) => Ok(()),
         Err(e) => {
-            eprintln!("{}", term::Renderer::new(term::Style::detect(no_color)).error(&e));
+            eprintln!(
+                "{}",
+                term::Renderer::new(term::Style::detect(no_color)).error(&e)
+            );
             std::process::exit(1);
         }
     }
@@ -475,7 +478,7 @@ fn cat_command(image: &std::path::Path, path: &str) -> anyhow::Result<()> {
     }
 }
 
-fn audit_command(images: &[PathBuf], json: bool) -> anyhow::Result<()> {
+fn audit_command(images: &[PathBuf], json: bool, no_color: bool) -> anyhow::Result<()> {
     let audits = audit::image_list(images)?
         .iter()
         .map(|p| audit::audit_image(p))
@@ -483,7 +486,7 @@ fn audit_command(images: &[PathBuf], json: bool) -> anyhow::Result<()> {
     let text = if json {
         serde_json::to_string_pretty(&audit::to_json(&audits))?
     } else {
-        audit::to_text(&audits)
+        audit::to_text(&audits, no_color)
     };
     print_out(&text)
 }

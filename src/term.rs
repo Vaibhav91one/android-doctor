@@ -104,9 +104,9 @@ impl Severity {
     /// A colour code suited to this severity.
     fn code(self) -> &'static str {
         match self {
-            Severity::Info => "36",   // cyan
-            Severity::Warn => "33",   // yellow
-            Severity::Error => "31",  // red
+            Severity::Info => "36",  // cyan
+            Severity::Warn => "33",  // yellow
+            Severity::Error => "31", // red
         }
     }
 }
@@ -133,16 +133,6 @@ impl Renderer {
         self.style.colorize(sev.code(), s)
     }
 
-    /// Emphasise a value that is not itself a severity (a path, a count).
-    pub fn emphasise(self, s: &str) -> String {
-        self.style.colorize("1", s)
-    }
-
-    /// A byte count as a human-readable size.
-    pub fn size(self, bytes: u64) -> String {
-        human_size(bytes)
-    }
-
     /// Render an error the same way from every command: a one-line headline, then the
     /// cause chain indented beneath it. Chains longer than [`MAX_CAUSES`] lines are
     /// truncated so a pathological error cannot flood the terminal.
@@ -152,22 +142,20 @@ impl Renderer {
         let mut causes: Vec<String> = err.chain().skip(1).map(|c| c.to_string()).collect();
         if causes.len() > MAX_CAUSES {
             causes.truncate(MAX_CAUSES);
-            causes.push(format!("... and {} more", err.chain().count() - 1 - MAX_CAUSES));
+            causes.push(format!(
+                "... and {} more",
+                err.chain().count() - 1 - MAX_CAUSES
+            ));
         }
         for cause in causes {
             out.push_str(&format!("\n  caused by: {cause}"));
         }
         out
     }
-
-    /// Pad `s` to `width` visible characters, ignoring ANSI escapes so coloured columns
-    /// stay aligned.
-    pub fn pad(self, s: &str, width: usize) -> String {
-        format!("{s:<width$}")
-    }
 }
 
 /// Strip ANSI escape sequences, so a caller can measure or compare plain text.
+#[cfg(test)]
 pub fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
@@ -201,9 +189,10 @@ mod tests {
 
     #[test]
     fn colour_off_emits_no_escape_sequences() {
-        let r = Renderer::new(Style::fixed(false));
+        let s = Style::fixed(false);
+        assert!(!s.color());
+        let r = Renderer::new(s);
         assert_eq!(r.severity(Severity::Error, "boom"), "boom");
-        assert_eq!(r.emphasise("x"), "x");
         assert_eq!(r.error(&anyhow::anyhow!("boom")), "boom");
     }
 
