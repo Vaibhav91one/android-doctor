@@ -38,6 +38,9 @@ const TAG_CHAIN_PARTITION: u64 = 4;
 
 const FLAG_HASHTREE_DISABLED: u32 = 1;
 const FLAG_VERIFICATION_DISABLED: u32 = 2;
+/// Not in the AVB spec enum, but used by some vendors/avbtool to mark an
+/// unlocked device that permits rollback of the anti-rollback index.
+const FLAG_ALLOW_ROLLBACK: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Descriptor {
@@ -321,7 +324,10 @@ fn flag_names(flags: u32) -> String {
     if flags & FLAG_VERIFICATION_DISABLED != 0 {
         n.push("VERIFICATION_DISABLED");
     }
-    if flags & !(FLAG_HASHTREE_DISABLED | FLAG_VERIFICATION_DISABLED) != 0 {
+    if flags & FLAG_ALLOW_ROLLBACK != 0 {
+        n.push("ALLOW_ROLLBACK");
+    }
+    if flags & !(FLAG_HASHTREE_DISABLED | FLAG_VERIFICATION_DISABLED | FLAG_ALLOW_ROLLBACK) != 0 {
         n.push("unknown bits");
     }
     if n.is_empty() {
@@ -626,6 +632,67 @@ pub enum Check {
     Unsupported(String),
 }
 
+/// Result of interpreting the vbmeta rollback index.
+///
+/// The rollback index protects against downgrades: the device stores the highest
+/// value it has seen and refuses to boot an image with a lower index. An index of
+/// zero on a production image is suspicious because it usually means the image was
+/// built before anti-rollback was enabled, or the vendor never set a meaningful
+/// value. The interpretation never claims "secure" — it only flags when the index
+/// looks older than expected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RollbackIndexInterpretation {
+    pub detail: String,
+    pub severity: crate::audit::Severity,
+}
+
+impl RollbackIndexInterpretation {
+    fn to_text(&self) -> String {
+        format!("{} [{}]", self.detail, self.severity.name())
+    }
+}
+
+/// A named security state derived from the vbmeta image flags.
+///
+/// Each variant maps to a bit in AVB_VBMETA_IMAGE_FLAGS (see avb_vbmeta_image.h)
+/// plus the vendor ALLOW_ROLLBACK flag. The raw hex is always reported alongside
+/// so an analyst can see both the machine-readable value and the interpretation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecurityState {
+    /// AVB_VBMETA_IMAGE_FLAGS_HASHTREE_DISABLED (bit 0, 0x01): hash-tree
+    /// verification is disabled. dm-verity is not enforced.
+    HashtreeDisabled,
+    /// AVB_VBMETA_IMAGE_FLAGS_VERIFICATION_DISABLED (bit 1, 0x02): AVB
+    /// verification is disabled and descriptors are not parsed. This is
+    /// equivalent to a disabled secure boot.
+    VerificationDisabled,
+    /// AVB_VBMETA_IMAGE_FLAGS_ALLOW_ROLLBACK (bit 2, 0x04): the device is
+    /// unlocked and the anti-rollback index may move backwards.
+    UnlockedDevice,
+}
+
+impl SecurityState {
+    /// The AVB flag constant name.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::HashtreeDisabled => "HASHTREE_DISABLED",
+            Self::VerificationDisabled => "VERIFICATION_DISABLED",
+            Self::UnlockedDevice => "UNLOCKED_DEVICE",
+        }
+    }
+
+    /// A short human-readable explanation of what the state means for security.
+    pub fn explanation(&self) -> &'static str {
+        match self {
+            Self::HashtreeDisabled => "hash-tree verification is disabled (dm-verity not enforced)",
+            Self::VerificationDisabled => {
+                "AVB verification is disabled, descriptors are not parsed (secure boot off)"
+            }
+            Self::UnlockedDevice => "device is unlocked; rollback index may move backwards",
+        }
+    }
+}
+
 /// Hash each hash-descriptor partition found as `<dir>/<partition>.img` and compare with the digest.
 pub fn verify_images(meta: &Vbmeta, dir: &Path) -> Result<Vec<(String, Check)>> {
     let mut out = Vec::new();
@@ -726,6 +793,77 @@ impl SignatureStatus {
 }
 
 impl Vbmeta {
+    /// Named security states derived from the vbmeta image flags.
+    pub fn security_states(&self) -> Vec<SecurityState> {
+        let mut s = Vec::new();
+        if self.flags & FLAG_HASHTREE_DISABLED != 0 {
+            s.push(SecurityState::HashtreeDisabled);
+        }
+        if self.flags & FLAG_VERIFICATION_DISABLED != 0 {
+            s.push(SecurityState::VerificationDisabled);
+        }
+        if self.flags & FLAG_ALLOW_ROLLBACK != 0 {
+            s.push(SecurityState::UnlockedDevice);
+        }
+        s
+    }
+
+    /// Security findings derived from the vbmeta image, suitable for the audit
+    /// command's finding list. Returns high-severity findings for unlocked /
+    /// verification-disabled states, and never infers "secure" from absence.
+    pub fn findings(&self) -> Vec<crate::audit::Finding> {
+        let mut out = Vec::new();
+        for s in self.security_states() {
+            out.push(crate::audit::Finding {
+                severity: crate::audit::Severity::High,
+                rule: "avb-security-state",
+                detail: format!("{}: {}", s.as_str(), s.explanation()),
+            });
+        }
+        // An unsigned image (Algorithm NONE / 0) means verified boot proves nothing.
+        if self.signature_verified == SignatureStatus::Absent {
+            out.push(crate::audit::Finding {
+                severity: crate::audit::Severity::High,
+                rule: "avb-unsigned-image",
+                detail: "no signature present; verified boot proves nothing".into(),
+            });
+        }
+        // Unsupported algorithm: cannot check the signature.
+        if let SignatureStatus::Unsupported(n) = self.signature_verified {
+            out.push(crate::audit::Finding {
+                severity: crate::audit::Severity::Warn,
+                rule: "avb-unsupported-algorithm",
+                detail: format!("signature not checked (algorithm {} not supported)", n),
+            });
+        }
+        out
+    }
+
+    /// Interpret the rollback index. Reports the raw value and whether it
+    /// indicates "image is older than device" (index 0 on a production device
+    /// is suspicious). Never infers security from absence.
+    pub fn rollback_index_interpretation(&self) -> RollbackIndexInterpretation {
+        let detail = if self.rollback_index == 0 {
+            format!(
+                "rollback index {} (location {}): index 0 - the image may be older than what the device has recorded",
+                self.rollback_index, self.rollback_index_location
+            )
+        } else {
+            format!(
+                "rollback index {} (location {}): within expected range",
+                self.rollback_index, self.rollback_index_location
+            )
+        };
+        RollbackIndexInterpretation {
+            detail,
+            severity: if self.rollback_index == 0 {
+                crate::audit::Severity::High
+            } else {
+                crate::audit::Severity::Info
+            },
+        }
+    }
+
     pub fn to_json(&self, checks: &[(String, Check)]) -> Value {
         json!({
             "libavb": format!("{}.{}", self.libavb.0, self.libavb.1),
@@ -734,7 +872,14 @@ impl Vbmeta {
             "rollback_index_location": self.rollback_index_location,
             "flags": self.flags,
             "flag_names": flag_names(self.flags),
+            "security_states": self.security_states().iter().map(|s| json!({"name": s.as_str(), "explanation": s.explanation()})).collect::<Vec<_>>(),
+            "rollback_index_interpretation": json!({"detail": self.rollback_index_interpretation().detail, "severity": self.rollback_index_interpretation().severity.name()}),
             "release": self.release,
+            "findings": self.findings().iter().map(|f| json!({
+                "severity": f.severity.name(),
+                "rule": f.rule,
+                "detail": f.detail,
+            })).collect::<Vec<_>>(),
             "authentication_block": self.auth_size,
             "auxiliary_block": self.aux_size,
             "signature_bytes": self.signature_len,
@@ -764,7 +909,31 @@ impl Vbmeta {
             self.flags,
             flag_names(self.flags)
         )];
+        // Security states: named interpretations of the flag bits, reported
+        // alongside the raw hex so absence is never mistaken for safety.
+        let states = self.security_states();
+        if states.is_empty() {
+            o.push("security: no unlocked/verification-disabled states detected".into());
+        } else {
+            for s in &states {
+                o.push(format!("  security: {} — {}", s.as_str(), s.explanation()));
+            }
+        }
+        // Rollback index interpretation
+        o.push(self.rollback_index_interpretation().to_text());
         o.push(format!("release string: {:?}", self.release));
+        let findings = self.findings();
+        if !findings.is_empty() {
+            o.push("security findings:".into());
+            for f in &findings {
+                o.push(format!(
+                    "  [{}] {}: {}",
+                    f.severity.name(),
+                    f.rule,
+                    f.detail
+                ));
+            }
+        }
         o.push(format!(
             "authentication block {} bytes, auxiliary block {} bytes; digest check: {}; signature: {}",
             self.auth_size,
@@ -814,7 +983,69 @@ impl Vbmeta {
     pub fn any_failure(&self, checks: &[(String, Check)]) -> bool {
         self.digest_ok == Some(false)
             || self.signature_verified == SignatureStatus::Invalid
+            || self.signature_verified == SignatureStatus::Absent
             || checks.iter().any(|(_, c)| *c == Check::Mismatch)
+    }
+
+    /// Cross-check the top-level vbmeta against chained vbmeta partitions.
+    ///
+    /// When the top-level vbmeta has ChainPartition descriptors, each chained
+    /// partition carries its own vbmeta with its own flags and rollback index.
+    /// This method reads those chained vbmeta files from the given directory and
+    /// returns findings if a chained vbmeta has verification disabled or an
+    /// unlocked device flag, or if its rollback index is lower than the
+    /// top-level index.
+    pub fn cross_check_chained(&self, dir: &Path) -> Vec<crate::audit::Finding> {
+        let mut out = Vec::new();
+        let top_ri = self.rollback_index;
+        for d in &self.descriptors {
+            let Descriptor::ChainPartition { partition, .. } = d else {
+                continue;
+            };
+            let path = dir.join(format!("{partition}.img"));
+            if !path.is_file() {
+                continue;
+            }
+            let chained = match read_input(&path, None) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            // Check the chained vbmeta's own security state.
+            for s in chained.security_states() {
+                out.push(crate::audit::Finding {
+                    severity: crate::audit::Severity::High,
+                    rule: "avb-chained-security-state",
+                    detail: format!(
+                        "chained vbmeta {}: {} - {}",
+                        partition,
+                        s.as_str(),
+                        s.explanation()
+                    ),
+                });
+            }
+            // Check for unsigned / unsupported algorithm in chained vbmeta.
+            for f in chained.findings() {
+                if f.rule == "avb-unsigned-image" || f.rule == "avb-unsupported-algorithm" {
+                    out.push(crate::audit::Finding {
+                        severity: f.severity,
+                        rule: "avb-chained-security-state",
+                        detail: format!("chained vbmeta {}: {}", partition, f.detail),
+                    });
+                }
+            }
+            // Compare rollback indices.
+            if chained.rollback_index < top_ri {
+                out.push(crate::audit::Finding {
+                    severity: crate::audit::Severity::High,
+                    rule: "avb-rollback-index",
+                    detail: format!(
+                        "chained vbmeta {} rollback index {} is lower than top-level index {}",
+                        partition, chained.rollback_index, top_ri
+                    ),
+                });
+            }
+        }
+        out
     }
 }
 
@@ -1132,7 +1363,9 @@ mod tests {
         assert!(m.to_text(&[]).contains("VERIFICATION_DISABLED"));
         assert!(m.to_text(&[]).contains("n/a (no signature)"));
         assert_eq!(flag_names(1), "HASHTREE_DISABLED");
+        assert_eq!(flag_names(2), "VERIFICATION_DISABLED");
         assert_eq!(flag_names(3), "HASHTREE_DISABLED, VERIFICATION_DISABLED");
+        assert_eq!(flag_names(4), "ALLOW_ROLLBACK");
         assert_eq!(flag_names(0), "none");
         assert_eq!(flag_names(8), "unknown bits");
     }
@@ -1488,5 +1721,173 @@ mod tests {
         assert_eq!(m.signature_verified, SignatureStatus::Absent);
         assert!(m.to_text(&[]).contains("signature: n/a (no signature)"));
         assert_eq!(m.to_json(&[])["signature_verified"], "absent");
+    }
+
+    #[test]
+    fn verification_disabled_produces_a_high_severity_finding() {
+        let m = parse(&vbmeta(0, 2, &[prop("k", "v")], &[]), None).unwrap();
+        let findings = m.findings();
+        assert_eq!(findings.len(), 2);
+        assert_eq!(findings[0].severity, crate::audit::Severity::High);
+        assert_eq!(findings[0].rule, "avb-security-state");
+        assert!(findings[0].detail.contains("VERIFICATION_DISABLED"));
+        // text output
+        assert!(m.to_text(&[]).contains("VERIFICATION_DISABLED"));
+        // json output
+        let j = m.to_json(&[]);
+        assert!(
+            j["security_states"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["name"] == "VERIFICATION_DISABLED")
+        );
+    }
+
+    #[test]
+    fn allows_rollback_flag_produces_unlocked_device_finding() {
+        let m = parse(&vbmeta(0, 4, &[prop("k", "v")], &[]), None).unwrap();
+        let findings = m.findings();
+        assert_eq!(findings.len(), 2);
+        assert_eq!(findings[0].severity, crate::audit::Severity::High);
+        assert_eq!(findings[0].rule, "avb-security-state");
+        assert!(findings[0].detail.contains("UNLOCKED_DEVICE"));
+        let t = m.to_text(&[]);
+        assert!(t.contains("UNLOCKED_DEVICE"));
+        assert!(t.contains("device is unlocked"));
+        let j = m.to_json(&[]);
+        assert!(j["flag_names"] == "ALLOW_ROLLBACK");
+        assert!(
+            j["security_states"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["name"] == "UNLOCKED_DEVICE")
+        );
+    }
+
+    #[test]
+    fn a_vbmeta_with_no_flags_has_no_security_states() {
+        let m = parse(&vbmeta(0, 0, &[prop("k", "v")], &[]), None).unwrap();
+        let findings = m.findings();
+        assert_eq!(findings.len(), 1); // unsigned image
+        let j = m.to_json(&[]);
+        assert!(j["flag_names"] == "none");
+        assert!(j["security_states"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rollback_index_interpretation_reports_zero_index() {
+        // The test helper sets rollback_index to 1234 by default; overwrite to 0.
+        let mut v = vbmeta(0, 0, &[prop("k", "v")], &[]);
+        v[112..120].copy_from_slice(&0u64.to_be_bytes());
+        let m = parse(&v, None).unwrap();
+        assert_eq!(m.rollback_index, 0);
+        let ri = m.rollback_index_interpretation();
+        assert_eq!(ri.severity, crate::audit::Severity::High);
+        assert!(ri.detail.contains("index 0"));
+        assert!(m.to_text(&[]).contains("rollback index 0"));
+    }
+
+    #[test]
+    fn rollback_index_interpretation_reports_nonzero_index() {
+        let m = parse(&vbmeta(1, 0, &[prop("k", "v")], &[]), None).unwrap();
+        assert_eq!(m.rollback_index, 1234);
+        let ri = m.rollback_index_interpretation();
+        assert_eq!(ri.severity, crate::audit::Severity::Info);
+        assert!(!ri.detail.contains("index 0"));
+    }
+
+    #[test]
+    fn findings_are_included_in_json_output() {
+        let m = parse(&vbmeta(0, 2, &[prop("k", "v")], &[]), None).unwrap();
+        let j = m.to_json(&[]);
+        let findings = j["findings"].as_array().unwrap();
+        assert_eq!(findings.len(), 2);
+        let f = &findings[0];
+        assert_eq!(f["rule"], "avb-security-state");
+        assert_eq!(f["severity"], "high");
+    }
+
+    #[test]
+    fn findings_are_included_in_text_output() {
+        let m = parse(&vbmeta(0, 2, &[prop("k", "v")], &[]), None).unwrap();
+        let t = m.to_text(&[]);
+        assert!(t.contains("VERIFICATION_DISABLED"));
+        assert!(t.contains("security findings:"));
+    }
+    #[test]
+    fn cross_check_chained_detects_downgrade_in_rollback_index() {
+        use crate::testutil::Scratch;
+        let chain_desc = chain("vendor", 5, &[0; 32]);
+        let v = vbmeta(0, 0, &[prop("k", "v"), chain_desc], &[]);
+        let m = parse(&v, None).unwrap();
+        assert_eq!(m.descriptors.len(), 2);
+
+        let mut chained = vbmeta(0, 0, &[prop("a", "b")], &[]);
+        chained[112..120].copy_from_slice(&0u64.to_be_bytes());
+
+        let dir = Scratch::new("chained_test");
+        std::fs::write(dir.as_path().join("vendor.img"), &chained).unwrap();
+
+        assert_eq!(m.rollback_index, 1234);
+        let findings = m.cross_check_chained(dir.as_path());
+        assert_eq!(findings.len(), 2); // rollback-index + unsigned
+        assert_eq!(findings[1].rule, "avb-rollback-index");
+        assert!(findings[1].detail.contains("vendor"));
+        assert!(findings[1].detail.contains("lower than top-level"));
+    }
+
+    #[test]
+    fn cross_check_chained_no_findings_when_indices_match_or_exceed() {
+        use crate::testutil::Scratch;
+        let chain_desc = chain("vendor", 5, &[0; 32]);
+        let v = vbmeta(0, 0, &[prop("k", "v"), chain_desc], &[]);
+        let m = parse(&v, None).unwrap();
+
+        let mut chained = vbmeta(0, 0, &[prop("a", "b")], &[]);
+        chained[112..120].copy_from_slice(&1234u64.to_be_bytes());
+
+        let dir = Scratch::new("chained_good");
+        std::fs::write(dir.as_path().join("vendor.img"), &chained).unwrap();
+
+        let findings = m.cross_check_chained(dir.as_path());
+        assert_eq!(findings.len(), 1); // unsigned image
+    }
+    #[test]
+    fn an_unsigned_image_with_clean_flags_still_produces_a_finding() {
+        let m = parse(&vbmeta(0, 0, &[prop("k", "v")], &[]), None).unwrap();
+        let findings = m.findings();
+        // Unsigned (Algorithm NONE) -> high severity finding
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, "avb-unsigned-image");
+        assert_eq!(findings[0].severity, crate::audit::Severity::High);
+    }
+
+    #[test]
+    fn a_signed_image_with_clean_flags_produces_no_findings() {
+        let mut rng = OsRng;
+        let priv_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let v = vbmeta_signed(1, 0, &[prop("k", "v")], &priv_key);
+        let m = parse(&v, None).unwrap();
+        let findings = m.findings();
+        // A correctly signed image with clean flags = no findings
+        assert!(
+            findings.is_empty(),
+            "expected no findings for signed image, got {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn an_unsupported_algorithm_reports_not_checked() {
+        let v = vbmeta(99, 0, &[prop("k", "v")], &[]);
+        let m = parse(&v, None).unwrap();
+        let findings = m.findings();
+        // Unsupported algorithm -> warn, not checked
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, "avb-unsupported-algorithm");
+        assert_eq!(findings[0].severity, crate::audit::Severity::Warn);
+        assert!(findings[0].detail.contains("not checked"));
     }
 }

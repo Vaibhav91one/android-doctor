@@ -408,10 +408,34 @@ fn vbmeta_command(
         Some(dir) => avb::verify_images(&meta, dir)?,
         None => Vec::new(),
     };
+    let chained_findings: Vec<_> = images
+        .map(|d| meta.cross_check_chained(d))
+        .unwrap_or_default();
     let text = if json {
-        serde_json::to_string_pretty(&meta.to_json(&checks))?
+        let mut v = meta.to_json(&checks);
+        v["findings"] = serde_json::json!(
+            meta.findings()
+                .into_iter()
+                .chain(chained_findings.into_iter())
+                .map(|f| serde_json::json!({
+                    "severity": f.severity.name(),
+                    "rule": f.rule,
+                    "detail": f.detail,
+                }))
+                .collect::<Vec<_>>()
+        );
+        serde_json::to_string_pretty(&v)?
     } else {
-        meta.to_text(&checks)
+        let mut t = meta.to_text(&checks);
+        for f in &chained_findings {
+            t.push_str(&format!(
+                "\n  [{}] {}: {}\n",
+                f.severity.name(),
+                f.rule,
+                f.detail
+            ));
+        }
+        t
     };
     print_out(&text)?;
     anyhow::ensure!(

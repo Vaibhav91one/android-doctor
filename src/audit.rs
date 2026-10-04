@@ -32,14 +32,16 @@ const TEXT_LIST_CAP: usize = 25;
 pub enum Severity {
     High,
     Medium,
+    Warn,
     Info,
 }
 
 impl Severity {
-    fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Severity::High => "high",
             Severity::Medium => "medium",
+            Severity::Warn => "warn",
             Severity::Info => "info",
         }
     }
