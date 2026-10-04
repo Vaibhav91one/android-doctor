@@ -975,28 +975,37 @@ endif;
             );
         }
         // Complexity: a genuine O(n^2) regression would make the large input take far
-        // longer than a small one relative to its size. Instead of asserting on absolute
-        // wall-clock time (which flakes on loaded machines / CI runners), assert on the
-        // RATIO between a small and a large hostile input. This is deterministic across
-        // machines: it depends on input-size ratio, not on clock speed or scheduler load.
-        let probe = "getprop(\"a\") == \"b\" || ";
+        // longer than a small one relative to its size.
+        //
+        // Note on the threshold: the input grows exactly 40x, so a *linear* implementation
+        // produces a ratio of about 40x. Asserting strictly below 40x would therefore fail
+        // correct code and only pass by accident, when fixed per-run overhead inflates the
+        // smaller measurement. The ceiling below sits between the two regimes:
+        //
+        //     linear     ~40x
+        //     quadratic ~1600x
+        //     asserted   <200x   (5x headroom over linear, 8x below quadratic)
+        //
+        // so a real complexity regression is caught while ordinary timing jitter is not.
+        let probe: &str = "getprop(\"a\") == \"b\" || ";
         let small = format!("{};", probe.repeat(1_000));
         let large = format!("{};", probe.repeat(40_000));
-        let t0 = std::time::Instant::now();
-        summarise_script(&small);
-        let small_elapsed = t0.elapsed();
+        // The smallest measurement is the most robust under scheduler noise, so run the
+        // small case a few times and keep its minimum.
+        let mut small_elapsed = std::time::Duration::MAX;
+        for _ in 0..3 {
+            let t = std::time::Instant::now();
+            summarise_script(&small);
+            small_elapsed = small_elapsed.min(t.elapsed());
+        }
         let t1 = std::time::Instant::now();
         summarise_script(&large);
         let large_elapsed = t1.elapsed();
-        // 40x input: a linear scan stays ~40x; quadratic would be ~1600x. Requiring
-        // strictly less than 40x catches an O(n^2) regression while leaving generous
-        // headroom for scheduler jitter (the ratio, not absolute time, is the signal).
         let ratio = large_elapsed.as_secs_f64() / small_elapsed.as_secs_f64().max(1e-6);
         assert!(
-            ratio < 40.0,
-            "scan scaling is super-linear: small {:?} vs large {:?}, ratio {:.1}x (input grew 40x)",
-            small_elapsed,
-            large_elapsed,
+            ratio < 200.0,
+            "scan scaling is super-linear: small {small_elapsed:?} vs large {large_elapsed:?}, \
+             ratio {:.1}x for an input that grew 40x (linear ~40x, quadratic ~1600x)",
             ratio
         );
     }
