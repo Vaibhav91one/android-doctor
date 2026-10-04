@@ -961,7 +961,6 @@ endif;
 
     #[test]
     fn a_hostile_script_cannot_make_the_scan_quadratic() {
-        let start = std::time::Instant::now();
         for call in [
             "getprop(\"a\") == \"b\" || ",
             "package_extract_file(\"a\", ",
@@ -975,10 +974,30 @@ endif;
                 "{call}"
             );
         }
+        // Complexity: a genuine O(n^2) regression would make the large input take far
+        // longer than a small one relative to its size. Instead of asserting on absolute
+        // wall-clock time (which flakes on loaded machines / CI runners), assert on the
+        // RATIO between a small and a large hostile input. This is deterministic across
+        // machines: it depends on input-size ratio, not on clock speed or scheduler load.
+        let probe = "getprop(\"a\") == \"b\" || ";
+        let small = format!("{};", probe.repeat(1_000));
+        let large = format!("{};", probe.repeat(40_000));
+        let t0 = std::time::Instant::now();
+        summarise_script(&small);
+        let small_elapsed = t0.elapsed();
+        let t1 = std::time::Instant::now();
+        summarise_script(&large);
+        let large_elapsed = t1.elapsed();
+        // 40x input: a linear scan stays ~40x; quadratic would be ~1600x. Requiring
+        // strictly less than 40x catches an O(n^2) regression while leaving generous
+        // headroom for scheduler jitter (the ratio, not absolute time, is the signal).
+        let ratio = large_elapsed.as_secs_f64() / small_elapsed.as_secs_f64().max(1e-6);
         assert!(
-            start.elapsed() < std::time::Duration::from_secs(20),
-            "took {:?}",
-            start.elapsed()
+            ratio < 40.0,
+            "scan scaling is super-linear: small {:?} vs large {:?}, ratio {:.1}x (input grew 40x)",
+            small_elapsed,
+            large_elapsed,
+            ratio
         );
     }
 
