@@ -470,19 +470,22 @@ pub fn extract_all(input: &Path, out_dir: &Path, opts: &ExtractOptions) -> Resul
 /// Files a block OTA legitimately ships that are neither partitions nor partition data. These are
 /// looked at, understood, and deliberately not extracted: reporting them as failures would make
 /// the tool fail on every real update.
-const KNOWN_OTA_FILES: &[&str] = &[
+const KNOWN_OTA_FILES: &[&str] = &["cert.pem", "payload_properties.txt"];
+
+/// Suffixes of OTA scaffolding. These arrive named after the partition they belong to
+/// (`system.patch.dat`, `vendor.inf`), so they must be matched as suffixes, not names.
+const KNOWN_OTA_SUFFIXES: &[&str] = &[
     // the zero-length delta half of a partition; present in every block OTA
     ".patch.dat",
     ".patch.dat.br",
     ".inf",
     ".properties",
-    // standard Android update package metadata
-    "cert.pem",
-    "payload_properties.txt",
+    ".signature",
+    ".signature1",
+    ".signature2",
+    ".rsa",
+    ".dsa",
 ];
-
-/// Extensions that only ever appear in OTA scaffolding, never as a partition image.
-const KNOWN_OTA_EXTENSIONS: &[&str] = &["signature", "signature1", "signature2", "rsa", "dsa"];
 
 /// Directories that ship inside an OTA and hold signing metadata rather than partitions.
 const KNOWN_OTA_DIRS: &[&str] = &["META-INF"];
@@ -501,7 +504,7 @@ pub(crate) fn is_known_scaffolding(name: &str) -> bool {
     if lower.ends_with(".patch.dat") || lower.ends_with(".patch.dat.br") {
         return true;
     }
-    if KNOWN_OTA_EXTENSIONS.iter().any(|e| lower.ends_with(e)) {
+    if KNOWN_OTA_SUFFIXES.iter().any(|e| lower.ends_with(e)) {
         return true;
     }
     if KNOWN_OTA_SCRIPTS.iter().any(|f| lower == *f) {
@@ -1741,6 +1744,84 @@ mod tests {
         write_dir(&ota, &[("we ird.transfer.list", b"4\n0\n0\n0\n".to_vec())]);
         let e = run(&ota, &out, &ExtractOptions::default()).unwrap_err();
         assert!(e.to_string().contains("unsafe partition name"), "{e}");
+    }
+
+    #[test]
+    fn known_ota_scaffolding_is_ignored_not_unhandled() {
+        // Everything a normal block OTA ships that is not a partition image. Treating any of
+        // these as a failure would make the tool fail on every real update.
+        for name in [
+            "system.patch.dat",
+            "vendor.patch.dat",
+            "system.patch.dat.br",
+            "sdat2img.py",
+            "META-INF/CERT.RSA",
+            "payload_properties.txt",
+            "system.inf",
+        ] {
+            assert!(
+                is_known_scaffolding(name),
+                "{name} should be recognised as scaffolding"
+            );
+        }
+    }
+
+    #[test]
+    fn a_partition_or_unknown_file_is_not_scaffolding() {
+        for name in [
+            "mystery.bin",
+            "boot.img",
+            "system.transfer.list",
+            "random.txt",
+        ] {
+            assert!(
+                !is_known_scaffolding(name),
+                "{name} must not be treated as scaffolding"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_top_level_file_fails_the_run_and_scaffolding_does_not() {
+        let src = fresh_dir("unknown-in");
+        let mut files = sample_files();
+        files.push(("mystery.bin", b"???".to_vec()));
+        files.push(("system.patch.dat", Vec::new()));
+        write_dir(&src, &files);
+        let out = fresh_dir("unknown-out");
+        let e = format!(
+            "{:#}",
+            run(&src, &out, &ExtractOptions::default()).unwrap_err()
+        );
+        assert!(
+            e.contains("mystery.bin"),
+            "the unknown file must be named: {e}"
+        );
+        assert!(
+            !e.contains("patch.dat"),
+            "scaffolding must never be an error: {e}"
+        );
+    }
+
+    #[test]
+    fn allow_partial_succeeds_but_still_reports_the_unhandled_file() {
+        let src = fresh_dir("partial-in");
+        let mut files = sample_files();
+        files.push(("mystery.bin", b"???".to_vec()));
+        write_dir(&src, &files);
+        let out = fresh_dir("partial-out");
+        let opts = ExtractOptions {
+            allow_partial: true,
+            ..ExtractOptions::default()
+        };
+        let result = extract_all_noted(&src, &out, &opts).unwrap();
+        assert_eq!(
+            result.unhandled.len(),
+            1,
+            "the unknown file is still reported"
+        );
+        assert_eq!(result.unhandled[0].name, "mystery.bin");
+        check_sample_output(&out);
     }
 
     #[test]
