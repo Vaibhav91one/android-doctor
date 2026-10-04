@@ -7,6 +7,7 @@ mod audit;
 mod avb;
 mod bootimg;
 mod detect;
+mod doctor;
 mod erofsfs;
 mod ext4fs;
 mod extract;
@@ -178,6 +179,14 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Run a deterministic health scan on an unpacked firmware directory
+    Doctor {
+        /// Directory to scan
+        input: PathBuf,
+        /// Print findings as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn identify(paths: &[PathBuf], json: bool) -> anyhow::Result<()> {
@@ -261,6 +270,23 @@ fn ramdisk_command(
         found.len()
     );
     Ok(())
+}
+
+fn render_findings(findings: &[doctor::Finding]) -> String {
+    let mut lines = Vec::new();
+    for f in findings {
+        lines.push(format!(
+            "{} {} {}: {}: {}",
+            f.severity, f.category, f.id, f.subject, f.message
+        ));
+        if let Some(r) = &f.remedy {
+            lines.push(format!("    └ {}", r));
+        }
+    }
+    lines.join(
+        "
+",
+    )
 }
 
 fn print_out(text: &str) -> anyhow::Result<()> {
@@ -353,6 +379,32 @@ fn main() -> anyhow::Result<()> {
             let parts = extract::partition_names(&input)?;
             let report = report::analyze(&meta, parts, report::today_days())?;
             print_out(&report::render(&report, json)?)
+        }
+        Command::Doctor { input, json } => {
+            let findings = doctor::scan(&input)?;
+            let text = if json {
+                let rows: Vec<serde_json::Value> = findings
+                    .iter()
+                    .map(|f| {
+                        serde_json::json!({
+                            "id": f.id,
+                            "category": f.category,
+                            "severity": f.severity,
+                            "subject": f.subject,
+                            "message": f.message,
+                            "remedy": f.remedy,
+                        })
+                    })
+                    .collect();
+                serde_json::to_string_pretty(&rows)?
+            } else {
+                render_findings(&findings)
+            };
+            print_out(&text)?;
+            if findings.iter().any(|f| f.severity == "error") {
+                anyhow::bail!("one or more findings have severity error");
+            }
+            Ok(())
         }
     };
     // Unified error rendering (issue #77): a one-line headline, then the indented cause
