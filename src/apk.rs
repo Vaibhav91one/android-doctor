@@ -358,10 +358,13 @@ fn find_cn(buf: &[u8], depth: usize) -> Option<String> {
             }
             if vt == 0x1E {
                 // BMPString: UTF-16BE
-                let units: Vec<u16> = buf[vstart..vstart + vlen]
-                    .chunks_exact(2)
-                    .map(|c| u16::from_be_bytes([c[0], c[1]]))
-                    .collect();
+                let raw = &buf[vstart..vstart + vlen];
+                let mut units: Vec<u16> = Vec::with_capacity(raw.len() / 2);
+                let mut i = 0;
+                while i + 1 < raw.len() {
+                    units.push(u16::from_be_bytes([raw[i], raw[i + 1]]));
+                    i += 2;
+                }
                 return String::from_utf16(&units).ok();
             }
         }
