@@ -10,6 +10,7 @@ mod bootimg;
 mod content;
 mod detect;
 mod doctor;
+mod dt;
 mod erofsfs;
 mod ext4fs;
 mod extract;
@@ -86,6 +87,14 @@ enum Command {
         /// Also summarise the updater-script and read the signing certificate
         #[arg(long)]
         details: bool,
+    },
+    /// Show a device tree, dtbo table, or an opaque container header
+    Dt {
+        /// dt.img, dtbo.img, logo.img, bootloader.img or a boot image
+        input: PathBuf,
+        /// Print JSON instead of text
+        #[arg(long)]
+        json: bool,
     },
     /// Show a flash manifest (Qualcomm rawprogram*.xml or MediaTek scatter.txt) and check it
     /// against the image files actually present
@@ -395,6 +404,7 @@ fn main() -> anyhow::Result<()> {
             sector_size,
             json,
         } => partitions_command(&input, sector_size, json),
+        Command::Dt { input, json } => dt_command(&input, json),
         Command::Report { input, json } => {
             let meta = info::read(&input)?;
             let parts = extract::partition_names(&input)?;
@@ -479,6 +489,16 @@ fn manifest_json(m: &manifest::Manifest) -> serde_json::Value {
         "missing_images": m.missing_images,
         "unreferenced_images": m.unreferenced_images,
     })
+}
+
+/// `dt`: device tree, dtbo table, or a bounded description of a container we do not parse.
+fn dt_command(input: &std::path::Path, json: bool) -> anyhow::Result<()> {
+    let text = if json {
+        serde_json::to_string_pretty(&dt::to_json(input)?)?
+    } else {
+        dt::describe_file(input)?
+    };
+    print_out(&text)
 }
 
 fn files_command(
