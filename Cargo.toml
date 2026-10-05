@@ -3,6 +3,9 @@ name = "android-doctor"
 version = "0.1.0"
 edition = "2024"
 
+[build-dependencies]
+cc = "1"
+
 [dependencies]
 am-fs-erofs = "0.3"
 am-fs-core = "0.2"

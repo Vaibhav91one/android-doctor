@@ -11,8 +11,14 @@ fn command_ranges(cmd: &Command) -> &[(u64, u64)] {
 }
 
 /// Decompress a `.new.dat.br` stream on the fly, so no temporary `.new.dat` file is needed.
+///
+/// This is the hot path for a block OTA: brotli decode is essentially the entire cost of
+/// rebuilding a partition. The vendored C decoder measured 391 MB/s against the pure-Rust
+/// `brotli` crate's 250 MB/s on real firmware, so it is worth the FFI (#74). The pure-Rust
+/// decoder is still used to COMPRESS in tests, which keeps the two implementations honest
+/// about each other.
 pub fn brotli_reader<R: Read>(input: R) -> impl Read {
-    brotli::Decompressor::new(input, 64 * 1024)
+    crate::libbrotli::BrotliDecoderReader::new(input)
 }
 
 /// Size in bytes of the image a transfer list describes. Header line 2 only counts the blocks
