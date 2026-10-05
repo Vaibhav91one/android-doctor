@@ -670,7 +670,15 @@ pub(crate) fn extract_all_tracked(
             copy_raw(&mut src, name, out_dir)?;
             let _ = std::fs::rename(out_dir.join(name), &staged);
             let target = out_dir.join(archive_stem(name));
-            let unpacked = crate::archive::extract(&staged, &target);
+            // Route through the extraction engine (#26): it sniffs, dispatches to the
+            // registered handler, and re-queues whatever that handler produced so nested
+            // containers resolve without any handler knowing about the others.
+            let unpacked = crate::engine::unpack_into(
+                &crate::engine::handlers(),
+                &staged,
+                &target,
+                &crate::engine::Limits::default(),
+            );
             let _ = std::fs::remove_dir_all(&incoming);
             unpacked?;
             paths.push(target);
