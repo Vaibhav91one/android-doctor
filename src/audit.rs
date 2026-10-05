@@ -5,6 +5,7 @@
 //! world-writable files, and the services declared in init `.rc` files (adbd and anything running
 //! as root or in a shell or `su` SELinux domain), then turns what it found into findings with a
 //! severity. It only reads: nothing is extracted or executed.
+use crate::apk::{ApkAudit, audit_apk_bytes};
 use crate::content::{Hit as ContentHit, MAX_SCAN_FILE_BYTES, MAX_SCAN_TOTAL_BYTES, scan_bytes};
 use crate::ramdisk::{MAX_PROP_FILE, REPORTED_PROPS, is_prop_file};
 use crate::term::{Renderer, Severity as TermSeverity, Style};
@@ -23,6 +24,11 @@ const BUILD_PROPS: [&str; 5] = [
     "ro.build.version.security_patch",
 ];
 const SU_DIRS: [&str; 4] = ["bin", "xbin", "sbin", "su"];
+/// Most APKs we will open per image. A hostile image can hold tens of thousands.
+const MAX_APK_COUNT: usize = 2_000;
+/// Total bytes we will read out of APKs per image.
+const MAX_APK_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+
 /// Most text files (properties and init scripts) and bytes of them one image may make us read.
 const MAX_TEXT_FILES: usize = 50_000;
 const MAX_TEXT_BYTES: u64 = 256 << 20;
@@ -103,6 +109,8 @@ pub struct ImageAudit {
     pub findings: Vec<Finding>,
     pub content_findings: Vec<ContentHit>,
     pub content_bytes_scanned: u64,
+    /// One entry per APK found in the image, with its package name and signers.
+    pub apks: Vec<ApkAudit>,
 }
 
 fn label_of(e: &Entry) -> String {
@@ -219,6 +227,7 @@ fn analyse_with(
     max_bytes: u64,
 ) -> Result<ImageAudit> {
     let (mut files_read, mut bytes_read) = (0usize, 0u64);
+    let mut apk_bytes: u64 = 0;
     let mut a = ImageAudit {
         name: name.to_string(),
         entries: entries.len(),
@@ -231,6 +240,18 @@ fn analyse_with(
         }
         if e.kind != Kind::File {
             continue;
+        }
+        // APKs: read the package name and signing certificates. Bounded like the text
+        // scan, and a malformed APK is reported rather than skipped silently.
+        if e.path.to_ascii_lowercase().ends_with(".apk")
+            && a.apks.len() < MAX_APK_COUNT
+            && e.size <= crate::apk::MAX_APK_BYTES
+            && apk_bytes + e.size <= MAX_APK_TOTAL_BYTES
+            && let Ok(bytes) = read(&e.path)
+        {
+            apk_bytes += bytes.len() as u64;
+            a.apks
+                .push(audit_apk_bytes(std::path::Path::new(&e.path), &bytes));
         }
         if e.mode & 0o6000 != 0 {
             a.setuid.push(special(e));
@@ -607,6 +628,26 @@ pub fn audit_image(path: &Path) -> Result<ImageAudit> {
     Ok(a)
 }
 
+/// One APK as JSON: package, versions, signers, or the error that stopped parsing.
+fn apk_json(a: &ApkAudit) -> Value {
+    let Some(info) = &a.info else {
+        return json!({ "error": a.error });
+    };
+    json!({
+        "path": info.path,
+        "package": info.package_name,
+        "version_code": info.version_code,
+        "version_name": info.version_name,
+        "aosp_test_key": info.has_test_key(),
+        "signers": info.signers.iter().map(|s| json!({
+            "scheme": s.scheme,
+            "cert_sha256": s.cert_sha256,
+            "subject_cn": s.subject_cn,
+            "is_aosp_test_key": s.is_aosp_test_key,
+        })).collect::<Vec<Value>>(),
+    })
+}
+
 fn special_json(s: &Special) -> Value {
     json!({"path": s.path, "mode": s.mode, "uid": s.uid, "gid": s.gid, "label": s.label})
 }
@@ -633,6 +674,7 @@ pub fn to_json(audits: &[ImageAudit]) -> Value {
                 "severity": f.severity, "rule": f.rule, "detail": f.detail,
             })).collect::<Vec<_>>(),
             "content_bytes_scanned": a.content_bytes_scanned,
+            "apks": a.apks.iter().map(apk_json).collect::<Vec<Value>>(),
         })).collect::<Vec<_>>(),
     })
 }
@@ -664,6 +706,34 @@ pub fn to_text(audits: &[ImageAudit], no_color: bool) -> String {
         }
         if a.findings.is_empty() {
             o.push("no findings".to_string());
+        }
+        if !a.apks.is_empty() {
+            let unreadable = a.apks.iter().filter(|x| x.info.is_none()).count();
+            o.push(format!(
+                "APKs: {} found{}",
+                a.apks.len(),
+                if unreadable > 0 {
+                    format!(", {unreadable} unreadable")
+                } else {
+                    String::new()
+                }
+            ));
+            o.extend(capped(&a.apks, |x| match &x.info {
+                Some(i) => {
+                    let test_key = if i.has_test_key() {
+                        "  [AOSP TEST KEY]"
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "{}  {}  {}{test_key}",
+                        i.path,
+                        i.package_name,
+                        i.signers.len()
+                    )
+                }
+                None => format!("unreadable: {}", x.error.as_deref().unwrap_or("unknown")),
+            }));
         }
         if !a.props.is_empty() {
             o.push("properties:".to_string());
