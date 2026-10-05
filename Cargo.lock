@@ -65,14 +65,17 @@ dependencies = [
 name = "android-doctor"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "am-fs-core",
  "am-fs-erofs",
  "anyhow",
  "brotli",
  "bzip2",
+ "cipher",
  "clap",
  "crc32fast",
  "flate2",
+ "generic-array",
  "indicatif",
  "lz4_flex 0.14.0",
  "lzma-rust2 0.21.0",

@@ -17,6 +17,7 @@ mod info;
 mod lp;
 mod manifest;
 mod otameta;
+mod ozip;
 mod pac;
 mod payload;
 mod ramdisk;
