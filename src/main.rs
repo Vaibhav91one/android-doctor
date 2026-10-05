@@ -10,6 +10,7 @@ mod bootimg;
 mod content;
 mod detect;
 mod doctor;
+mod dt;
 mod erofsfs;
 mod ext4fs;
 mod extract;
@@ -76,6 +77,14 @@ enum Command {
         /// Never emit colour
         #[arg(long)]
         no_color: bool,
+    },
+    /// Show a device tree, dtbo table, logo resource or bootloader header
+    Dt {
+        /// dt.img, dtbo.img, logo.img, bootloader.img, or a boot image
+        input: PathBuf,
+        /// Print JSON instead of text
+        #[arg(long)]
+        json: bool,
     },
     /// Print build info from an OTA without extracting
     Info {
@@ -395,6 +404,7 @@ fn main() -> anyhow::Result<()> {
             sector_size,
             json,
         } => partitions_command(&input, sector_size, json),
+        Command::Dt { input, json } => dt_command(&input, json),
         Command::Report { input, json } => {
             let meta = info::read(&input)?;
             let parts = extract::partition_names(&input)?;
@@ -443,6 +453,41 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
+/// `partitions`: show a flash manifest and cross-check it against the images present.
+fn partitions_command(input: &std::path::Path, sector_size: u64, json: bool) -> anyhow::Result<()> {
+    let m = manifest::read(input, sector_size)?;
+    let text = if json {
+        serde_json::to_string_pretty(&manifest_json(&m))?
+    } else {
+        manifest::to_text(&m)
+    };
+    print_out(&text)?;
+    // A manifest that references a missing image is not a usable firmware set.
+    if !m.missing_images.is_empty() {
+        anyhow::bail!(
+            "{} manifest image(s) are missing from {}",
+            m.missing_images.len(),
+            input.display()
+        );
+    }
+    Ok(())
+}
+
+/// One manifest as JSON.
+fn manifest_json(m: &manifest::Manifest) -> serde_json::Value {
+    serde_json::json!({
+        "format": m.kind.name(),
+        "sector_size": m.sector_size,
+        "partitions": m.partitions.iter().map(|p| serde_json::json!({
+            "label": p.label,
+            "filename": p.filename,
+            "start_sector": p.start_sector,
+            "num_sectors": p.num_sectors,
+            "size_bytes": p.num_sectors * m.sector_size,
+            "sparse": p.sparse,
+        })).collect::<Vec<_>>(),
+        "missing_images": m.missing_images,
+        "unreferenced_images": m.unreferenced_images,
 /// `partitions`: show a flash manifest and cross-check it against the images present.
 fn partitions_command(input: &std::path::Path, sector_size: u64, json: bool) -> anyhow::Result<()> {
     let m = manifest::read(input, sector_size)?;
