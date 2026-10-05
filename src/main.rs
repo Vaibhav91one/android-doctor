@@ -21,6 +21,7 @@ mod info;
 mod libbrotli;
 mod lp;
 mod manifest;
+mod mcp;
 mod otameta;
 mod ozip;
 mod pac;
@@ -28,6 +29,7 @@ mod payload;
 mod ramdisk;
 mod report;
 mod sdat;
+mod skill;
 mod sparse;
 mod term;
 #[cfg(test)]
@@ -219,14 +221,96 @@ enum Command {
     },
     /// Run a deterministic health scan on an unpacked firmware directory
     Doctor {
+        #[command(subcommand)]
+        action: DoctorAction,
+    },
+    /// Expose android-doctor over the Model Context Protocol (JSON-RPC on stdio)
+    Mcp {
+        /// Log each request to stderr; stdout stays pure JSON-RPC
+        #[arg(long)]
+        verbose: bool,
+    },
+}
+
+/// What `doctor` should do.
+#[derive(Subcommand)]
+enum DoctorAction {
+    /// Scan a directory and report findings
+    Scan {
         /// Directory to scan
         input: PathBuf,
         /// Print findings as JSON
         #[arg(long)]
         json: bool,
     },
+    /// Write the agent skill into an agent config dir so a coding agent can use this tool
+    Install {
+        /// Which agent to install for; omit to print where each one would go
+        #[arg(long)]
+        agent: Option<String>,
+        /// Print the skill instead of writing it
+        #[arg(long)]
+        print_only: bool,
+    },
 }
 
+/// `doctor scan`: report findings for a directory, as text or JSON.
+fn doctor_scan(input: &std::path::Path, json: bool) -> anyhow::Result<()> {
+    let findings = doctor::scan(input)?;
+    let text = if json {
+        let rows: Vec<serde_json::Value> = findings
+            .iter()
+            .map(|f| {
+                serde_json::json!({
+                    "id": f.id,
+                    "category": f.category,
+                    "severity": f.severity,
+                    "subject": f.subject,
+                    "message": f.message,
+                    "remedy": f.remedy,
+                })
+            })
+            .collect();
+        serde_json::to_string_pretty(&rows)?
+    } else {
+        render_findings(&findings)
+    };
+    print_out(&text)?;
+    if findings.iter().any(|f| f.severity == "error") {
+        anyhow::bail!("one or more findings have severity error");
+    }
+    Ok(())
+}
+/// `doctor install`: write the agent skill, or show where it would go.
+fn doctor_install(agent: Option<String>, print_only: bool) -> anyhow::Result<()> {
+    if print_only {
+        return print_out(&skill::content());
+    }
+    match agent {
+        None => {
+            for a in skill::Agent::all() {
+                println!("{}: {}", a.name(), a.skill_dir().display());
+            }
+            println!("\npass --agent <name> to write, or --print to see the skill");
+            Ok(())
+        }
+        Some(name) => {
+            let all = skill::Agent::all();
+            let Some(a) = all.iter().find(|a| a.name() == name) else {
+                anyhow::bail!(
+                    "unknown agent {name:?}; expected one of {}",
+                    skill::Agent::all()
+                        .iter()
+                        .map(|a| a.name())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            };
+            let dest = skill::install_in(*a, &a.skill_dir())?;
+            print_out(&format!("wrote {}", dest.display()))
+        }
+    }
+}
 fn identify(paths: &[PathBuf], json: bool) -> anyhow::Result<()> {
     let mut failed = 0;
     let mut rows = Vec::new();
@@ -430,32 +514,11 @@ fn main() -> anyhow::Result<()> {
             let report = report::analyze(&meta, parts, report::today_days())?;
             print_out(&report::render(&report, json)?)
         }
-        Command::Doctor { input, json } => {
-            let findings = doctor::scan(&input)?;
-            let text = if json {
-                let rows: Vec<serde_json::Value> = findings
-                    .iter()
-                    .map(|f| {
-                        serde_json::json!({
-                            "id": f.id,
-                            "category": f.category,
-                            "severity": f.severity,
-                            "subject": f.subject,
-                            "message": f.message,
-                            "remedy": f.remedy,
-                        })
-                    })
-                    .collect();
-                serde_json::to_string_pretty(&rows)?
-            } else {
-                render_findings(&findings)
-            };
-            print_out(&text)?;
-            if findings.iter().any(|f| f.severity == "error") {
-                anyhow::bail!("one or more findings have severity error");
-            }
-            Ok(())
-        }
+        Command::Doctor { action } => match action {
+            DoctorAction::Scan { input, json } => doctor_scan(&input, json),
+            DoctorAction::Install { agent, print_only } => doctor_install(agent, print_only),
+        },
+        Command::Mcp { verbose } => mcp::serve(verbose),
     };
     // Unified error rendering (issue #77): a one-line headline, then the indented cause
     // chain. Printed once, here, and the process exits non-zero - returning the error as
