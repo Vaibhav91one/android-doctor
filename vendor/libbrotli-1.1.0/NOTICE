@@ -1,0 +1,14 @@
+# libbrotli notice
+
+This directory contains the decode-only subset of Google's libbrotli, version 1.1.0.
+
+Source: https://github.com/google/brotli/releases/tag/v1.1.0
+
+Only the decoder path is vendored (c/common/, c/dec/, and the public headers in
+c/include/brotli/). The encoder (c/enc/) is NOT included, as this project only
+needs decompression.
+
+The C source is compiled into a static library by build.rs using the `cc` crate,
+so the final binary has no runtime dependency on a system libbrotli.
+
+License: MIT License (see LICENSE in this directory).

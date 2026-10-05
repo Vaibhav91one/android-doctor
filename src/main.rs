@@ -16,6 +16,7 @@ mod erofsfs;
 mod ext4fs;
 mod extract;
 mod info;
+mod libbrotli;
 mod lp;
 mod manifest;
 mod otameta;
