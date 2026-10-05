@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use std::io::Write;
 use std::path::PathBuf;
 
+mod apk;
 mod archive;
 mod audit;
 mod avb;
