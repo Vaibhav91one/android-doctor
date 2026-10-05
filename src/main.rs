@@ -7,6 +7,7 @@ mod archive;
 mod audit;
 mod avb;
 mod bootimg;
+mod bsdiff;
 mod content;
 mod detect;
 mod doctor;
@@ -63,6 +64,10 @@ enum Command {
         /// Also extract the files of every ext2/3/4 image into <out>/files/<image>/ (with manifests)
         #[arg(long)]
         files: bool,
+        /// Base partition images for an incremental OTA, applied over these to rebuild
+        /// partitions. Required for SOURCE_COPY and SOURCE_BSDIFF operations.
+        #[arg(long, value_name = "DIR")]
+        base: Option<PathBuf>,
         /// Do not fail when some inputs are skipped; report and exit 0
         #[arg(long)]
         allow_partial: bool,
@@ -334,12 +339,14 @@ fn main() -> anyhow::Result<()> {
             list,
             files,
             allow_partial,
+            base,
             strict,
             quiet,
             verbose,
             no_color,
         } => {
             let opts = extract::ExtractOptions {
+                base,
                 force,
                 only: (!only.is_empty()).then_some(only),
                 list,

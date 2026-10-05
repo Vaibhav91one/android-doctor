@@ -296,6 +296,9 @@ pub fn partition_names(input: &Path) -> Result<Vec<String>> {
 pub struct ExtractOptions {
     /// Replace existing output files instead of refusing.
     pub force: bool,
+    /// Directory holding the base partition images for an incremental OTA (`--base <dir>`).
+    /// When `None`, incremental operations (SOURCE_COPY, SOURCE_BSDIFF) are refused.
+    pub base: Option<PathBuf>,
     /// Extract only these partitions / raw images (by name without `.img`); `None` = all.
     pub only: Option<Vec<String>>,
     /// Print what would be extracted, with sizes, and write nothing.
@@ -757,7 +760,7 @@ pub fn run(input: &Path, out_dir: &Path, opts: &ExtractOptions) -> Result<()> {
     let start = std::time::Instant::now();
     let style = crate::term::Style::detect(opts.no_color);
     if opts.verbose {
-        let fmt = if payload::locate(input).is_ok_and(|l| l.is_some()) {
+        let fmt = if payload::locate(input, opts.base.as_deref()).is_ok_and(|l| l.is_some()) {
             "A/B OTA payload"
         } else if pac::is_pac(input) {
             "PAC"
