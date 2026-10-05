@@ -15,6 +15,9 @@ android-doctor unsparse <file>... -o out.img [--force]   # Android sparse image(
 android-doctor identify <path>... [--json]               # what is this file, by magic bytes
 android-doctor info     <ota.zip|dir> [--json]           # build metadata (META-INF/com/android/metadata)
 android-doctor report   <ota.zip|dir> [--json]           # staleness verdict from the security patch level
+android-doctor dt       <dt.img|dtbo.img|boot.img|...> [--json]   # device tree, dtbo table, or container header
+android-doctor partitions <dir> [--json] [--sector-size 4096]   # flash manifest (Qualcomm rawprogram.xml / MediaTek scatter.txt)
+android-doctor doctor   <dir> [--json]   # deterministic health scan on an unpacked firmware directory
 ```
 
 ## What `extract` does today
@@ -66,7 +69,10 @@ Status: **verified** = checked against an independent reference tool on real fir
 | Encrypted boot sections (Amlogic `@AML` containers and ciphertext) | detected only | `unpack` labels them (`aml-container`, `unknown-high-entropy`) and `ramdisk` explains why it cannot read them; there is no way to decrypt without the vendor's keys. The real STB recovery image is one of these |
 | tar, `.tar.md5`, gzip, bzip2, xz, lz4 wrappers | verified | Synthetic tars built with `tar::Builder` and wrapped with `flate2`: plain, gzip and Samsung `.tar.md5` all round-trip `boot.img`/`system.img` byte-for-byte, and an `extract` run over an update directory unpacks `SUPER.tar.md5` into its partition images instead of copying the blob. A `.tar.md5` whose trailing MD5 does not match the tar is refused before anything is written; an entry named `../evil`, an absolute path or a NUL is rejected, and device and fifo entries are refused rather than created. Extraction stages into `<out>.part` and is published only on success |
 | AVB / vbmeta inspection | verified | RSA signature verification over the header + auxiliary block, matching `avbtool verify_image` |
-| Vendor containers (`.ozip`, Qualcomm `rawprogram`, Amlogic, ...) | planned | Without real samples these will be marked unverified |
+| Oppo/Realme `.ozip` (AES-128-ECB encrypted zip) | synthetic | Decrypts to the inner zip using a per-model key table (adapted from B. Kerler's `oppo_ozip_decrypt`, MIT); tested with generated fixtures, not yet verified on real firmware |
+| Qualcomm `rawprogram*.xml` and MediaTek `scatter.txt` flash manifests | synthetic | Parsed and checked against the image files present (`partitions` command); tested with generated fixtures |
+| Device tree / dtbo tables (`dt`) | synthetic | Parses and displays the device tree blob and dtbo table headers; tested on AOSP `mkdtboimg` output |
+| Other vendor containers (Amlogic, ...) | planned | Without real samples these will be marked unverified |
 | Spreadtrum/MediaTek `.pac` containers | synthetic | Parser and extractor (adapted from SR Labs PacHandler, Apache-2.0); tested with generated fixtures, not yet verified on real firmware |
 | Incremental OTAs (`*.patch.dat`, delta payloads) | no | Fails with a clear error |
 | dm-verity hash tree and FEC regeneration for A/B partitions | planned | Needed to check the whole-image hash of partitions that declare those extents |
@@ -74,6 +80,24 @@ Status: **verified** = checked against an independent reference tool on real fir
 | `.ofp` and other key-protected containers | no | |
 
 Roadmap and issue list: see the milestones on GitHub.
+
+## Install
+
+Prebuilt release binaries for macOS (aarch64 and x86_64) and Linux (x86_64) are
+attached to each [GitHub release](https://github.com/Vaibhav91one/android-doctor/releases).
+Download the `android-doctor-<target>.tar.gz` for your platform, extract it, and
+place the binary on your `PATH`:
+
+```
+tar xzf android-doctor-aarch64-apple-darwin.tar.gz
+sudo mv android-doctor /usr/local/bin/
+```
+
+Or install from source with Cargo:
+
+```
+cargo install --git https://github.com/Vaibhav91one/android-doctor android-doctor
+```
 
 ## Build
 
