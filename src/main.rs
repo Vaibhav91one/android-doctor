@@ -11,6 +11,7 @@ mod content;
 mod detect;
 mod doctor;
 mod dt;
+mod engine;
 mod erofsfs;
 mod ext4fs;
 mod extract;
