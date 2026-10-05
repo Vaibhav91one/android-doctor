@@ -78,14 +78,6 @@ enum Command {
         #[arg(long)]
         no_color: bool,
     },
-    /// Show a device tree, dtbo table, logo resource or bootloader header
-    Dt {
-        /// dt.img, dtbo.img, logo.img, bootloader.img, or a boot image
-        input: PathBuf,
-        /// Print JSON instead of text
-        #[arg(long)]
-        json: bool,
-    },
     /// Print build info from an OTA without extracting
     Info {
         input: PathBuf,
@@ -95,6 +87,14 @@ enum Command {
         /// Also summarise the updater-script and read the signing certificate
         #[arg(long)]
         details: bool,
+    },
+    /// Show a device tree, dtbo table, or an opaque container header
+    Dt {
+        /// dt.img, dtbo.img, logo.img, bootloader.img or a boot image
+        input: PathBuf,
+        /// Print JSON instead of text
+        #[arg(long)]
+        json: bool,
     },
     /// Show a flash manifest (Qualcomm rawprogram*.xml or MediaTek scatter.txt) and check it
     /// against the image files actually present
@@ -488,42 +488,17 @@ fn manifest_json(m: &manifest::Manifest) -> serde_json::Value {
         })).collect::<Vec<_>>(),
         "missing_images": m.missing_images,
         "unreferenced_images": m.unreferenced_images,
-/// `partitions`: show a flash manifest and cross-check it against the images present.
-fn partitions_command(input: &std::path::Path, sector_size: u64, json: bool) -> anyhow::Result<()> {
-    let m = manifest::read(input, sector_size)?;
-    let text = if json {
-        serde_json::to_string_pretty(&manifest_json(&m))?
-    } else {
-        manifest::to_text(&m)
-    };
-    print_out(&text)?;
-    // A manifest that references a missing image is not a usable firmware set.
-    if !m.missing_images.is_empty() {
-        anyhow::bail!(
-            "{} manifest image(s) are missing from {}",
-            m.missing_images.len(),
-            input.display()
-        );
-    }
-    Ok(())
+    })
 }
 
-/// One manifest as JSON.
-fn manifest_json(m: &manifest::Manifest) -> serde_json::Value {
-    serde_json::json!({
-        "format": m.kind.name(),
-        "sector_size": m.sector_size,
-        "partitions": m.partitions.iter().map(|p| serde_json::json!({
-            "label": p.label,
-            "filename": p.filename,
-            "start_sector": p.start_sector,
-            "num_sectors": p.num_sectors,
-            "size_bytes": p.num_sectors * m.sector_size,
-            "sparse": p.sparse,
-        })).collect::<Vec<_>>(),
-        "missing_images": m.missing_images,
-        "unreferenced_images": m.unreferenced_images,
-    })
+/// `dt`: device tree, dtbo table, or a bounded description of a container we do not parse.
+fn dt_command(input: &std::path::Path, json: bool) -> anyhow::Result<()> {
+    let text = if json {
+        serde_json::to_string_pretty(&dt::to_json(input)?)?
+    } else {
+        dt::describe_file(input)?
+    };
+    print_out(&text)
 }
 
 fn files_command(
