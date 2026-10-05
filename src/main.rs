@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use std::io::Write;
 use std::path::PathBuf;
 
+mod amlogic;
 mod apk;
 mod archive;
 mod audit;
@@ -89,6 +90,11 @@ enum Command {
         /// Also summarise the updater-script and read the signing certificate
         #[arg(long)]
         details: bool,
+    },
+    /// Describe an Amlogic image container (dt.img, dtbo.img, aml_upgrade_package.img)
+    Amlogic {
+        /// The Amlogic container to describe
+        input: PathBuf,
     },
     /// Show a device tree, dtbo table, or an opaque container header
     Dt {
@@ -407,6 +413,10 @@ fn main() -> anyhow::Result<()> {
             json,
         } => partitions_command(&input, sector_size, json),
         Command::Dt { input, json } => dt_command(&input, json),
+        Command::Amlogic { input } => {
+            let img = amlogic::describe_file(&input)?;
+            print_out(&amlogic::to_text(&img, &display_name(&input)))
+        }
         Command::Report { input, json } => {
             let meta = info::read(&input)?;
             let parts = extract::partition_names(&input)?;
@@ -501,6 +511,13 @@ fn dt_command(input: &std::path::Path, json: bool) -> anyhow::Result<()> {
         dt::describe_file(input)?
     };
     print_out(&text)
+}
+
+/// File name of a path, for messages.
+fn display_name(p: &std::path::Path) -> String {
+    p.file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| p.display().to_string())
 }
 
 fn files_command(
