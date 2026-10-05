@@ -281,6 +281,9 @@ pub fn run(inputs: &[PathBuf], output: &Path, force: bool) -> Result<()> {
     let files = inputs
         .iter()
         .map(|p| {
+            // Opening a FIFO blocks until a writer appears, so a hostile path would wedge the
+            // process forever. Refuse anything that is not a regular file or block/char device.
+            crate::detect::refuse_blocking_file(p)?;
             File::open(p)
                 .map(BufReader::new)
                 .with_context(|| format!("opening {}", p.display()))
