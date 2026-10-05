@@ -4,7 +4,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::fs::File;
 use std::io::IsTerminal;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
@@ -345,6 +345,7 @@ fn is_archive_name(name: &str) -> bool {
         || name.ends_with(".tar.zst")
         || name.ends_with(".tar.lz4")
         || name.ends_with(".tar.md5")
+        || name.ends_with(".ozip")
 }
 
 /// True when the head of a file is a tar, a tar wrapped in a compression we can undo, or a
@@ -379,14 +380,42 @@ fn is_safe_name(p: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-/// The directory name an archive is unpacked into: `SUPER.tar.md5` and `SUPER.tar.gz` both
-/// become `SUPER`.
+/// The directory name an archive is unpacked into: SUPER.tar.md5 and SUPER.tar.gz both
+/// become SUPER. For .ozip, the stem strips the .ozip suffix.
 fn archive_stem(name: &str) -> &str {
     let base = name.strip_suffix(".md5").unwrap_or(name);
-    base.strip_suffix(".tar").unwrap_or(base)
+    let base = base.strip_suffix(".tar").unwrap_or(base);
+    base.strip_suffix(".ozip").unwrap_or(base)
 }
 
-/// Validate the OTA's names and apply `--only`: returns (partitions, raw images), both sorted.
+/// Unpack the contents of a zip file into dir using the shared sink (safe paths,
+/// staging, collision handling). Directories in the zip are created; regular files are
+/// written through the sink; symlinks, devices and fifos are refused.
+fn extract_zip(input: &mut (impl Read + Seek), dir: &Path) -> Result<()> {
+    let mut zip = zip::ZipArchive::new(input).context("not a valid zip file")?;
+    let collisions = crate::treeout::host_collisions(dir);
+    let mut sink = crate::treeout::Sink::with_collisions(dir, collisions);
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i).with_context(|| format!("zip entry {i}"))?;
+        let name = entry
+            .enclosed_name()
+            .ok_or_else(|| anyhow!("zip entry {i} has a non-UTF-8 or unsafe path"))?
+            .to_string_lossy()
+            .to_string();
+        let cleaned =
+            crate::treeout::clean_path(&name).with_context(|| format!("zip entry {name:?}"))?;
+        if entry.is_dir() {
+            sink.add_dir(&cleaned)?;
+        } else if entry.is_file() {
+            sink.write_file(&cleaned, entry.unix_mode().unwrap_or(0o644), &mut entry)?;
+        } else {
+            bail!("zip entry {cleaned:?} is not a regular file or directory");
+        }
+    }
+    Ok(())
+}
+
+/// Validate the OTA's names and apply --only: returns (partitions, raw images), both sorted.
 fn select<'a>(
     names: &'a [String],
     only: &Option<Vec<String>>,
@@ -414,16 +443,28 @@ fn select<'a>(
         } else if !is_safe_name(stem) {
             bail!("unsafe file name {name:?}");
         }
+        let stem = name
+            .strip_suffix(".img")
+            .or_else(|| name.strip_suffix(".ozip"))
+            .unwrap_or(name);
         if parts.contains(&stem) {
             bail!("{name} conflicts with the {stem} partition rebuilt from {stem}{LIST_SUFFIX}");
         }
     }
     if let Some(only) = only {
-        let stem = |n: &str| n.strip_suffix(".img").map(str::to_string);
+        let stem = |n: &str| {
+            n.strip_suffix(".img")
+                .or_else(|| n.strip_suffix(".ozip"))
+                .map(str::to_string)
+        };
         let available: Vec<&str> = parts
             .iter()
             .copied()
-            .chain(raw.iter().map(|n| n.strip_suffix(".img").unwrap_or(n)))
+            .chain(raw.iter().map(|n| {
+                n.strip_suffix(".img")
+                    .or_else(|| n.strip_suffix(".ozip"))
+                    .unwrap_or(n)
+            }))
             .collect();
         if let Some(bad) = only.iter().find(|o| !available.contains(&o.as_str())) {
             bail!("unknown name {bad:?}; available: {}", available.join(", "));
@@ -650,6 +691,34 @@ pub(crate) fn extract_all_tracked(
                 std::fs::rename(&tmp_path, &part_path)?;
                 paths.push(part_path);
             }
+        } else if name.ends_with(".ozip") {
+            // An Oppo/Realme .ozip is an AES-128-ECB encrypted zip. Decrypt it to a staging
+            // zip file, then unpack that zip into <stem>/.
+            let stem = name.strip_suffix(".ozip").unwrap_or(name);
+            let target = out_dir.join(stem);
+            let ok = (|| -> Result<()> {
+                let staged = out_dir.join(format!(".incoming-{}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&staged);
+                std::fs::create_dir_all(&staged)?;
+                let staged_zip = staged.join(format!("{stem}.zip"));
+                crate::ozip::decrypt(&mut src.open_file(name)?, &staged_zip)
+                    .with_context(|| format!("decrypting {}", name))?;
+                let mut zip = File::open(&staged_zip)
+                    .with_context(|| format!("opening decrypted {}", name))?;
+                let archive = crate::treeout::prepare_staging(&target)?;
+                extract_zip(&mut zip, &archive)?;
+                crate::treeout::publish(&archive, &target)?;
+                let _ = std::fs::remove_dir_all(&staged);
+                std::fs::remove_file(&staged_zip).ok();
+                Ok(())
+            })();
+            if let Err(e) = ok {
+                let _ = std::fs::remove_dir_all(&target);
+                let staged = out_dir.join(format!(".incoming-{}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&staged);
+                return Err(e);
+            }
+            paths.push(target);
         } else {
             paths.push(copy_raw(&mut src, name, out_dir)?);
         }
