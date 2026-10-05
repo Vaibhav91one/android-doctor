@@ -99,7 +99,7 @@ pub struct Service {
 #[derive(Debug, Clone, Default)]
 pub struct ImageAudit {
     pub name: String,
-    pub entries: usize,
+    pub entries: Vec<Entry>,
     pub props: Vec<PropHit>,
     pub setuid: Vec<Special>,
     pub capabilities: Vec<(String, String)>,
@@ -113,7 +113,7 @@ pub struct ImageAudit {
     pub apks: Vec<ApkAudit>,
 }
 
-fn label_of(e: &Entry) -> String {
+pub(crate) fn label_of(e: &Entry) -> String {
     e.xattrs
         .iter()
         .find(|(k, _)| k == "security.selinux")
@@ -230,7 +230,7 @@ fn analyse_with(
     let mut apk_bytes: u64 = 0;
     let mut a = ImageAudit {
         name: name.to_string(),
-        entries: entries.len(),
+        entries: entries.to_vec(),
         ..Default::default()
     };
     for e in entries {
@@ -657,7 +657,7 @@ pub fn to_json(audits: &[ImageAudit]) -> Value {
         "adb": adb_summary(audits),
         "images": audits.iter().map(|a| json!({
             "name": a.name,
-            "entries": a.entries,
+            "entries": a.entries.len(),
             "properties": a.props.iter().map(|p| json!({"file": p.file, "key": p.key, "value": p.value})).collect::<Vec<_>>(),
             "setuid_files": a.setuid.iter().map(special_json).collect::<Vec<_>>(),
             "file_capabilities": a.capabilities.iter().map(|(p, v)| json!({"path": p, "value": v})).collect::<Vec<_>>(),
@@ -699,7 +699,7 @@ pub fn to_text(audits: &[ImageAudit], no_color: bool) -> String {
     let mut o = vec![adb_summary(audits)];
     for a in audits {
         o.push(String::new());
-        o.push(format!("== {} ({} entries)", a.name, a.entries));
+        o.push(format!("== {} ({} entries)", a.name, a.entries.len()));
         for f in &a.findings {
             let label = r.severity(f.severity.to_term(), f.severity.name());
             o.push(format!("[{label}] {}: {}", f.rule, f.detail));

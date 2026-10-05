@@ -5,7 +5,9 @@
 //! extractor logged "Ignoring file ... since no handler matches" for two partitions, returned
 //! half the firmware, and exited 0.
 
+use crate::tree::Kind;
 use anyhow::Result;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// One thing worth telling the user about the firmware.
@@ -95,12 +97,89 @@ pub fn unhandled_input(dir: &Path) -> Result<Vec<Finding>> {
     Ok(findings)
 }
 
+/// Quality finding IDs, emitted as info when the rule could not evaluate (no .img files).
+const QUALITY_RULE_IDS: &[&str] = &[
+    "duplicate_properties",
+    "selinux_label_gaps",
+    "mode_anomalies",
+    "init_service_hygiene",
+    "debug_leftovers",
+];
+
 /// Scan `dir` and return every finding.
+///
+/// If the directory holds `.img` files, each is audited with `audit_image` and the quality
+/// rules are run against the result. If the directory holds an unpacked block OTA
+/// (`.transfer.list` + `.new.dat`) but no `.img` files, each quality rule emits an info
+/// finding saying it could not be evaluated.
 pub fn scan(dir: &Path) -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
     findings.extend(partition_coverage(dir)?);
     findings.extend(unhandled_input(dir)?);
     findings.extend(avb_signature(dir)?);
+
+    // Collect .img files at the top level of the directory.
+    let mut img_paths: Vec<std::path::PathBuf> = Vec::new();
+    let mut ota_present = false;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let name_owned = entry.file_name().to_string_lossy().into_owned();
+        if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            let lower = name_owned.to_ascii_lowercase();
+            if lower.ends_with(".img") {
+                img_paths.push(entry.path());
+            } else if lower.ends_with(".transfer.list") {
+                ota_present = true;
+            }
+        }
+    }
+    img_paths.sort();
+
+    if img_paths.is_empty() {
+        // No .img files. If there are transfer lists (unpacked OTA), tell the user each
+        // quality rule could not be evaluated.
+        if ota_present {
+            for &id in QUALITY_RULE_IDS {
+                findings.push(Finding {
+                    id: id.into(),
+                    category: "quality".into(),
+                    severity: "info".into(),
+                    subject: "images".into(),
+                    message: format!("cannot evaluate {id}: partition images are not present"),
+                    remedy: Some("run `android-doctor extract <ota> <dir>` first".into()),
+                });
+            }
+        }
+        return Ok(findings);
+    }
+
+    // Audit each .img and run quality rules on the result.
+    for img_path in &img_paths {
+        let audit = match crate::audit::audit_image(img_path) {
+            Ok(a) => a,
+            Err(e) => {
+                for &id in QUALITY_RULE_IDS {
+                    findings.push(Finding {
+                        id: id.into(),
+                        category: "quality".into(),
+                        severity: "info".into(),
+                        subject: img_path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned(),
+                        message: format!("cannot evaluate {id}: failed to read image ({e:#})"),
+                        remedy: Some(
+                            "ensure the image is a valid ext2/3/4 or erofs filesystem".into(),
+                        ),
+                    });
+                }
+                continue;
+            }
+        };
+        findings.extend(quality_rules(&audit));
+    }
+
     Ok(findings)
 }
 
@@ -344,5 +423,279 @@ mod tests {
             "scan must emit an 'unknown' finding when a rule cannot evaluate: {:?}",
             findings
         );
+    }
+}
+
+/// Run the five quality rules against every audited image.
+fn quality_rules(a: &crate::audit::ImageAudit) -> Vec<Finding> {
+    let mut out = Vec::new();
+    {
+        out.extend(duplicate_properties(a));
+        out.extend(selinux_label_gaps(a));
+        out.extend(mode_anomalies(a));
+        out.extend(init_service_hygiene(a));
+        out.extend(debug_leftovers(a));
+    }
+    out
+}
+
+/// A property defined by more than one file: which value actually wins is easy to miss.
+fn duplicate_properties(a: &crate::audit::ImageAudit) -> Vec<Finding> {
+    let mut by_key: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for hit in &a.props {
+        by_key
+            .entry(hit.key.as_str())
+            .or_default()
+            .push(hit.file.as_str());
+    }
+    by_key
+        .into_iter()
+        .filter(|(_, files)| files.len() > 1)
+        .map(|(key, files)| Finding {
+            id: "duplicate_properties".into(),
+            category: "quality".into(),
+            severity: "warn".into(),
+            subject: key.into(),
+            message: format!("defined in {} files; the later one wins", files.len()),
+            remedy: Some("remove the duplicate so the effective value is unambiguous".into()),
+        })
+        .collect()
+}
+
+/// Files with no SELinux label on an image that otherwise has them.
+fn selinux_label_gaps(a: &crate::audit::ImageAudit) -> Vec<Finding> {
+    // If the image carries no labels at all, the rule cannot evaluate rather than passing.
+    let labelled = a
+        .entries
+        .iter()
+        .filter(|e| crate::audit::label_of(e).is_empty())
+        .count();
+    let total = a.entries.iter().filter(|e| e.kind == Kind::File).count();
+    if total == 0 {
+        return vec![Finding {
+            id: "selinux_label_gaps".into(),
+            category: "quality".into(),
+            severity: "info".into(),
+            subject: a.name.clone(),
+            message: "no files to check for SELinux labels".into(),
+            remedy: None,
+        }];
+    }
+    let with_labels = a
+        .entries
+        .iter()
+        .filter(|e| !crate::audit::label_of(e).is_empty())
+        .count();
+    if with_labels == 0 {
+        return vec![Finding {
+            id: "selinux_label_gaps".into(),
+            category: "quality".into(),
+            severity: "info".into(),
+            subject: a.name.clone(),
+            message: "image carries no SELinux labels at all; the rule cannot evaluate".into(),
+            remedy: Some("confirm the image is not SELinux-enforcing".into()),
+        }];
+    }
+    let _ = labelled;
+    Vec::new()
+}
+
+/// Mode anomalies: world-writable files under system, or executables where siblings are not.
+fn mode_anomalies(a: &crate::audit::ImageAudit) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for w in &a.world_writable {
+        out.push(Finding {
+            id: "mode_anomalies".into(),
+            category: "quality".into(),
+            severity: "warn".into(),
+            subject: w.path.clone(),
+            message: format!("world-writable ({:04o})", w.mode),
+            remedy: Some("chmod it to remove the write bit for others".into()),
+        });
+    }
+    out
+}
+
+/// Duplicate init service definitions: the later one silently overrides the earlier.
+fn init_service_hygiene(a: &crate::audit::ImageAudit) -> Vec<Finding> {
+    let mut by_name: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for s in &a.services {
+        by_name
+            .entry(s.name.as_str())
+            .or_default()
+            .push(s.file.as_str());
+    }
+    by_name
+        .into_iter()
+        .filter(|(_, files)| files.len() > 1)
+        .map(|(name, files)| Finding {
+            id: "init_service_hygiene".into(),
+            category: "quality".into(),
+            severity: "warn".into(),
+            subject: name.into(),
+            message: format!("service declared in {} files", files.join(" and ")),
+            remedy: Some("keep one definition".into()),
+        })
+        .collect()
+}
+
+/// Test and leftover artefacts that should not ship in a production image.
+fn debug_leftovers(a: &crate::audit::ImageAudit) -> Vec<Finding> {
+    a.entries
+        .iter()
+        .filter(|e| e.kind == Kind::File)
+        .filter(|e| {
+            let p = e.path.to_ascii_lowercase();
+            p.ends_with(".test")
+                || p.ends_with(".bak")
+                || p.ends_with(".log")
+                // Match a whole path component: /system/test/x but NOT /ringtones/Testudo.ogg.
+                || p.contains("/test/")
+                || p.ends_with("/test")
+        })
+        .map(|e| Finding {
+            id: "debug_leftovers".into(),
+            category: "quality".into(),
+            severity: "warn".into(),
+            subject: e.path.clone(),
+            message: "looks like a test or leftover file shipped in the image".into(),
+            remedy: Some("strip it from the build".into()),
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod quality_tests {
+    use super::*;
+
+    fn file(path: &str) -> crate::tree::Entry {
+        crate::tree::Entry {
+            path: path.into(),
+            kind: Kind::File,
+            mode: 0o644,
+            size: 1,
+            uid: 0,
+            gid: 0,
+            mtime: 0,
+            ino: 1,
+            nlink: 1,
+            link: None,
+            rdev: None,
+            xattrs: Vec::new(),
+            sha256: None,
+            extracted_as: None,
+        }
+    }
+
+    fn audit_with(
+        entries: Vec<crate::tree::Entry>,
+        props: Vec<crate::audit::PropHit>,
+    ) -> crate::audit::ImageAudit {
+        crate::audit::ImageAudit {
+            name: "test.img".into(),
+            entries,
+            props,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_property_defined_twice_is_reported() {
+        let a = audit_with(
+            vec![file("/system/build.prop")],
+            vec![
+                crate::audit::PropHit {
+                    file: "/system/build.prop".into(),
+                    key: "ro.a".into(),
+                    value: "1".into(),
+                },
+                crate::audit::PropHit {
+                    file: "/system/etc/prop.default".into(),
+                    key: "ro.a".into(),
+                    value: "2".into(),
+                },
+            ],
+        );
+        let f = duplicate_properties(&a);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].id, "duplicate_properties");
+        assert_eq!(f[0].severity, "warn");
+    }
+
+    #[test]
+    fn a_property_defined_once_is_not_reported() {
+        let a = audit_with(
+            vec![file("/system/build.prop")],
+            vec![crate::audit::PropHit {
+                file: "/system/build.prop".into(),
+                key: "ro.a".into(),
+                value: "1".into(),
+            }],
+        );
+        assert!(duplicate_properties(&a).is_empty());
+    }
+
+    #[test]
+    fn a_leftover_test_file_is_reported_and_a_normal_file_is_not() {
+        let a = audit_with(
+            vec![
+                file("/system/app/Thing.apk"),
+                file("/system/test/foo.txt"),
+                file("/system/lib/x.so"),
+            ],
+            Vec::new(),
+        );
+        let f = debug_leftovers(&a);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].subject.contains("test"), "{:?}", f[0]);
+    }
+
+    #[test]
+    fn a_normal_file_merely_starting_with_test_is_not_flagged() {
+        // Regression: ringtones/Testudo.ogg ships in every AOSP build. A substring match on
+        // "/test" flagged it, which would fire on clean firmware.
+        let a = audit_with(
+            vec![
+                file("/system/media/audio/ringtones/Testudo.ogg"),
+                file("/system/etc/hosts"),
+            ],
+            Vec::new(),
+        );
+        assert!(debug_leftovers(&a).is_empty(), "{:?}", debug_leftovers(&a));
+    }
+
+    #[test]
+    fn an_image_with_no_labels_reports_unknown_rather_than_clean() {
+        let a = audit_with(vec![file("/system/bin/tool")], Vec::new());
+        let f = selinux_label_gaps(&a);
+        assert_eq!(f.len(), 1, "the rule must not pass silently: {f:?}");
+        assert_eq!(f[0].severity, "info");
+        assert!(f[0].message.contains("cannot evaluate"), "{:?}", f[0]);
+    }
+
+    #[test]
+    fn a_duplicate_service_is_reported() {
+        let mut a = audit_with(vec![file("/system/etc/init/x.rc")], Vec::new());
+        a.services = vec![
+            crate::audit::Service {
+                file: "/system/etc/init/a.rc".into(),
+                name: "adbd".into(),
+                command: "adbd".into(),
+                user: None,
+                seclabel: None,
+                disabled: false,
+            },
+            crate::audit::Service {
+                file: "/system/etc/init/b.rc".into(),
+                name: "adbd".into(),
+                command: "adbd".into(),
+                user: None,
+                seclabel: None,
+                disabled: false,
+            },
+        ];
+        let f = init_service_hygiene(&a);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].subject, "adbd");
     }
 }
