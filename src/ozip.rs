@@ -187,9 +187,11 @@ pub fn decrypt(input: &mut impl Read, out: &Path) -> Result<u64> {
     // The payload is a whole number of 16-byte blocks; the last plaintext block is truncated
     // to the declared size.
     let mut written: u64 = 0;
-    for unit in payload.chunks_exact(16) {
+    let mut at = 0usize;
+    while at + 16 <= payload.len() {
         let mut block: [u8; 16] = [0; 16];
-        block.copy_from_slice(unit);
+        block.copy_from_slice(&payload[at..at + 16]);
+        at += 16;
         decrypt_block(&cipher, &mut block);
         let remaining = header.size.saturating_sub(written) as usize;
         if remaining == 0 {
