@@ -101,6 +101,9 @@ const OP_ZERO: i32 = 6;
 const OP_DISCARD: i32 = 7;
 const OP_REPLACE_XZ: i32 = 8;
 const OP_ZSTD: i32 = 14;
+// Incremental operations that read from the base partition image supplied by --base.
+const OP_SOURCE_COPY: i32 = 4;
+const OP_SOURCE_BSDIFF: i32 = 5;
 
 fn op_name(t: i32) -> String {
     match t {
@@ -130,15 +133,18 @@ pub struct Located {
     pub path: PathBuf,
     pub base: u64,
     pub len: u64,
+    /// Directory holding the base partition images for an incremental update, if supplied.
+    pub base_dir: Option<PathBuf>,
 }
 
 /// Find a payload in `input`: a directory holding `payload.bin`, a zip with a stored
 /// `payload.bin`, or a file that starts with the payload magic. `None` means "not an A/B OTA".
-pub fn locate(input: &Path) -> Result<Option<Located>> {
+pub fn locate(input: &Path, base_dir: Option<&Path>) -> Result<Option<Located>> {
     if input.is_dir() {
         let path = input.join(PAYLOAD_NAME);
         return match std::fs::metadata(&path) {
             Ok(m) if m.is_file() => Ok(Some(Located {
+                base_dir: base_dir.map(Path::to_path_buf),
                 path,
                 base: 0,
                 len: m.len(),
@@ -151,6 +157,7 @@ pub fn locate(input: &Path) -> Result<Option<Located>> {
     let got = file.read(&mut magic)?;
     if got == 4 && &magic == MAGIC {
         return Ok(Some(Located {
+            base_dir: base_dir.map(Path::to_path_buf),
             path: input.to_path_buf(),
             base: 0,
             len: file.metadata()?.len(),
@@ -172,6 +179,7 @@ pub fn locate(input: &Path) -> Result<Option<Located>> {
             .data_start()
             .context("payload.bin has no data offset in the zip")?;
         return Ok(Some(Located {
+            base_dir: base_dir.map(Path::to_path_buf),
             path: input.to_path_buf(),
             base,
             len: entry.size(),
@@ -239,6 +247,11 @@ fn is_data_op(t: i32) -> bool {
     matches!(t, OP_REPLACE | OP_REPLACE_BZ | OP_REPLACE_XZ | OP_ZSTD)
 }
 
+/// Incremental operations that read from the base partition image (--base).
+fn is_source_op(t: i32) -> bool {
+    matches!(t, OP_SOURCE_COPY | OP_SOURCE_BSDIFF)
+}
+
 fn has_verity(p: &pb::PartitionUpdate) -> bool {
     [
         &p.hash_tree_data_extent,
@@ -303,9 +316,12 @@ fn plan_partition<'a>(
         let ctx = || format!("partition {name}, operation {i} ({})", op_name(op.r#type));
         let extents = byte_extents(op, bs).with_context(ctx)?;
         ranges.extend(extents.iter().copied());
-        if is_data_op(op.r#type) {
+        if is_data_op(op.r#type) || is_source_op(op.r#type) {
             let (off, len) = (op.data_offset.unwrap_or(0), op.data_length.unwrap_or(0));
-            ensure!(len > 0, "{}: no data", ctx());
+            // SOURCE_COPY has no blob data; SOURCE_BSDIFF has a bsdiff patch as its data.
+            if is_data_op(op.r#type) {
+                ensure!(len > 0, "{}: no data", ctx());
+            }
             ensure!(
                 len <= MAX_BLOB_BYTES,
                 "{}: {len} bytes of data is over the {MAX_BLOB_BYTES}-byte limit",
@@ -325,6 +341,14 @@ fn plan_partition<'a>(
                 "{}: data ends at {end} but the payload is {file_len} bytes",
                 ctx()
             );
+            // Source ops also need src_extents that reference the old partition.
+            if is_source_op(op.r#type) {
+                ensure!(
+                    !op.src_extents.is_empty(),
+                    "{}: source operation has no source extents",
+                    ctx()
+                );
+            }
             data_ops.push(DataOp {
                 op,
                 extents,
@@ -369,22 +393,39 @@ fn plan_partition<'a>(
     })
 }
 
-/// Reject incremental payloads (anything that needs the previous build) with one clear error.
-fn check_full(payload: &Payload, selected: &[&pb::PartitionUpdate]) -> Result<()> {
+/// Reject incremental payloads when no base image is supplied.
+///
+/// When `opts.base` is `Some`, SOURCE_COPY and SOURCE_BSDIFF are allowed (the caller has
+/// provided the previous partition image to read from). Operations like MOVE, BSDIFF, PUFFDIFF
+/// and anything else that is not a data op, source op, or zero/discard is still rejected.
+fn check_full(
+    payload: &Payload,
+    selected: &[&pb::PartitionUpdate],
+    opts: &ExtractOptions,
+) -> Result<()> {
+    // When a base directory is supplied, SOURCE_COPY and SOURCE_BSDIFF are supported.
+    let allowed_inc = opts.base.is_some();
     let mut needs_source: Vec<String> = Vec::new();
     for part in selected {
         let mut kinds: Vec<String> = part
             .operations
             .iter()
             .map(|o| o.r#type)
-            .filter(|t| !is_data_op(*t) && *t != OP_ZERO && *t != OP_DISCARD)
+            .filter(|t| !is_data_op(*t) && *t != OP_ZERO && *t != OP_DISCARD && !is_source_op(*t))
             .map(op_name)
             .collect();
+        if !allowed_inc {
+            for t in part.operations.iter().map(|o| o.r#type) {
+                if is_source_op(t) {
+                    kinds.push(op_name(t));
+                }
+            }
+        }
         kinds.sort();
         kinds.dedup();
         if !kinds.is_empty() {
             needs_source.push(format!("{} ({})", part.partition_name, kinds.join(", ")));
-        } else if part.old_partition_info.is_some() {
+        } else if !allowed_inc && part.old_partition_info.is_some() {
             needs_source.push(format!(
                 "{} (built against an older partition)",
                 part.partition_name
@@ -451,7 +492,8 @@ fn select<'a>(
 
 /// `Some(names)` when `input` is an A/B OTA, `None` otherwise (used by `report`).
 pub fn partition_names(input: &Path) -> Result<Option<Vec<String>>> {
-    let Some(loc) = locate(input)? else {
+    // Only the manifest is read here, so no base image is needed.
+    let Some(loc) = locate(input, None)? else {
         return Ok(None);
     };
     let payload = open_payload(&loc)?;
@@ -467,7 +509,7 @@ pub fn partition_names(input: &Path) -> Result<Option<Vec<String>>> {
 
 /// What `extract` would write, with sizes in bytes; `None` when `input` is not an A/B OTA.
 pub fn list(input: &Path, opts: &ExtractOptions) -> Result<Option<Vec<(String, u64)>>> {
-    let Some(loc) = locate(input)? else {
+    let Some(loc) = locate(input, opts.base.as_deref())? else {
         return Ok(None);
     };
     let payload = open_payload(&loc)?;
@@ -531,6 +573,60 @@ fn copy_exact<R: Read, W: Write>(mut r: R, w: &mut W, expected: u64) -> Result<(
     Ok(())
 }
 
+/// Read the source bytes referenced by `src_extents` from the base partition image at
+/// `base_dir/<partition>.img`.
+/// The total bytes read must match `expected` (the destination extent size).
+fn read_source(
+    op: &pb::InstallOperation,
+    src_path: &Path,
+    bs: u64,
+    expected: u64,
+) -> Result<Vec<u8>> {
+    let total: u64 = op
+        .src_extents
+        .iter()
+        .map(|e| e.num_blocks.unwrap_or(0) * bs)
+        .sum();
+    ensure!(
+        total == expected,
+        "source extents ({total} bytes) do not match destination extents ({expected} bytes)"
+    );
+    let mut src = File::open(src_path)
+        .with_context(|| format!("opening base image {}", src_path.display()))?;
+    let mut out = Vec::with_capacity(expected as usize);
+    for e in &op.src_extents {
+        let (s, n) = (e.start_block.unwrap_or(0), e.num_blocks.unwrap_or(0));
+        let off = s.checked_mul(bs).context("source start overflows")?;
+        let len = n.checked_mul(bs).context("source length overflows")?;
+        src.seek(SeekFrom::Start(off))?;
+        let mut buf = vec![0u8; len as usize];
+        src.read_exact(&mut buf).context("reading source data")?;
+        out.extend_from_slice(&buf);
+    }
+    Ok(out)
+}
+
+/// For SOURCE_COPY: read source bytes from the base image and write them to the destination.
+fn copy_source(
+    op: &pb::InstallOperation,
+    _blob: &[u8],
+    src_path: &Path,
+    bs: u64,
+    expected: &u64,
+    w: &mut ExtentWriter,
+) -> Result<()> {
+    let src = read_source(op, src_path, bs, *expected)?;
+    copy_exact(&src[..], w, *expected)
+}
+
+/// Where an operation's bytes live, and where its source range is read from.
+struct OpContext<'a> {
+    payload_base: u64,
+    /// Base image directory for an incremental update; empty when none was supplied.
+    src_base: &'a Path,
+    block_size: u64,
+}
+
 fn run_data_op(
     payload: &mut File,
     op: &pb::InstallOperation,
@@ -538,9 +634,14 @@ fn run_data_op(
     start: u64,
     len: u64,
     out_path: &Path,
-    base: u64,
+    ctx_src: &OpContext<'_>,
 ) -> Result<()> {
-    payload.seek(SeekFrom::Start(base + start))?;
+    let OpContext {
+        payload_base,
+        src_base,
+        block_size: bs,
+    } = *ctx_src;
+    payload.seek(SeekFrom::Start(payload_base + start))?;
     let mut blob = vec![0u8; len as usize];
     payload
         .read_exact(&mut blob)
@@ -577,6 +678,18 @@ fn run_data_op(
                 .map_err(|e| anyhow!("zstd: {e}"))?;
             copy_exact(dec, &mut w, expected)
         }
+        OP_SOURCE_COPY => {
+            // Source is the old partition image; copy bytes from src_extents to dst_extents.
+            copy_source(op, &blob, src_base, bs, &expected, &mut w)?;
+            Ok(())
+        }
+        OP_SOURCE_BSDIFF => {
+            // Blob is a BSDIFF4 patch; apply it to the source data read from src_extents.
+            let src = read_source(op, src_base, bs, expected)?;
+            let patched = crate::bsdiff::apply(&blob, &src)?;
+            copy_exact(&patched[..], &mut w, expected)?;
+            Ok(())
+        }
         other => bail!("unexpected operation type {}", op_name(other)),
     }
 }
@@ -611,13 +724,13 @@ pub fn extract(
     out_dir: &Path,
     opts: &ExtractOptions,
 ) -> Result<Option<Vec<(PathBuf, String)>>> {
-    let Some(loc) = locate(input)? else {
+    let Some(loc) = locate(input, opts.base.as_deref())? else {
         return Ok(None);
     };
     let payload = open_payload(&loc)?;
     let bs = block_size(&payload.manifest)?;
     let selected = select(&payload.manifest, &opts.only)?;
-    check_full(&payload, &selected)?;
+    check_full(&payload, &selected, opts)?;
     let plans = selected
         .iter()
         .map(|u| plan_partition(&payload, u, loc.len, bs))
@@ -654,6 +767,7 @@ pub fn extract(
 }
 
 fn run_operations(loc: &Located, plans: &[Plan], out_dir: &Path) -> Result<()> {
+    let base_dir: Option<&Path> = loc.base_dir.as_deref();
     // flat task list in payload order: (partition index, operation index within the plan)
     let mut tasks: Vec<(usize, usize, u64)> = Vec::new();
     for (pi, plan) in plans.iter().enumerate() {
@@ -707,8 +821,12 @@ fn run_operations(loc: &Located, plans: &[Plan], out_dir: &Path) -> Result<()> {
                     let d = &plan.data_ops[oi];
                     let (start, len) = (d.start, d.len);
                     let out_path = part_path(out_dir, plan.name);
-                    let ran =
-                        run_data_op(&mut file, d.op, &d.extents, start, len, &out_path, loc.base);
+                    let ctx = OpContext {
+                        payload_base: loc.base,
+                        src_base: base_dir.unwrap_or(Path::new("")),
+                        block_size: 4096,
+                    };
+                    let ran = run_data_op(&mut file, d.op, &d.extents, start, len, &out_path, &ctx);
                     match ran {
                         Ok(()) => bars[pi].inc(len),
                         Err(e) => {
@@ -1645,7 +1763,7 @@ mod tests {
     fn a_deflated_payload_in_a_zip_gets_a_clear_message() {
         let (payload, _) = build(&mixed());
         let (_g, z) = as_zip("t19", &payload, zip::CompressionMethod::Deflated);
-        let e = format!("{:#}", locate(&z).unwrap_err());
+        let e = format!("{:#}", locate(&z, None).unwrap_err());
         assert!(
             e.contains("compressed inside the zip") && e.contains("unzip"),
             "{e}"
@@ -1656,35 +1774,38 @@ mod tests {
     fn inputs_that_are_not_ab_otas_are_left_alone() {
         let d = scratch("t20");
         assert!(
-            locate(&d).unwrap().is_none(),
+            locate(&d, None).unwrap().is_none(),
             "directory without payload.bin"
         );
         std::fs::write(d.join("x.txt"), b"hello").unwrap();
-        assert!(locate(&d.join("x.txt")).unwrap().is_none());
+        assert!(locate(&d.join("x.txt"), None).unwrap().is_none());
         std::fs::write(d.join("tiny"), b"CrA").unwrap();
-        assert!(locate(&d.join("tiny")).unwrap().is_none());
+        assert!(locate(&d.join("tiny"), None).unwrap().is_none());
         std::fs::write(d.join("empty"), b"").unwrap();
-        assert!(locate(&d.join("empty")).unwrap().is_none());
+        assert!(locate(&d.join("empty"), None).unwrap().is_none());
         let z = d.join("plain.zip");
         let mut w = zip::ZipWriter::new(File::create(&z).unwrap());
         w.start_file("a.txt", zip::write::SimpleFileOptions::default())
             .unwrap();
         w.write_all(b"x").unwrap();
         w.finish().unwrap();
-        assert!(locate(&z).unwrap().is_none(), "a zip without payload.bin");
+        assert!(
+            locate(&z, None).unwrap().is_none(),
+            "a zip without payload.bin"
+        );
         std::fs::write(d.join("PKbad.zip"), b"PK\x03\x04garbage").unwrap();
         assert!(
-            locate(&d.join("PKbad.zip")).unwrap().is_none(),
+            locate(&d.join("PKbad.zip"), None).unwrap().is_none(),
             "a damaged zip is not a payload"
         );
-        assert!(locate(&d.join("missing")).is_err());
+        assert!(locate(&d.join("missing"), None).is_err());
     }
 
     #[test]
     fn locate_finds_the_payload_inside_a_stored_zip_entry() {
         let (payload, _) = build(&mixed());
         let (_g, z) = as_zip("t21", &payload, zip::CompressionMethod::Stored);
-        let loc = locate(&z).unwrap().unwrap();
+        let loc = locate(&z, None).unwrap().unwrap();
         assert_eq!(loc.len, payload.len() as u64);
         let raw = std::fs::read(&z).unwrap();
         assert_eq!(&raw[loc.base as usize..loc.base as usize + 4], b"CrAU");
