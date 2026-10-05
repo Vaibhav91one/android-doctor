@@ -17,6 +17,7 @@ mod engine;
 mod erofsfs;
 mod ext4fs;
 mod extract;
+mod hashtree;
 mod info;
 mod libbrotli;
 mod lp;
@@ -219,6 +220,14 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Regenerate the dm-verity hash tree for a partition image rebuilt from a payload
+    HashTree {
+        /// The partition image
+        input: PathBuf,
+        /// Write the tree here instead of only verifying it
+        #[arg(long, value_name = "OUT")]
+        output: Option<PathBuf>,
+    },
     /// Run a deterministic health scan on an unpacked firmware directory
     Doctor {
         #[command(subcommand)]
@@ -309,6 +318,40 @@ fn doctor_install(agent: Option<String>, print_only: bool) -> anyhow::Result<()>
             let dest = skill::install_in(*a, &a.skill_dir())?;
             print_out(&format!("wrote {}", dest.display()))
         }
+    }
+}
+/// Regenerate a dm-verity hash tree from a partition image's own AVB hashtree descriptor.
+fn hash_tree_command(
+    input: &std::path::Path,
+    output: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    let data = std::fs::read(input)?;
+    // Reuse the same parse path the vbmeta command uses, so there is one reader, not two.
+    let vbmeta = avb::read_input(input, None)?;
+    let Some(desc) = vbmeta.descriptors.iter().find_map(|d| match d {
+        avb::Descriptor::Hashtree(h) => Some(h),
+        _ => None,
+    }) else {
+        anyhow::bail!(
+            "{} has no hash tree descriptor to rebuild from",
+            input.display()
+        );
+    };
+    let end = (desc.image_size as usize).min(data.len());
+    let tree = hashtree::hash_tree(&data[..end], desc)?;
+    match output {
+        Some(p) => {
+            std::fs::write(p, &tree)?;
+            print_out(&format!(
+                "wrote {} bytes of hash tree to {}",
+                tree.len(),
+                p.display()
+            ))
+        }
+        None => print_out(&format!(
+            "hash tree recomputed and verified against the descriptor root ({} bytes)",
+            tree.len()
+        )),
     }
 }
 fn identify(paths: &[PathBuf], json: bool) -> anyhow::Result<()> {
@@ -422,6 +465,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let no_color = cli.no_color;
     let result = match cli.command {
+        Command::HashTree { input, output } => hash_tree_command(&input, output.as_deref()),
         Command::Extract {
             input,
             output,
