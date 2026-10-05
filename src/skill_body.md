@@ -1,0 +1,25 @@
+# android-doctor skill
+
+android-doctor unpacks and audits Android OTA and firmware images **without running them**. It sniffs file magic to identify each input, extracts partitions, reads the file systems inside them, and reports findings. All output can be machine-readable with `--json`.
+
+## Commands
+
+- `identify` — identify file format by magic bytes
+- `extract` — extract partitions from an OTA
+- `doctor` — run a health scan on an unpacked firmware directory
+- `audit` — security audit of filesystem images
+- `ls`/`cat` — browse files inside a filesystem image
+- `info` — show build metadata
+- `report` — staleness verdict
+
+## Findings
+
+Each finding has: id, category (security/quality), severity (error/warn/info/high/medium), subject, message, and remedy.
+
+## Severities
+
+- error: firmware is unusable
+- high: security finding (debuggable, su, root ADB)
+- medium: lower-severity security issue
+- warn: quality concern (world-writable, unsigned)
+- info: rule could not evaluate or all clear
