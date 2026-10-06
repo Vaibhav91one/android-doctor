@@ -98,15 +98,30 @@ fn split_md5(data: &[u8]) -> Result<(Vec<u8>, String)> {
     Ok((data[..split].to_vec(), parts[0].to_ascii_lowercase()))
 }
 
+/// An archive whose recorded hash does not match its contents: evidence of tampering or
+/// corruption, so callers must stop rather than carry on with a raw copy (#116).
+#[derive(Debug)]
+pub(crate) struct IntegrityError(pub String);
+
+impl std::fmt::Display for IntegrityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for IntegrityError {}
+
 fn verify_md5(data: &[u8], expected: &str) -> Result<()> {
     let computed: String = Md5::digest(data)
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    ensure!(
-        computed == expected.to_lowercase(),
-        "MD5 mismatch: the file says {expected}, the contents hash to {computed}"
-    );
+    if computed != expected.to_lowercase() {
+        return Err(IntegrityError(format!(
+            "MD5 mismatch: the file says {expected}, the contents hash to {computed}"
+        ))
+        .into());
+    }
     Ok(())
 }
 

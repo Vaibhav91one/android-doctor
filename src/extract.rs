@@ -615,7 +615,7 @@ pub(crate) fn extract_all_tracked(
             },
         })
         .collect();
-    let (ignored, unhandled): (Vec<Skipped>, Vec<Skipped>) = skipped
+    let (ignored, mut unhandled): (Vec<Skipped>, Vec<Skipped>) = skipped
         .into_iter()
         .partition(|s| s.reason == "known OTA file");
     // Names that differ only by case would overwrite each other on case-insensitive filesystems.
@@ -691,94 +691,123 @@ pub(crate) fn extract_all_tracked(
             v.truncate(n);
             v
         };
-        if is_tar_family(&mut src, name, &head) {
-            // A JioSTB-style update keeps its partition images in a tar (optionally
-            // .tar.md5 or wrapped in gzip/xz); unpack it instead of copying the blob.
-            // Stage under the original name: the .md5 suffix is how the archive knows it
-            // must verify the trailing hash, so renaming it would skip that check.
-            let incoming = out_dir.join(format!(".incoming-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&incoming);
-            std::fs::create_dir_all(&incoming)?;
-            let staged = incoming.join(name);
-            copy_raw(&mut src, name, out_dir)?;
-            let _ = std::fs::rename(out_dir.join(name), &staged);
-            let target = out_dir.join(archive_stem(name));
-            // Route through the extraction engine (#26): it sniffs, dispatches to the
-            // registered handler, and re-queues whatever that handler produced so nested
-            // containers resolve without any handler knowing about the others.
-            let unpacked = crate::engine::unpack_into(
-                &crate::engine::handlers(),
-                &staged,
-                &target,
-                &crate::engine::Limits::default(),
-            );
-            let _ = std::fs::remove_dir_all(&incoming);
-            unpacked?;
-            paths.push(target);
-        } else if head.starts_with(&[0x3A, 0xFF, 0x26, 0xED]) {
-            // A sparse partition image (system/vendor/product/... as flashed) expands to the
-            // real filesystem image, under the same name, before anything reads it.
-            let final_path = out_dir.join(name);
-            let tmp_path = out_dir.join(format!("{name}.part"));
-            let expanded = (|| -> Result<()> {
-                let reader = src.open_file(name)?;
-                let mut out = create_part(&tmp_path)?;
-                crate::sparse::unsparse(vec![reader], &mut out)?;
-                Ok(())
-            })();
-            if let Err(e) = expanded {
-                let _ = std::fs::remove_file(&tmp_path);
-                return Err(e.context(format!("unsparsing {name}")));
+        // One image that will not unpack must not cost the images after it (#116, #118): keep
+        // its bytes by copying it raw, report it as unhandled, and go on. The run still fails
+        // on it unless --allow-partial, so nothing is skipped silently.
+        let mut produced: Vec<PathBuf> = Vec::new();
+        let unpacked = (|| -> Result<()> {
+            if is_tar_family(&mut src, name, &head) {
+                // A JioSTB-style update keeps its partition images in a tar (optionally
+                // .tar.md5 or wrapped in gzip/xz); unpack it instead of copying the blob.
+                // Stage under the original name: the .md5 suffix is how the archive knows it
+                // must verify the trailing hash, so renaming it would skip that check.
+                let incoming = out_dir.join(format!(".incoming-{}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&incoming);
+                std::fs::create_dir_all(&incoming)?;
+                let staged = incoming.join(name);
+                copy_raw(&mut src, name, out_dir)?;
+                let _ = std::fs::rename(out_dir.join(name), &staged);
+                let target = out_dir.join(archive_stem(name));
+                // Route through the extraction engine (#26): it sniffs, dispatches to the
+                // registered handler, and re-queues whatever that handler produced so nested
+                // containers resolve without any handler knowing about the others.
+                let unpacked = crate::engine::unpack_into(
+                    &crate::engine::handlers(),
+                    &staged,
+                    &target,
+                    &crate::engine::Limits::default(),
+                );
+                let _ = std::fs::remove_dir_all(&incoming);
+                unpacked?;
+                produced.push(target);
+            } else if head.starts_with(&[0x3A, 0xFF, 0x26, 0xED]) {
+                // A sparse partition image (system/vendor/product/... as flashed) expands to the
+                // real filesystem image, under the same name, before anything reads it.
+                let final_path = out_dir.join(name);
+                let tmp_path = out_dir.join(format!("{name}.part"));
+                let expanded = (|| -> Result<()> {
+                    let reader = src.open_file(name)?;
+                    let mut out = create_part(&tmp_path)?;
+                    crate::sparse::unsparse(vec![reader], &mut out)?;
+                    Ok(())
+                })();
+                if let Err(e) = expanded {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    return Err(e.context(format!("unsparsing {name}")));
+                }
+                std::fs::rename(&tmp_path, &final_path)?;
+                produced.push(final_path);
+            } else if head.len() >= 4100 && head[4096..4100] == *b"gDla" {
+                // super.img holds dynamic partitions: split it into <partition>.img files.
+                let bytes = {
+                    let mut r = src.open_file(name)?;
+                    let mut v = Vec::new();
+                    r.read_to_end(&mut v)?;
+                    v
+                };
+                let parsed = crate::lp::parse_metadata(&bytes)?;
+                let only = opts.only.as_deref();
+                for (part, body) in crate::lp::split_partitions(&bytes, &parsed, only)? {
+                    let part_path = out_dir.join(format!("{part}.img"));
+                    let tmp_path = out_dir.join(format!("{part}.img.part"));
+                    std::fs::write(&tmp_path, &body)?;
+                    std::fs::rename(&tmp_path, &part_path)?;
+                    produced.push(part_path);
+                }
+            } else if name.ends_with(".ozip") {
+                // An Oppo/Realme .ozip is an AES-128-ECB encrypted zip. Decrypt it to a staging
+                // zip file, then unpack that zip into <stem>/.
+                let stem = name.strip_suffix(".ozip").unwrap_or(name);
+                let target = out_dir.join(stem);
+                let ok = (|| -> Result<()> {
+                    let staged = out_dir.join(format!(".incoming-{}", std::process::id()));
+                    let _ = std::fs::remove_dir_all(&staged);
+                    std::fs::create_dir_all(&staged)?;
+                    let staged_zip = staged.join(format!("{stem}.zip"));
+                    crate::ozip::decrypt(&mut src.open_file(name)?, &staged_zip)
+                        .with_context(|| format!("decrypting {}", name))?;
+                    let mut zip = File::open(&staged_zip)
+                        .with_context(|| format!("opening decrypted {}", name))?;
+                    let archive = crate::treeout::prepare_staging(&target)?;
+                    extract_zip(&mut zip, &archive)?;
+                    crate::treeout::publish(&archive, &target)?;
+                    let _ = std::fs::remove_dir_all(&staged);
+                    std::fs::remove_file(&staged_zip).ok();
+                    Ok(())
+                })();
+                if let Err(e) = ok {
+                    let _ = std::fs::remove_dir_all(&target);
+                    let staged = out_dir.join(format!(".incoming-{}", std::process::id()));
+                    let _ = std::fs::remove_dir_all(&staged);
+                    return Err(e);
+                }
+                produced.push(target);
+            } else {
+                produced.push(copy_raw(&mut src, name, out_dir)?);
             }
-            std::fs::rename(&tmp_path, &final_path)?;
-            paths.push(final_path);
-        } else if head.len() >= 4100 && head[4096..4100] == *b"gDla" {
-            // super.img holds dynamic partitions: split it into <partition>.img files.
-            let bytes = {
-                let mut r = src.open_file(name)?;
-                let mut v = Vec::new();
-                r.read_to_end(&mut v)?;
-                v
-            };
-            let parsed = crate::lp::parse_metadata(&bytes)?;
-            let only = opts.only.as_deref();
-            for (part, body) in crate::lp::split_partitions(&bytes, &parsed, only)? {
-                let part_path = out_dir.join(format!("{part}.img"));
-                let tmp_path = out_dir.join(format!("{part}.img.part"));
-                std::fs::write(&tmp_path, &body)?;
-                std::fs::rename(&tmp_path, &part_path)?;
-                paths.push(part_path);
-            }
-        } else if name.ends_with(".ozip") {
-            // An Oppo/Realme .ozip is an AES-128-ECB encrypted zip. Decrypt it to a staging
-            // zip file, then unpack that zip into <stem>/.
-            let stem = name.strip_suffix(".ozip").unwrap_or(name);
-            let target = out_dir.join(stem);
-            let ok = (|| -> Result<()> {
-                let staged = out_dir.join(format!(".incoming-{}", std::process::id()));
-                let _ = std::fs::remove_dir_all(&staged);
-                std::fs::create_dir_all(&staged)?;
-                let staged_zip = staged.join(format!("{stem}.zip"));
-                crate::ozip::decrypt(&mut src.open_file(name)?, &staged_zip)
-                    .with_context(|| format!("decrypting {}", name))?;
-                let mut zip = File::open(&staged_zip)
-                    .with_context(|| format!("opening decrypted {}", name))?;
-                let archive = crate::treeout::prepare_staging(&target)?;
-                extract_zip(&mut zip, &archive)?;
-                crate::treeout::publish(&archive, &target)?;
-                let _ = std::fs::remove_dir_all(&staged);
-                std::fs::remove_file(&staged_zip).ok();
-                Ok(())
-            })();
-            if let Err(e) = ok {
-                let _ = std::fs::remove_dir_all(&target);
-                let staged = out_dir.join(format!(".incoming-{}", std::process::id()));
-                let _ = std::fs::remove_dir_all(&staged);
+            Ok(())
+        })();
+        match unpacked {
+            Ok(()) => paths.extend(produced),
+            // A failed integrity check is tampering or corruption, not an unknown format: stop.
+            Err(e) if e.chain().any(|c| c.is::<crate::archive::IntegrityError>()) => {
+                for p in &produced {
+                    let _ = std::fs::remove_file(p);
+                }
                 return Err(e);
             }
-            paths.push(target);
-        } else {
-            paths.push(copy_raw(&mut src, name, out_dir)?);
+            Err(e) => {
+                for p in &produced {
+                    let _ = std::fs::remove_file(p);
+                }
+                let copied = copy_raw(&mut src, name, out_dir)
+                    .with_context(|| format!("copying {name} raw after it failed to unpack"))?;
+                paths.push(copied);
+                unhandled.push(Skipped {
+                    name: name.to_string(),
+                    reason: format!("could not be unpacked, copied raw: {e:#}"),
+                });
+            }
         }
     }
     if opts.strict && !unhandled.is_empty() {
@@ -866,17 +895,19 @@ pub fn run(input: &Path, out_dir: &Path, opts: &ExtractOptions) -> Result<()> {
     };
     say(&format!("wrote {} partition(s){ignored_note}", done.len()));
     if !result.unhandled.is_empty() {
-        let names: Vec<String> = result.unhandled.iter().map(|s| s.name.clone()).collect();
-        say(&format!(
-            "unhandled {} input(s): {}",
-            result.unhandled.len(),
-            names.join(", ")
-        ));
+        for s in &result.unhandled {
+            say(&format!("unhandled: {s}"));
+        }
         if !opts.allow_partial {
             return Err(anyhow!(
-                "{} input(s) had no handler ({}); pass --allow-partial to accept this",
+                "{} input(s) were not fully extracted ({}); pass --allow-partial to accept this",
                 result.unhandled.len(),
-                names.join(", ")
+                result
+                    .unhandled
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
     }
@@ -1060,6 +1091,15 @@ mod tests {
             !out.join("SUPER").exists(),
             "nothing is unpacked when the hash does not match"
         );
+        // A failed integrity check is not an unparsable image: --allow-partial must not turn it
+        // into a skip (#116).
+        let _ = std::fs::remove_dir_all(&out);
+        let opts = ExtractOptions {
+            allow_partial: true,
+            ..ExtractOptions::default()
+        };
+        let e = format!("{:#}", run(&s, &out, &opts).unwrap_err());
+        assert!(e.contains("MD5 mismatch"), "{e}");
     }
 
     /// An OTA directory holding a JioSTB-style `SUPER.tar.md5` unpacks into its partition
@@ -1581,6 +1621,59 @@ mod tests {
                 vec![0x11u8; 512]
             );
         }
+    }
+
+    /// Issue #116 / #118: one image that fails to unpack must not stop the images after it. A
+    /// super image with a broken geometry checksum is copied raw, reported as unhandled, and
+    /// the image sorted after it is still written. Without --allow-partial the run fails (never
+    /// silently); with it, the run succeeds.
+    #[test]
+    fn an_image_that_fails_to_unpack_is_copied_raw_and_the_run_continues() {
+        let mut bad_super = crate::lp::tests::lp_image(&[("system_a", &[1u8; 512])]);
+        bad_super[4096 + 40] ^= 1; // breaks the geometry checksum
+        let (ota, out) = (fresh_dir("badsuper-in"), fresh_dir("badsuper-out"));
+        let mut files = sample_files();
+        files.push(("super.img", bad_super.clone()));
+        files.push(("vbmeta.img", vec![0x22; 64]));
+        write_dir(&ota, &files);
+
+        let r = extract_all_tracked(&ota, &out, &ExtractOptions::default()).unwrap();
+        assert_eq!(
+            std::fs::read(out.join("super.img")).unwrap(),
+            bad_super,
+            "kept raw"
+        );
+        assert_eq!(
+            std::fs::read(out.join("vbmeta.img")).unwrap(),
+            vec![0x22; 64]
+        );
+        assert!(
+            !out.join("system_a.img").exists(),
+            "no half-split output left behind"
+        );
+        assert_eq!(r.unhandled.len(), 1);
+        assert_eq!(r.unhandled[0].name, "super.img");
+        assert!(
+            r.unhandled[0].reason.contains("checksum"),
+            "{}",
+            r.unhandled[0].reason
+        );
+
+        let _ = std::fs::remove_dir_all(&out);
+        let err = run(&ota, &out, &ExtractOptions::default()).unwrap_err();
+        assert!(format!("{err:#}").contains("--allow-partial"), "{err:#}");
+        assert!(
+            out.join("vbmeta.img").exists(),
+            "written even though the run fails"
+        );
+
+        let _ = std::fs::remove_dir_all(&out);
+        let opts = ExtractOptions {
+            allow_partial: true,
+            ..ExtractOptions::default()
+        };
+        run(&ota, &out, &opts).unwrap();
+        assert!(out.join("super.img").exists() && out.join("vbmeta.img").exists());
     }
 
     #[test]
