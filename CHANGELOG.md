@@ -11,7 +11,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
-- A manifest chunk with a size smaller than its header no longer loops forever in the APK parser.
+- A manifest chunk with a size smaller than its header no longer loops forever in the APK parser, and a string pool that claims more strings than fit no longer tries to allocate gigabytes.
 
 ## [0.2.1] - 2026-10-06
 

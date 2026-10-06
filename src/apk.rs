@@ -163,6 +163,11 @@ fn parse_string_pool(data: &[u8]) -> Result<(Vec<String>, usize)> {
         strings_start <= chunk_size,
         "string pool: strings start past chunk"
     );
+    // A hostile header can claim billions of strings; the offset table must fit in the data.
+    ensure!(
+        header_size.saturating_add(str_count.saturating_mul(4)) <= data.len(),
+        "string pool: {str_count} strings do not fit"
+    );
     let mut offsets = Vec::with_capacity(str_count);
     for i in 0..str_count {
         let off = header_size + 4 * i;
