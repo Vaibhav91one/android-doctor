@@ -42,6 +42,7 @@ Install the skill for an agent with `android-doctor doctor install --agent <clau
     src/skill.rs       agent skill installer; src/skill_body.md is the skill text
     src/oem.rs         OEM firmware containers (shared sniff/list/extract); huawei.rs, lgkdz.rs, sonysin.rs readers
     src/doctor.rs      health-scan rules
+    src/elf.rs         ELF hardening triage (PIE, NX, RELRO, canary, FORTIFY) used by `audit`
     src/findings.rs    shared finding model: severity scale, fingerprint, score, baseline, SARIF, digest
     src/reporting.rs   the flags and exit status shared by `audit` and `doctor scan`
     tests/e2e.rs       CLI subprocess tests; tests/hostile_sweep.rs corrupted-input sweep
