@@ -19,6 +19,7 @@ mod engine;
 mod erofsfs;
 mod ext4fs;
 mod extract;
+mod f2fsfs;
 mod findings;
 mod fix;
 mod hashtree;
@@ -71,7 +72,7 @@ enum Command {
         /// List what would be extracted, with sizes, and write nothing
         #[arg(long)]
         list: bool,
-        /// Also extract the files of every ext2/3/4 image into <out>/files/<image>/ (with manifests)
+        /// Also extract the files of every ext2/3/4, erofs or f2fs image into <out>/files/<image>/ (with manifests)
         #[arg(long)]
         files: bool,
         /// Base partition images for an incremental OTA, applied over these to rebuild
@@ -142,7 +143,7 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// List a directory (or show one file) inside an ext2/3/4 image, without extracting it
+    /// List a directory (or show one file) inside an ext2/3/4, erofs or f2fs image, without extracting it
     Ls {
         image: PathBuf,
         /// Path inside the image (default: the root)
@@ -152,11 +153,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Print one regular file from an ext2/3/4 image to standard output
+    /// Print one regular file from an ext2/3/4, erofs or f2fs image to standard output
     Cat { image: PathBuf, path: String },
     /// Security posture of firmware images: ADB properties, setuid files, su binaries, init services
     Audit {
-        /// Image files (ext2/3/4 or erofs), or a directory of them (such as an `extract` output)
+        /// Image files (ext2/3/4, erofs or f2fs), or a directory of them (such as an `extract` output)
         #[arg(required = true)]
         images: Vec<PathBuf>,
         /// Print JSON instead of text
@@ -191,7 +192,7 @@ enum Command {
         #[arg(long)]
         list: bool,
     },
-    /// List or extract the files of an ext2/3/4 image (with SELinux labels), no root needed
+    /// List or extract the files of an ext2/3/4, erofs or f2fs image (with SELinux labels), no root needed
     Files {
         image: PathBuf,
         /// Extract into this new directory (files/ plus manifest.json); without it, list only

@@ -17,7 +17,7 @@
 Extracts and audits Android OTA and firmware images, without running them.
 
 Firmware is a pile of containers inside containers: an OTA zip holds a
-`payload.bin`, which holds partitions, which hold ext4 or erofs trees, which
+`payload.bin`, which holds partitions, which hold ext4, erofs or f2fs trees, which
 hold init scripts and properties. `android-doctor` opens every layer, with no
 root, no mount and no device, and answers one question: **is this build
 shipping a debuggable, rooted or unsigned configuration?** Output is plain
@@ -93,7 +93,7 @@ partition images. See [What `extract` does](#what-extract-does).
 
 ### 3. Audit an image
 
-`audit` reads the file system inside the image (ext2/3/4 or erofs) and reports
+`audit` reads the file system inside the image (ext2/3/4, erofs or f2fs) and reports
 ADB properties, setuid files, `su` binaries and init services. This image was
 built from a tree with a debuggable `build.prop` and a setuid `su`:
 
@@ -512,7 +512,7 @@ Every subcommand takes `--help`. `--no-color` (or `NO_COLOR`) disables colour.
 | `ramdisk <boot.img\|ramdisk> [-o dir] [--json] [--list]` | Ramdisk contents and ADB properties |
 | `audit <image\|dir>... [--json] [--sarif FILE] [--baseline FILE] [--score]` | ADB properties, setuid files, `su` binaries, init services, findings |
 | `vbmeta <vbmeta.img> [--images dir] [--json] [--key key.pem]` | AVB header, key, signature, descriptors, partition hashes |
-| `ls <image> [path]` / `cat <image> <path>` | Browse and read files inside an ext2/3/4 or erofs image |
+| `ls <image> [path]` / `cat <image> <path>` | Browse and read files inside an ext2/3/4, erofs or f2fs image |
 | `files <image> [-o dir] [--json]` | List or extract an image's files with SELinux labels |
 | `unsparse <file>... -o out.img` | Android sparse images to a raw image |
 | `identify <path>... [--json]` | What is this file, by magic bytes |
@@ -562,6 +562,7 @@ Status: **verified** = checked against an independent reference tool on real fir
 | Raw images inside an OTA (boot, recovery, ...) | verified | Byte-identical to the zip entries |
 | Filesystem detection: ext2/3/4 | verified | Four real images, cross-checked with an independent superblock parse |
 | Filesystem detection: erofs | verified | Real `mkfs.erofs` images (plain and lz4hc) |
+| Filesystem detection: f2fs | verified | Real `mkfs.f2fs` images: magic `0xF2F52010` at byte 1024 (the superblock's first field); the earlier `0xF2F52011` at `0x170` never matched a real image |
 | Android sparse images (`unsparse`), single and split files | verified | Real partitions converted by `img2simg` (block sizes 1024 to 65536) and split by `simg2simg`: sha256 equal to the original and to `simg2img` |
 | File identification (`identify`) | verified | 27 real files, from OTA zips to boot images to xz/zstd/lz4 output |
 | `super.img` (dynamic partitions): detect (`identify`), parse LP metadata and split into partition images (`extract`) | verified | Synthetic super image with geometry/header/table checksums and a linear extent: geometry magic detected, checksums validated, and extents split byte-for-byte; `extract` writes one `<partition>.img` per linear/zero extent |
@@ -582,7 +583,7 @@ Status: **verified** = checked against an independent reference tool on real fir
 | Spreadtrum/MediaTek `.pac` containers | synthetic | Parser and extractor (adapted from SR Labs PacHandler, Apache-2.0); tested with generated fixtures, not yet verified on real firmware |
 | Incremental OTAs (`*.patch.dat`, delta payloads) | no | Fails with a clear error |
 | dm-verity hash tree and FEC regeneration for A/B partitions | planned | Needed to check the whole-image hash of partitions that declare those extents |
-| f2fs | detected | Detected by magic, but not readable: the Linux kernel f2fs driver is GPL-licensed and no permissive Rust reader exists; commands that read a filesystem (`files`, `ls`, `cat`, `audit`, `extract --files`) fail with "f2fs is not supported" |
+| Files out of f2fs images (same `files`, `ls`, `cat`, `audit`, `extract --files`) | verified | Clean-room reader written from the public on-disk format (no GPL kernel code is read or copied), checked against volumes formatted by `mkfs.f2fs` 1.16 and populated by `sload.f2fs` in three layouts (defaults, Android's `-g android`, and extra-attr + inode and superblock checksums + quota + verity + crtime): every regular file equals the source tree byte for byte (inline data, direct, single-indirect block maps, a 300-entry directory over several dentry blocks), hard links, symlinks (short and long), modes (including setuid), mtimes and SELinux labels match, and `audit` gives the same 11 findings as on the ext4 and erofs corpus; the same volume built twice is byte-identical. Reads the newest valid checkpoint (CRC checked, normal and compact summaries, NAT journal), the NAT, inline data and inline directories, direct / indirect / double-indirect addressing, and inline plus node-block xattrs (`security.selinux`, `security.capability`). Bounded like the other readers (depth, entries, directory and symlink size, file size, pieces per file); one-off sweeps of 8,000 random byte changes over each of two real images, and a committed sweep over the metadata of a hand-built volume, produced no panic or hang, and `tests/f2fs.rs` damages and truncates real images through the binary. Refused with a clear error, never guessed: compressed files, encrypted files and directories (an `encrypt` feature bit alone is not a reason), zoned, multi-device and device-alias volumes, large NAT bitmaps (`mkfs.f2fs -i`), unknown feature bits, a checkpoint whose CRC fails, and any node whose footer does not name the node asked for. Not verified: images written by a Linux kernel mount (inline directories and the flexible inline-xattr layout are covered by hand-built volumes, not by a real kernel-made image), inode checksums (not checked) |
 | `.ofp` and other key-protected containers | no | |
 
 Roadmap and issue list: see the milestones on GitHub.
@@ -595,8 +596,8 @@ Roadmap and issue list: see the milestones on GitHub.
   and label gaps.
 - The whole-image hash of a partition with dm-verity/FEC extents is reported as
   "not checked"; the device adds those bytes at install time.
-- f2fs is detected but not readable. Key-protected containers (`.ofp`, encrypted
-  Amlogic sections) are not decrypted.
+- Compressed or encrypted f2fs files are refused, not read. Key-protected
+  containers (`.ofp`, encrypted Amlogic sections) are not decrypted.
 - Unsupported or unreadable input is reported as such, never as clean.
 
 ## Exit codes

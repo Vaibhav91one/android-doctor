@@ -256,7 +256,11 @@ impl Fs {
 
 /// Write `bytes` at `at`, unless they are all zero: that stretch is left as a hole in the output
 /// file (the caller sets the final length). Returns whether anything was written.
-fn write_unless_zero<W: Write + Seek>(out: &mut W, at: u64, bytes: &[u8]) -> Result<bool> {
+pub(crate) fn write_unless_zero<W: Write + Seek>(
+    out: &mut W,
+    at: u64,
+    bytes: &[u8],
+) -> Result<bool> {
     if bytes.iter().all(|b| *b == 0) {
         return Ok(false);
     }

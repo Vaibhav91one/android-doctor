@@ -92,3 +92,23 @@ tests ran (the plain `check` job skips them).
 ```sh
 cargo test --test corpus -- --nocapture
 ```
+
+## f2fs
+
+f2fs has its own gate, `tests/f2fs.rs` (issue #128), because its images cannot be made with
+`mke2fs -d` or `mkfs.erofs`: `mkfs.f2fs` formats a volume and `sload.f2fs` (both from
+`f2fs-tools`) fills it from a directory. The test builds the same tree in three layouts (defaults,
+`-g android`, and a feature-rich one), reads each back through the binary with `ls`, `cat`, `files`
+and `audit`, and compares file bytes, links, modes and SELinux labels with the source tree. The
+audit findings equal the ones the debug-props and perms corpus cases give on ext4 and erofs. A
+fixed uuid, `-r` and `-T` make the image reproducible, and a test builds one twice to check.
+
+Tools are looked up from `F2FS_MKFS` / `F2FS_SLOAD`, then `PATH` (Android's `make_f2fs` formats but
+cannot populate), then a throwaway Ubuntu container through Apple's `container` CLI. Without any
+the tests print `F2FS TESTS SKIPPED` and pass, unless `F2FS_REQUIRED=1` is set, where a missing
+tool fails. The `f2fs` job in `.github/workflows/ci.yml` sets it, installs `f2fs-tools` and checks
+the log to confirm all seven tests ran.
+
+```sh
+cargo test --test f2fs -- --nocapture
+```
