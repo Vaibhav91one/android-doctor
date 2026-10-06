@@ -413,6 +413,26 @@ pub fn help(rule: &str) -> Option<Help> {
             "Inspect the file",
             Info,
         ),
+        "apk-v1-only-signing" => (
+            "An APK is signed with signature scheme v1 only",
+            "Re-sign with APK Signature Scheme v2 or v3",
+            Medium,
+        ),
+        "apk-debug-signing-cert" => (
+            "An APK is signed with a debug or AOSP test key",
+            "Re-sign with a private release key",
+            High,
+        ),
+        "apk-cert-expired" => (
+            "An APK signing certificate has expired (host clock)",
+            "Re-sign with a certificate that is valid, or confirm the platform ignores expiry",
+            Medium,
+        ),
+        "apk-cert-not-yet-valid" => (
+            "An APK signing certificate is not yet valid (host clock)",
+            "Check the certificate dates and the host clock",
+            Medium,
+        ),
         "partition_coverage" => (
             "An expected partition image is missing",
             "Make sure system, vendor and boot images are all present",
@@ -887,6 +907,10 @@ const KNOWN_RULES: &[&str] = &[
     "hardcoded_credentials",
     "cloud_credentials",
     "debug_endpoints",
+    "apk-v1-only-signing",
+    "apk-debug-signing-cert",
+    "apk-cert-expired",
+    "apk-cert-not-yet-valid",
     "partition_coverage",
     "unhandled_input",
     "avb_signature",
