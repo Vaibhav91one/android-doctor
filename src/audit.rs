@@ -613,7 +613,9 @@ fn findings(a: &ImageAudit) -> Vec<(Finding, (String, String))> {
                 rule,
             );
         }
-    }    f.extend(crate::elf::findings(&a.elf));    f.sort_by_key(|x| x.0.severity);
+    }
+    f.extend(crate::elf::findings(&a.elf));
+    f.sort_by_key(|x| x.0.severity);
     f
 }
 
