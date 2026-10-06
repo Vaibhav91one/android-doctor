@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `extract` unwraps Nokia `.nb0` containers into partition images (#134). Detected by extension, header strictly bounds-checked. Validated against spec-built synthetic fixtures only, not real firmware. Coolpad `.cpb` stays refused (undocumented, usually encrypted), now with a clearer message (#133 still open).
 - An official container image, published per release to `ghcr.io/vaibhav91one/android-doctor:v<version>` (distroless, unprivileged; no mutable `:latest`). CI builds the image on every run to validate the Dockerfile (#151).
 - `audit` checks each APK's binary `AndroidManifest.xml` for insecure posture (#143): `apk-exported-provider` (high), `apk-exported-component` (medium), `apk-debuggable` (high), `apk-cleartext-traffic` (medium), `apk-shared-user-id` (medium), `apk-test-only` (medium) and `apk-allow-backup` (info), each with a remedy. Typed attribute values are read (not strings), matched by `android:` resource id; `exported` defaults follow targetSdk and are reported one level lower. `audit --json` APK entries gain `manifest` and `issues`. Validated on hand-encoded synthetic manifests only.
 

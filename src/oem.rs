@@ -1,6 +1,6 @@
 //! OEM full-firmware wrappers that unwrap into partition images: Huawei `UPDATE.APP`, LG
-//! `.kdz`/`.dz`, Sony `.sin`, plus two containers that are only named (Coolpad `.cpb`, Nokia
-//! `.nb0`). Each reader is written from the public on-disk layout, documented at the top of its
+//! `.kdz`/`.dz`, Sony `.sin`, Nokia `.nb0`, plus one container that is only named (Coolpad
+//! `.cpb`). Each reader is written from the public on-disk layout, documented at the top of its
 //! module; none of it is derived from the GPL reference tools.
 //!
 //! This module is the shared plumbing: sniffing, the item list, safe name handling and the
@@ -49,7 +49,7 @@ impl Kind {
             Kind::CoolpadCpb => {
                 "Coolpad .cpb firmware container (recognized but unsupported, often encrypted)"
             }
-            Kind::NokiaNb0 => "Nokia NB0 firmware container (recognized but unsupported)",
+            Kind::NokiaNb0 => "Nokia NB0 firmware container",
         }
     }
 
@@ -174,13 +174,6 @@ pub(crate) fn range_item(
     })
 }
 
-fn unsupported(kind: Kind, tool: &str) -> anyhow::Error {
-    anyhow::anyhow!(
-        "{}: recognized but unsupported - no clean-room reader exists for this container; unwrap it with {tool}, then run android-doctor on the partition images",
-        kind.id()
-    )
-}
-
 fn parse(kind: Kind, path: &Path) -> Result<Vec<Item>> {
     let mut f = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let len = f.metadata()?.len();
@@ -190,14 +183,11 @@ fn parse(kind: Kind, path: &Path) -> Result<Vec<Item>> {
         Kind::LgDz => crate::lgkdz::parse_dz(&mut f, 0, len)?,
         Kind::SonySin => crate::sonysin::parse(&mut f, len, path)?,
         Kind::CoolpadCpb => {
-            return Err(unsupported(
-                kind,
-                "the vendor's flashing tool or a Coolpad CPB unpacker (CPB files are often encrypted)",
+            return Err(anyhow::anyhow!(
+                "coolpad-cpb: Coolpad .cpb container (detected by extension, it has no magic): not supported. The layout is not publicly documented and bodies are commonly encrypted with vendor-specific keys, so nothing is guessed; decrypt/unpack it with the vendor tool first, then run android-doctor on the partition images"
             ));
         }
-        Kind::NokiaNb0 => {
-            return Err(unsupported(kind, "a dedicated NB0 unpacker"));
-        }
+        Kind::NokiaNb0 => crate::nokianb0::parse(&mut f, len)?,
     };
     let mut seen = std::collections::HashSet::new();
     for it in &items {
@@ -357,17 +347,20 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn cpb_and_nb0_are_named_but_refused_cleanly() {
-        let d = Scratch::new("oem-unsupported");
-        for (file, id) in [("a.cpb", "coolpad-cpb"), ("a.nb0", "nokia-nb0")] {
-            let p = d.join(file);
-            std::fs::write(&p, b"whatever").unwrap();
-            let kind = detect(&p).unwrap();
-            assert_eq!(kind.id(), id);
-            let e = extract(kind, &p, &d.join("out"), &ExtractOptions::default()).unwrap_err();
-            assert!(e.to_string().contains("recognized but unsupported"), "{e}");
-            assert!(list(kind, &p, &ExtractOptions::default()).is_err());
-        }
+    fn cpb_is_named_but_refused_with_a_clear_reason() {
+        let d = Scratch::new("oem-cpb");
+        let p = d.join("a.cpb");
+        std::fs::write(&p, b"whatever").unwrap();
+        let kind = detect(&p).unwrap();
+        assert_eq!(kind.id(), "coolpad-cpb");
+        let e = extract(kind, &p, &d.join("out"), &ExtractOptions::default()).unwrap_err();
+        let m = e.to_string();
+        assert!(
+            m.contains("Coolpad .cpb") && m.contains("not supported"),
+            "{e}"
+        );
+        assert!(m.contains("vendor-specific keys"), "{e}");
+        assert!(list(kind, &p, &ExtractOptions::default()).is_err());
     }
 
     /// `identify` names every OEM container, by magic where there is one and by extension where
@@ -382,7 +375,7 @@ pub(crate) mod tests {
         crate::lgkdz::build_dz_for_test(&d.join("c.dz"), &raw);
         crate::sonysin::build_for_test(&d.join("d.sin"), &parts[0].1);
         std::fs::write(d.join("e.cpb"), b"opaque").unwrap();
-        std::fs::write(d.join("f.NB0"), b"opaque").unwrap();
+        crate::nokianb0::build_for_test(&d.join("f.NB0"), &parts);
         for (file, id) in [
             ("a.app", "huawei-update-app"),
             ("b.kdz", "lg-kdz"),
@@ -426,6 +419,6 @@ pub(crate) mod tests {
         crate::lgkdz::build_dz_for_test(&dir.join("fw.dz"), &raw);
         crate::sonysin::build_for_test(&dir.join("system_X-FLASH-ALL-1234.sin"), &parts[1].1);
         std::fs::write(dir.join("fw.cpb"), b"CPB?").unwrap();
-        std::fs::write(dir.join("fw.nb0"), b"NB0?").unwrap();
+        crate::nokianb0::build_for_test(&dir.join("fw.nb0"), &parts);
     }
 }
