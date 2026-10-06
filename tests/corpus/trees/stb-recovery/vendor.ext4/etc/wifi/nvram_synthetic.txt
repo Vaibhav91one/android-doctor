@@ -1,0 +1,4 @@
+# synthetic wifi nvram-style file
+sromrev=11
+boardtype=0x0000
+jtag=enabled

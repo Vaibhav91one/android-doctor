@@ -1,0 +1,14 @@
+service console /sbin/sh
+    class core
+    console
+    seclabel u:r:shell:s0
+
+service remotecfg_a /system/bin/remotecfg -c /etc/a.conf
+    class main
+    oneshot
+    seclabel u:r:shell:s0
+
+service remotecfg_b /system/bin/remotecfg -c /etc/b.conf
+    class main
+    oneshot
+    seclabel u:r:shell:s0

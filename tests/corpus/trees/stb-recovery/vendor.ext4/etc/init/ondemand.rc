@@ -1,0 +1,4 @@
+service dbgshell /system/bin/sh
+    disabled
+    oneshot
+    seclabel u:r:shell:s0
