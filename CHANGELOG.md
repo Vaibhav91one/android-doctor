@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-06
+
 ### Added
 
 - `extract` unwraps Nokia `.nb0` containers into partition images (#134). Detected by extension, header strictly bounds-checked. Validated against spec-built synthetic fixtures only, not real firmware. Coolpad `.cpb` stays refused (undocumented, usually encrypted), now with a clearer message (#133 still open).

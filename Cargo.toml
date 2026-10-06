@@ -1,6 +1,6 @@
 [package]
 name = "android-doctor"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 description = "Extract and audit Android OTA and firmware images (payload.bin, super.img, ext4, erofs) without running them"
 license = "MIT"
