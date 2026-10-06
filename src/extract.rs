@@ -1,6 +1,6 @@
 //! Extract partition images from a block OTA (a zip or an already unpacked directory).
 use crate::{detect, pac, payload, sdat, transfer_list};
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::fs::File;
 use std::io::IsTerminal;
@@ -747,12 +747,35 @@ pub(crate) fn extract_all_tracked(
                 };
                 let parsed = crate::lp::parse_metadata(&bytes)?;
                 let only = opts.only.as_deref();
-                for (part, body) in crate::lp::split_partitions(&bytes, &parsed, only)? {
-                    let part_path = out_dir.join(format!("{part}.img"));
-                    let tmp_path = out_dir.join(format!("{part}.img.part"));
-                    std::fs::write(&tmp_path, &body)?;
-                    std::fs::rename(&tmp_path, &part_path)?;
-                    produced.push(part_path);
+                // A partition with no extents has no data in this image. A super_empty.img is
+                // nothing but such partitions: the layout, not the contents.
+                let parts: Vec<(String, Vec<u8>)> =
+                    crate::lp::split_partitions(&bytes, &parsed, only)?
+                        .into_iter()
+                        .filter(|(_, body)| !body.is_empty())
+                        .collect();
+                if parts.is_empty() {
+                    produced.push(copy_raw(&mut src, name, out_dir)?);
+                } else {
+                    // Never replace an image this update already produced (from its transfer
+                    // lists), and check every name before writing any.
+                    let taken: Vec<String> = parts
+                        .iter()
+                        .map(|(part, _)| format!("{part}.img"))
+                        .filter(|file| paths.contains(&out_dir.join(file)))
+                        .collect();
+                    ensure!(
+                        taken.is_empty(),
+                        "{name} holds {} which this update already produced; refusing to overwrite",
+                        taken.join(", ")
+                    );
+                    for (part, body) in parts {
+                        let part_path = out_dir.join(format!("{part}.img"));
+                        let tmp_path = out_dir.join(format!("{part}.img.part"));
+                        std::fs::write(&tmp_path, &body)?;
+                        std::fs::rename(&tmp_path, &part_path)?;
+                        produced.push(part_path);
+                    }
                 }
             } else if name.ends_with(".ozip") {
                 // An Oppo/Realme .ozip is an AES-128-ECB encrypted zip. Decrypt it to a staging
@@ -1674,6 +1697,40 @@ mod tests {
         };
         run(&ota, &out, &opts).unwrap();
         assert!(out.join("super.img").exists() && out.join("vbmeta.img").exists());
+    }
+
+    /// A `super_empty.img` is LP metadata with no partition data: every partition in it has no
+    /// extents. Splitting it wrote empty `<partition>.img` files over the real images the same
+    /// update had just built from its transfer lists. It must leave them alone.
+    #[test]
+    fn a_super_empty_image_never_overwrites_the_partitions_built_from_the_update() {
+        let super_empty = crate::lp::tests::lp_image(&[("a", &[]), ("b", &[])]);
+        let (ota, out) = (fresh_dir("superempty-in"), fresh_dir("superempty-out"));
+        let mut files = sample_files();
+        files.push(("super_empty.img", super_empty.clone()));
+        write_dir(&ota, &files);
+        extract_all(&ota, &out, &ExtractOptions::default()).unwrap();
+        check_sample_output(&out);
+        assert_eq!(
+            std::fs::read(out.join("super_empty.img")).unwrap(),
+            super_empty,
+            "the metadata-only image is kept as it is"
+        );
+    }
+
+    /// A super image that does carry data must still not silently replace an image the update
+    /// already produced under the same name.
+    #[test]
+    fn a_super_partition_that_collides_with_an_extracted_image_is_not_overwritten() {
+        let (ota, out) = (fresh_dir("supercollide-in"), fresh_dir("supercollide-out"));
+        let mut files = sample_files();
+        files.push((
+            "super.img",
+            crate::lp::tests::lp_image(&[("a", &[0x77u8; 512])]),
+        ));
+        write_dir(&ota, &files);
+        let _ = extract_all_tracked(&ota, &out, &ExtractOptions::default());
+        check_sample_output(&out);
     }
 
     #[test]
