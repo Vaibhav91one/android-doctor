@@ -511,7 +511,7 @@ Every subcommand takes `--help`. `--no-color` (or `NO_COLOR`) disables colour.
 | `unpack <boot.img\|vendor_boot.img> [-o dir] [--json]` | Header, and with `-o` the kernel, ramdisk and dtb sections |
 | `ramdisk <boot.img\|ramdisk> [-o dir] [--json] [--list]` | Ramdisk contents and ADB properties |
 | `audit <image\|dir>... [--json] [--sarif FILE] [--baseline FILE] [--score]` | ADB properties, setuid files, `su` binaries, init services, findings |
-| `vbmeta <vbmeta.img> [--images dir] [--json] [--key key.pem]` | AVB header, key, signature, descriptors, partition hashes |
+| `vbmeta <vbmeta.img> [--images dir] [--json] [--key key.pem] [--vbmeta TOP_LEVEL]` | AVB header, key, signature, descriptors, partition hashes. With `--vbmeta`, checks a partition's footer against the signed top-level vbmeta: `avb-footer-covered` (info) only when that signature verifies and the descriptor's digest matches these bytes; a mismatch, an unsigned top level or no covering descriptor is `avb-footer-not-covered` (high). Hashtree descriptors are reported, not recomputed |
 | `ls <image> [path]` / `cat <image> <path>` | Browse and read files inside an ext2/3/4, erofs or f2fs image |
 | `files <image> [-o dir] [--json]` | List or extract an image's files with SELinux labels |
 | `unsparse <file>... -o out.img` | Android sparse images to a raw image |
