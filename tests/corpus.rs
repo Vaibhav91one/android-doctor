@@ -166,7 +166,7 @@ fn build_case(case: &str, out: &Path, (mke2fs, erofs): &(PathBuf, PathBuf)) -> b
         } else {
             run(Command::new(erofs)
                 .env("SOURCE_DATE_EPOCH", "0")
-                .args(["-U", UUID, "-T0", "--all-root", "--mkfs-time"])
+                .args(["-U", UUID, "-T0", "--all-root"])
                 .arg(&img)
                 .arg(e.path()));
         }
@@ -360,6 +360,8 @@ fn two_builds_are_byte_identical() {
     for case in cases() {
         let (a, b) = (tmp.join(format!("{case}-a")), tmp.join(format!("{case}-b")));
         build_case(&case, &a, &t);
+        // a build stamped with the wall clock would differ across a second boundary
+        std::thread::sleep(Duration::from_millis(1100));
         build_case(&case, &b, &t);
         let mut imgs: Vec<_> = fs::read_dir(&a)
             .unwrap()

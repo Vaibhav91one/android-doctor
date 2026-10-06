@@ -34,7 +34,7 @@ Nothing binary is committed. Each case is a directory of plain text:
 
 Pinned for determinism: sorted copy, all mtimes set to the epoch, `mke2fs` with a fixed UUID,
 label, `hash_seed`, `root_owner=0:0`, a pinned `mke2fs.conf`, `E2FSPROGS_FAKE_TIME=0` and
-`SOURCE_DATE_EPOCH=0`; `mkfs.erofs` with a fixed UUID, `-T0 --mkfs-time` and `--all-root`.
+`SOURCE_DATE_EPOCH=0`; `mkfs.erofs` with a fixed UUID, `-T0` and `--all-root`.
 File owners in ext4 images are the uid of whoever runs the test, so images are identical on one
 machine, not necessarily across machines. Findings do not depend on it.
 
