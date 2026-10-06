@@ -233,10 +233,40 @@ android-doctor doctor scan fw --json
 | Privilege | `su` binaries, setuid/setgid files, file capabilities, world-writable files |
 | Native code hardening | ELF objects without PIE, RELRO, a stack canary or FORTIFY, or with an executable stack |
 | Boot chain | AVB flags, rollback index, chained vbmeta, unsigned images, RSA signature and partition hash checks |
+| Secrets and apps | Hardcoded credentials in file contents, APK package names and signing certificates, APK manifest posture (below) |
 | Secrets and apps | Hardcoded credentials in file contents, APK package names and signing certificates |
 | APK signing posture | `apk-v1-only-signing`, `apk-debug-signing-cert`, `apk-cert-expired`, `apk-cert-not-yet-valid` |
 | Quality | Missing partitions, duplicate properties, SELinux label gaps, mode anomalies, init service hygiene, debug leftovers |
 | Staleness | Security patch level age from OTA metadata: `ok`, `stale` (over 90 days), `very stale` (over 365) |
+
+### APK manifest rules
+
+`audit` reads each APK's binary `AndroidManifest.xml` and reports hardening problems, one finding
+per rule per APK. Only real manifest attributes count (typed boolean values matched by the
+`android:` attribute resource id, or by name inside the android namespace when the APK has no
+resource map); strings in the file never trigger a rule.
+
+| Rule | Severity | Fires on |
+| --- | --- | --- |
+| `apk-exported-provider` | high | `<provider android:exported="true">` with no `permission` (or no read and write permission pair) |
+| `apk-exported-component` | medium | the same for `<activity>`, `<service>`, `<receiver>` |
+| `apk-debuggable` | high | `<application android:debuggable="true">` |
+| `apk-cleartext-traffic` | medium (warn when a `networkSecurityConfig` is set) | `android:usesCleartextTraffic="true"` |
+| `apk-shared-user-id` | medium | `<manifest android:sharedUserId>` |
+| `apk-test-only` | medium | `<application android:testOnly="true">` |
+| `apk-allow-backup` | info | `<application android:allowBackup="true">` |
+
+Assumptions: an explicit `exported` wins. When it is absent the documented default applies and
+the finding is one level lower (provider medium, others warn, `(implicit)` in the message): a
+provider is exported by default only below targetSdk 17 (never reported when targetSdk is
+unknown), and an activity, service or receiver is exported by default only if it has an
+`<intent-filter>` and targetSdk is below 31 (from 31 the attribute is mandatory, so an absent one
+is not reported). A launcher activity (a `MAIN` action) is not reported. Any `android:permission`
+on the component or `<application>` counts as a guard; its protection level lives in another
+package and is not checked, so this can under-report. Disabled components are skipped.
+`allowBackup` is reported only when explicitly true, not when absent. A cleartext default is not
+flagged on targetSdk 28 and later, and the contents of a `networkSecurityConfig` resource are not
+read.
 
 ## Reports for CI: SARIF, baseline, score
 
@@ -645,8 +675,9 @@ Roadmap and issue list: see the milestones on GitHub.
 
 - It never runs firmware. It reads bytes, so runtime behaviour (what a service
   actually does once booted) is out of scope.
-- No APK or SELinux policy analysis beyond package names, signing certificates
-  and label gaps.
+- No APK or SELinux policy analysis beyond package names, signing certificates,
+  the manifest rules above and label gaps. APK code, resources and permission
+  protection levels are not analysed.
 - The whole-image hash of a partition with dm-verity/FEC extents is reported as
   "not checked"; the device adds those bytes at install time.
 - Compressed or encrypted f2fs files are refused, not read. Key-protected

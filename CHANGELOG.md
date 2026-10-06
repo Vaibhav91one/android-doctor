@@ -7,6 +7,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `audit` checks each APK's binary `AndroidManifest.xml` for insecure posture (#143): `apk-exported-provider` (high), `apk-exported-component` (medium), `apk-debuggable` (high), `apk-cleartext-traffic` (medium), `apk-shared-user-id` (medium), `apk-test-only` (medium) and `apk-allow-backup` (info), each with a remedy. Typed attribute values are read (not strings), matched by `android:` resource id; `exported` defaults follow targetSdk and are reported one level lower. `audit --json` APK entries gain `manifest` and `issues`. Validated on hand-encoded synthetic manifests only.
+
+### Fixed
+
+- A manifest chunk with a size smaller than its header no longer loops forever in the APK parser, and a string pool that claims more strings than fit no longer tries to allocate gigabytes.
+
 - `audit` APK signing-posture rules (#145): `apk-v1-only-signing` (medium), `apk-debug-signing-cert` (high on a production-looking build, medium on `eng`/`userdebug`; the Android debug cert or an AOSP test key), `apk-cert-expired` and `apk-cert-not-yet-valid` (medium). Certificate validity is read from the X.509 and judged against the host clock, since firmware has no trusted one; the finding says so. `--json` signers gain `is_debug_cert`, `not_before`, `not_after`.
 
 ### Fixed

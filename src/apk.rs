@@ -5,6 +5,7 @@
 //! `ResourceTypes.h`, the APK Signature Scheme v2/v3 from `apk_signature_scheme.h`,
 //! and PKCS#7 (RFC 5652) for the v1 META-INF certs. All paths and sizes are bounds-checked.
 
+use crate::audit::Severity;
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
 use std::io::{Cursor, Read};
@@ -48,9 +49,16 @@ pub struct ApkInfo {
     pub version_code: Option<String>,
     pub version_name: Option<String>,
     pub signers: Vec<Signer>,
+    /// Security-relevant manifest attributes (see `ManifestAttrs`).
+    pub manifest: ManifestAttrs,
 }
 
 impl ApkInfo {
+    /// Manifest hardening problems, derived from real manifest attributes only.
+    pub fn issues(&self) -> Vec<ManifestIssue> {
+        manifest_issues(&self.manifest)
+    }
+
     pub fn has_test_key(&self) -> bool {
         self.signers.iter().any(|s| s.is_aosp_test_key)
     }
@@ -147,6 +155,46 @@ pub struct ManifestAttrs {
     pub package_name: String,
     pub version_code: Option<String>,
     pub version_name: Option<String>,
+    /// `<uses-sdk android:targetSdkVersion>` when it is a plain integer.
+    pub target_sdk: Option<u32>,
+    /// `<manifest android:sharedUserId>`.
+    pub shared_user_id: Option<String>,
+    /// `<application>` booleans. `None` means absent or not a literal boolean (for example
+    /// a `@bool/` reference), which is never reported.
+    pub debuggable: Option<bool>,
+    pub uses_cleartext_traffic: Option<bool>,
+    pub allow_backup: Option<bool>,
+    pub test_only: Option<bool>,
+    pub has_network_security_config: bool,
+    /// `<application android:permission>`: the default guard for every component.
+    pub app_permission: bool,
+    /// Activities, services, receivers and providers declared under `<application>`.
+    pub components: Vec<Component>,
+}
+
+/// One manifest component and the attributes the exported check needs.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Component {
+    /// "activity", "service", "receiver" or "provider".
+    pub kind: String,
+    pub name: String,
+    /// `android:exported` when it is a literal boolean.
+    pub exported: Option<bool>,
+    /// `android:permission` (or both read and write permissions on a provider) is set.
+    pub guarded: bool,
+    /// `android:enabled="false"`.
+    pub disabled: bool,
+    pub has_intent_filter: bool,
+    /// An intent filter handles `android.intent.action.MAIN` (a launcher entry point).
+    pub main_action: bool,
+}
+
+/// One manifest finding: the rule, its severity and what was seen.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManifestIssue {
+    pub rule: &'static str,
+    pub severity: Severity,
+    pub detail: String,
 }
 
 // --- Binary helpers ---
@@ -198,6 +246,11 @@ fn parse_string_pool(data: &[u8]) -> Result<(Vec<String>, usize)> {
         strings_start <= chunk_size,
         "string pool: strings start past chunk"
     );
+    // A hostile header can claim billions of strings; the offset table must fit in the data.
+    ensure!(
+        header_size.saturating_add(str_count.saturating_mul(4)) <= data.len(),
+        "string pool: {str_count} strings do not fit"
+    );
     let mut offsets = Vec::with_capacity(str_count);
     for i in 0..str_count {
         let off = header_size + 4 * i;
@@ -239,8 +292,23 @@ fn read_utf16(data: &[u8], start: usize) -> Result<(String, usize)> {
 
 /// An attribute entry in a start tag.
 struct Attr {
+    ns_idx: usize,
     name_idx: usize,
     value: String,
+    /// Res_value dataType and data. Always read: aapt1 also stores the source text in
+    /// rawValue for booleans, so the typed value is the only reliable one.
+    data_type: u8,
+    data: u32,
+}
+
+impl Attr {
+    /// A literal boolean/int value (types 0x10..=0x1f, as `TypedArray.getBoolean` accepts).
+    /// A string or a `@reference` is `None`: never guess.
+    fn as_bool(&self) -> Option<bool> {
+        (0x10..=0x1f)
+            .contains(&self.data_type)
+            .then_some(self.data != 0)
+    }
 }
 
 /// Size of ResXMLTree_node: ResChunk_header (8) + lineNumber (4) + comment (4).
@@ -269,11 +337,13 @@ fn parse_start_tag(
     let mut pos = ATTR_EXT_BASE + attr_start;
     for _ in 0..attr_count {
         ensure!(pos + attr_size <= chunk.len(), "start tag: attr past chunk");
+        let ns_idx = le32(chunk, pos)? as usize;
         let nm_idx = le32(chunk, pos + 4)? as usize;
         let raw_val_off = le32(chunk, pos + 8)? as usize;
+        // Res_value (AOSP ResourceTypes.h): size u16, res0 u8, dataType u8, data u32.
+        let dt = chunk[pos + 15];
+        let data_word = le32(chunk, pos + 16)?;
         let value = if raw_val_off == 0xFFFFFFFF {
-            // Res_value (AOSP ResourceTypes.h): size u16, res0 u8, dataType u8, data u32.
-            let dt = chunk[pos + 15];
             format_typed_value(dt, &chunk[pos + 16..pos + 20])?
         } else {
             // AOSP ResXMLTree_attribute.rawValue is an INDEX into the string pool, not a
@@ -281,8 +351,11 @@ fn parse_start_tag(
             strings.get(raw_val_off).cloned().unwrap_or_default()
         };
         attrs.push(Attr {
+            ns_idx,
             name_idx: nm_idx,
             value,
+            data_type: dt,
+            data: data_word,
         });
         pos += attr_size;
     }
@@ -321,28 +394,287 @@ pub(crate) fn parse_manifest(data: &[u8]) -> Result<ManifestAttrs> {
     let _strings_start = xml_header + pool_strings_start;
     let pool_chunk_size = le32(&data[xml_header..], 4)? as usize;
     let mut result = ManifestAttrs::default();
+    // RES_XML_RESOURCE_MAP_TYPE: one resource id per attribute-name string, which says which
+    // attribute a name really is (an app can define its own `exported`).
+    let mut res_ids: Vec<u32> = Vec::new();
+    // Open tags, each with the index of its component when it is one.
+    let mut stack: Vec<(String, Option<usize>)> = Vec::new();
     let mut pos = xml_header + pool_chunk_size;
     while pos + 8 <= data.len() {
         let ct = le16(data, pos)?;
         let cs = le32(data, pos + 4)? as usize;
-        ensure!(pos + cs <= data.len(), "manifest: chunk extends past end");
-        if ct == 0x0102 {
-            let (tag_name, attrs) = parse_start_tag(data, pos, &pool)?;
-            if tag_name == "manifest" {
-                for a in &attrs {
-                    let aname = pool.get(a.name_idx).map(|s| s.as_str());
-                    match aname {
-                        Some("package") => result.package_name = a.value.clone(),
-                        Some("versionCode") => result.version_code = Some(a.value.clone()),
-                        Some("versionName") => result.version_name = Some(a.value.clone()),
-                        _ => {}
-                    }
-                }
+        // A chunk smaller than its own header would never advance `pos`.
+        ensure!(
+            cs >= 8 && pos + cs <= data.len(),
+            "manifest: bad chunk size {cs}"
+        );
+        match ct {
+            0x0180 => {
+                let end = pos + cs - (cs - 8) % 4;
+                res_ids = (pos + 8..end)
+                    .step_by(4)
+                    .filter_map(|o| le32(data, o).ok())
+                    .collect();
             }
+            0x0103 => {
+                stack.pop();
+            }
+            0x0102 => {
+                let (tag, attrs) = parse_start_tag(data, pos, &pool)?;
+                let mut comp = None;
+                read_tag(
+                    &tag,
+                    &attrs,
+                    &pool,
+                    &res_ids,
+                    &stack,
+                    &mut result,
+                    &mut comp,
+                );
+                stack.push((tag, comp));
+            }
+            _ => {}
         }
         pos += cs;
     }
     Ok(result)
+}
+
+const ANDROID_NS: &str = "http://schemas.android.com/apk/res/android";
+/// Most components kept per manifest: a hostile manifest cannot grow this without bound.
+const MAX_COMPONENTS: usize = 5000;
+
+/// Framework attribute resource ids (android.R.attr, stable public API).
+const ANDROID_ATTRS: &[(u32, &str)] = &[
+    (0x0101_0003, "name"),
+    (0x0101_0006, "permission"),
+    (0x0101_0007, "readPermission"),
+    (0x0101_0008, "writePermission"),
+    (0x0101_000b, "sharedUserId"),
+    (0x0101_000e, "enabled"),
+    (0x0101_000f, "debuggable"),
+    (0x0101_0010, "exported"),
+    (0x0101_0270, "targetSdkVersion"),
+    (0x0101_0272, "testOnly"),
+    (0x0101_0280, "allowBackup"),
+    (0x0101_04ec, "usesCleartextTraffic"),
+    (0x0101_0527, "networkSecurityConfig"),
+];
+
+/// The `android:` local name of an attribute, or None when it is not a framework attribute.
+/// With a resource map the resource id decides (authoritative, survives stripped names);
+/// without one, the namespace URI must be the android namespace and the local name decides.
+fn android_attr<'a>(a: &Attr, pool: &'a [String], res_ids: &[u32]) -> Option<&'a str> {
+    match res_ids.get(a.name_idx).copied().filter(|&id| id != 0) {
+        Some(id) => ANDROID_ATTRS
+            .iter()
+            .find(|(i, _)| *i == id)
+            .map(|(_, n)| *n),
+        None => (pool.get(a.ns_idx).map(String::as_str) == Some(ANDROID_NS))
+            .then(|| pool.get(a.name_idx).map(String::as_str))
+            .flatten(),
+    }
+}
+
+/// Fold one start tag into `out`. `stack` holds the enclosing open tags.
+fn read_tag(
+    tag: &str,
+    attrs: &[Attr],
+    pool: &[String],
+    res_ids: &[u32],
+    stack: &[(String, Option<usize>)],
+    out: &mut ManifestAttrs,
+    comp_slot: &mut Option<usize>,
+) {
+    let parent = stack.last();
+    let in_app = parent.is_some_and(|(p, _)| p == "application");
+    let is_component = matches!(tag, "activity" | "service" | "receiver" | "provider");
+    let mut c = Component {
+        kind: tag.to_string(),
+        ..Default::default()
+    };
+    let (mut read_perm, mut write_perm) = (false, false);
+    for a in attrs {
+        if tag == "manifest" {
+            match pool.get(a.name_idx).map(String::as_str) {
+                Some("package") => out.package_name = a.value.clone(),
+                Some("versionCode") => out.version_code = Some(a.value.clone()),
+                Some("versionName") => out.version_name = Some(a.value.clone()),
+                _ => {}
+            }
+        }
+        let Some(name) = android_attr(a, pool, res_ids) else {
+            continue;
+        };
+        match (tag, name) {
+            ("manifest", "sharedUserId") if !a.value.is_empty() => {
+                out.shared_user_id = Some(a.value.clone())
+            }
+            ("uses-sdk", "targetSdkVersion") if (0x10..=0x1f).contains(&a.data_type) => {
+                out.target_sdk = Some(a.data)
+            }
+            ("application", "debuggable") => out.debuggable = a.as_bool(),
+            ("application", "usesCleartextTraffic") => out.uses_cleartext_traffic = a.as_bool(),
+            ("application", "allowBackup") => out.allow_backup = a.as_bool(),
+            ("application", "testOnly") => out.test_only = a.as_bool(),
+            ("application", "networkSecurityConfig") => out.has_network_security_config = true,
+            ("application", "permission") => out.app_permission = !a.value.is_empty(),
+            _ if is_component && in_app => match name {
+                "name" => c.name = a.value.clone(),
+                "exported" => c.exported = a.as_bool(),
+                "enabled" => c.disabled = a.as_bool() == Some(false),
+                "permission" => c.guarded = !a.value.is_empty(),
+                "readPermission" => read_perm = !a.value.is_empty(),
+                "writePermission" => write_perm = !a.value.is_empty(),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    if is_component && in_app {
+        if out.components.len() < MAX_COMPONENTS {
+            c.guarded |= read_perm && write_perm;
+            out.components.push(c);
+            *comp_slot = Some(out.components.len() - 1);
+        }
+    } else if tag == "intent-filter"
+        && let Some((_, Some(i))) = parent
+    {
+        out.components[*i].has_intent_filter = true;
+    } else if tag == "action"
+        && let [.., (_, Some(i)), (f, _)] = stack
+        && f == "intent-filter"
+        && attrs.iter().any(|a| {
+            android_attr(a, pool, res_ids) == Some("name")
+                && a.value == "android.intent.action.MAIN"
+        })
+    {
+        out.components[*i].main_action = true;
+    }
+}
+
+/// The documented `android:exported` defaults, which depend on the component and targetSdk:
+/// - an explicit literal `exported` always wins;
+/// - a provider is exported by default only when targetSdk < 17 (unknown targetSdk: not
+///   reported, we do not guess);
+/// - activity/service/receiver are exported by default exactly when they declare an
+///   intent filter, up to targetSdk 30; from 31 the attribute is mandatory for such
+///   components, so an absent one is an invalid manifest and is not reported.
+///
+/// Returns `Some(implicit)` when the component is exported.
+fn exported(c: &Component, target_sdk: Option<u32>) -> Option<bool> {
+    match c.exported {
+        Some(true) => Some(false),
+        Some(false) => None,
+        None if c.kind == "provider" => target_sdk.filter(|&t| t < 17).map(|_| true),
+        None => (c.has_intent_filter && target_sdk.is_none_or(|t| t < 31)).then_some(true),
+    }
+}
+
+fn manifest_issues(m: &ManifestAttrs) -> Vec<ManifestIssue> {
+    use Severity::*;
+    let mut out = Vec::new();
+    let mut issue = |rule, severity, detail: String| {
+        out.push(ManifestIssue {
+            rule,
+            severity,
+            detail,
+        })
+    };
+    // Exported and unguarded, grouped by (rule, severity). An implicit export (the default,
+    // no literal attribute) is reported one level lower than an explicit one. The permission
+    // is only checked for presence: its protection level lives in another package.
+    let mut groups: Vec<(&'static str, Severity, Vec<String>)> = Vec::new();
+    for c in &m.components {
+        // A launcher entry point is meant to be exported; a disabled component is unreachable.
+        if c.disabled || m.app_permission || c.guarded || (c.kind == "activity" && c.main_action) {
+            continue;
+        }
+        let Some(implicit) = exported(c, m.target_sdk) else {
+            continue;
+        };
+        let (rule, severity) = match (c.kind == "provider", implicit) {
+            (true, false) => ("apk-exported-provider", High),
+            (true, true) => ("apk-exported-provider", Medium),
+            (false, false) => ("apk-exported-component", Medium),
+            (false, true) => ("apk-exported-component", Warn),
+        };
+        let label = format!(
+            "{} {}{}",
+            c.kind,
+            c.name,
+            if implicit { " (implicit)" } else { "" }
+        );
+        match groups.iter_mut().find(|g| g.0 == rule && g.1 == severity) {
+            Some(g) => g.2.push(label),
+            None => groups.push((rule, severity, vec![label])),
+        }
+    }
+    for (rule, severity, names) in groups {
+        let shown = names.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+        let more = names.len().saturating_sub(5);
+        let tail = if more > 0 {
+            format!(" and {more} more")
+        } else {
+            String::new()
+        };
+        issue(
+            rule,
+            severity,
+            format!(
+                "{} exported without a permission: {shown}{tail}",
+                names.len()
+            ),
+        );
+    }
+    if m.debuggable == Some(true) {
+        issue(
+            "apk-debuggable",
+            High,
+            "android:debuggable=true: anyone with adb can run code as this app".into(),
+        );
+    }
+    if m.uses_cleartext_traffic == Some(true) {
+        // With a networkSecurityConfig the attribute is ignored from API 24, so it is only a
+        // hint that the config may permit cleartext (the config itself is not read).
+        let (sev, note) = if m.has_network_security_config {
+            (
+                Warn,
+                " (a networkSecurityConfig is set and overrides it on API 24+)",
+            )
+        } else {
+            (Medium, "")
+        };
+        issue(
+            "apk-cleartext-traffic",
+            sev,
+            format!("android:usesCleartextTraffic=true: HTTP allowed{note}"),
+        );
+    }
+    if let Some(u) = &m.shared_user_id {
+        issue(
+            "apk-shared-user-id",
+            Medium,
+            format!(
+                "android:sharedUserId=\"{u}\": shares a Linux uid and its permissions with other apps"
+            ),
+        );
+    }
+    if m.test_only == Some(true) {
+        issue(
+            "apk-test-only",
+            Medium,
+            "android:testOnly=true: a test build that should not ship".into(),
+        );
+    }
+    if m.allow_backup == Some(true) {
+        issue(
+            "apk-allow-backup",
+            Info,
+            "android:allowBackup=true: app data can be pulled with adb backup".into(),
+        );
+    }
+    out
 }
 
 // --- Minimal ASN.1/DER reader ---
@@ -631,6 +963,7 @@ pub fn audit_apk_bytes(path: &Path, bytes: &[u8]) -> ApkAudit {
             version_code: attrs.as_ref().and_then(|a| a.version_code.clone()),
             version_name: attrs.as_ref().and_then(|a| a.version_name.clone()),
             signers,
+            manifest: attrs.unwrap_or_default(),
         })
     })();
     match r {
@@ -831,6 +1164,475 @@ mod tests {
             info.signers.is_empty(),
             "garbage DER must not become a signer"
         );
+    }
+
+    // --- Synthetic binary-AXML encoder ---
+
+    #[derive(Clone)]
+    enum V {
+        Bool(bool),
+        /// aapt1 style: rawValue is the string "true"/"false" and the typed value is a boolean.
+        LegacyBool(bool),
+        Int(u32),
+        Str(&'static str),
+    }
+    /// An attribute: (namespace: android or none, local name, value).
+    type A = (bool, &'static str, V);
+    struct El {
+        name: &'static str,
+        attrs: Vec<A>,
+        kids: Vec<El>,
+    }
+    fn el(name: &'static str, attrs: Vec<A>, kids: Vec<El>) -> El {
+        El { name, attrs, kids }
+    }
+    fn a(name: &'static str, v: V) -> A {
+        (true, name, v)
+    }
+    fn t() -> V {
+        V::Bool(true)
+    }
+    fn f() -> V {
+        V::Bool(false)
+    }
+
+    fn u16le(o: &mut Vec<u8>, v: u16) {
+        o.extend(v.to_le_bytes());
+    }
+    fn u32le(o: &mut Vec<u8>, v: u32) {
+        o.extend(v.to_le_bytes());
+    }
+    fn intern(pool: &mut Vec<String>, s: &str) -> u32 {
+        match pool.iter().position(|p| p == s) {
+            Some(i) => i as u32,
+            None => {
+                pool.push(s.to_string());
+                (pool.len() - 1) as u32
+            }
+        }
+    }
+
+    fn encode_el(e: &El, pool: &mut Vec<String>, out: &mut Vec<u8>, ns: u32) {
+        let name = intern(pool, e.name);
+        let mut body = Vec::new();
+        for (android, n, v) in &e.attrs {
+            let n_idx = intern(pool, n);
+            let (raw, ty, data) = match v {
+                // aapt2 style: rawValue -1, typed boolean 0xFFFFFFFF / 0.
+                V::Bool(b) => (u32::MAX, 0x12u8, if *b { u32::MAX } else { 0 }),
+                V::LegacyBool(b) => (
+                    intern(pool, if *b { "true" } else { "false" }),
+                    0x12u8,
+                    if *b { u32::MAX } else { 0 },
+                ),
+                V::Int(i) => (u32::MAX, 0x10, *i),
+                V::Str(s) => {
+                    let i = intern(pool, s);
+                    (i, 0x03, i)
+                }
+            };
+            u32le(&mut body, if *android { ns } else { u32::MAX });
+            u32le(&mut body, n_idx);
+            u32le(&mut body, raw);
+            u16le(&mut body, 8);
+            body.push(0);
+            body.push(ty);
+            u32le(&mut body, data);
+        }
+        // RES_XML_START_ELEMENT_TYPE: node header (16) + attrExt (20) + attributes.
+        u16le(out, 0x0102);
+        u16le(out, 16);
+        u32le(out, 36 + body.len() as u32);
+        u32le(out, 1);
+        u32le(out, u32::MAX);
+        u32le(out, u32::MAX);
+        u32le(out, name);
+        u16le(out, 20);
+        u16le(out, 20);
+        u16le(out, e.attrs.len() as u16);
+        out.extend([0u8; 6]);
+        out.extend(body);
+        for k in &e.kids {
+            encode_el(k, pool, out, ns);
+        }
+        // RES_XML_END_ELEMENT_TYPE.
+        u16le(out, 0x0103);
+        u16le(out, 16);
+        u32le(out, 24);
+        u32le(out, 1);
+        u32le(out, u32::MAX);
+        u32le(out, u32::MAX);
+        u32le(out, name);
+    }
+
+    /// Encode a whole binary XML document. With `resmap`, android attribute names get their
+    /// resource ids in a RES_XML_RESOURCE_MAP chunk, as aapt2 emits.
+    fn axml(root: &El, resmap: bool) -> Vec<u8> {
+        let mut pool = Vec::new();
+        let ns = intern(&mut pool, ANDROID_NS);
+        let mut elems = Vec::new();
+        encode_el(root, &mut pool, &mut elems, ns);
+        let mut sp = Vec::new();
+        let mut offs = Vec::new();
+        for s in &pool {
+            offs.push(sp.len() as u32);
+            let u: Vec<u16> = s.encode_utf16().collect();
+            u16le(&mut sp, u.len() as u16);
+            for c in u {
+                u16le(&mut sp, c);
+            }
+            u16le(&mut sp, 0);
+        }
+        while sp.len() % 4 != 0 {
+            sp.push(0);
+        }
+        let hdr = 28 + 4 * pool.len();
+        let mut pc = Vec::new();
+        u16le(&mut pc, 0x0001);
+        u16le(&mut pc, 28);
+        u32le(&mut pc, (hdr + sp.len()) as u32);
+        u32le(&mut pc, pool.len() as u32);
+        u32le(&mut pc, 0);
+        u32le(&mut pc, 0);
+        u32le(&mut pc, hdr as u32);
+        u32le(&mut pc, 0);
+        for o in offs {
+            u32le(&mut pc, o);
+        }
+        pc.extend(sp);
+        let mut body = pc;
+        if resmap {
+            u16le(&mut body, 0x0180);
+            u16le(&mut body, 8);
+            u32le(&mut body, 8 + 4 * pool.len() as u32);
+            for s in &pool {
+                let id = ANDROID_ATTRS
+                    .iter()
+                    .find(|(_, n)| n == s)
+                    .map_or(0, |(i, _)| *i);
+                u32le(&mut body, id);
+            }
+        }
+        body.extend(elems);
+        let mut out = Vec::new();
+        u16le(&mut out, 0x0003);
+        u16le(&mut out, 8);
+        u32le(&mut out, 8 + body.len() as u32);
+        out.extend(body);
+        out
+    }
+
+    fn apk_with(manifest: &[u8]) -> Vec<u8> {
+        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        w.start_file(
+            "AndroidManifest.xml",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        w.write_all(manifest).unwrap();
+        w.finish().unwrap().into_inner()
+    }
+
+    /// `<manifest>` wrapping `<uses-sdk target>` and one `<application>`.
+    fn manifest(top: Vec<A>, target: u32, app: Vec<A>, comps: Vec<El>) -> El {
+        el(
+            "manifest",
+            [vec![(false, "package", V::Str("com.example.fx"))], top].concat(),
+            vec![
+                el(
+                    "uses-sdk",
+                    vec![a("targetSdkVersion", V::Int(target))],
+                    vec![],
+                ),
+                el("application", app, comps),
+            ],
+        )
+    }
+
+    /// Issues for a manifest, through the real APK path, with and without a resource map.
+    fn issues(m: &El) -> Vec<(&'static str, Severity)> {
+        let mut seen: Vec<Vec<(&'static str, Severity)>> = Vec::new();
+        for resmap in [true, false] {
+            let r = audit_apk_bytes(Path::new("/x.apk"), &apk_with(&axml(m, resmap)));
+            assert!(r.error.is_none(), "{:?}", r.error);
+            let info = r.info.unwrap();
+            assert_eq!(info.package_name, "com.example.fx");
+            seen.push(info.issues().iter().map(|i| (i.rule, i.severity)).collect());
+        }
+        assert_eq!(seen[0], seen[1], "resource-map and name-only paths agree");
+        seen.remove(0)
+    }
+    fn comp(kind: &'static str, attrs: Vec<A>, kids: Vec<El>) -> El {
+        el(kind, [vec![a("name", V::Str(".C"))], attrs].concat(), kids)
+    }
+    fn filter(action: &'static str) -> El {
+        el(
+            "intent-filter",
+            vec![],
+            vec![el("action", vec![a("name", V::Str(action))], vec![])],
+        )
+    }
+
+    #[test]
+    fn exported_component_without_permission_is_medium() {
+        for kind in ["activity", "service", "receiver"] {
+            let m = manifest(
+                vec![],
+                33,
+                vec![],
+                vec![comp(kind, vec![a("exported", t())], vec![])],
+            );
+            assert_eq!(
+                issues(&m),
+                [("apk-exported-component", Severity::Medium)],
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn exported_provider_without_permission_is_high() {
+        let m = manifest(
+            vec![],
+            33,
+            vec![],
+            vec![comp("provider", vec![a("exported", t())], vec![])],
+        );
+        assert_eq!(issues(&m), [("apk-exported-provider", Severity::High)]);
+    }
+
+    #[test]
+    fn exported_component_guards_do_not_fire() {
+        let p = a("permission", V::Str("com.example.PERM"));
+        // permission on the component, exported=false, no exported attr and no filter,
+        // disabled, provider with read+write permissions, application-level permission.
+        let cases: Vec<El> = vec![
+            manifest(
+                vec![],
+                33,
+                vec![],
+                vec![comp("service", vec![a("exported", t()), p.clone()], vec![])],
+            ),
+            manifest(
+                vec![],
+                33,
+                vec![],
+                vec![comp("service", vec![a("exported", f())], vec![])],
+            ),
+            manifest(vec![], 28, vec![], vec![comp("service", vec![], vec![])]),
+            manifest(
+                vec![],
+                33,
+                vec![],
+                vec![comp(
+                    "service",
+                    vec![a("exported", t()), a("enabled", f())],
+                    vec![],
+                )],
+            ),
+            manifest(
+                vec![],
+                33,
+                vec![],
+                vec![comp(
+                    "provider",
+                    vec![
+                        a("exported", t()),
+                        a("readPermission", V::Str("r")),
+                        a("writePermission", V::Str("w")),
+                    ],
+                    vec![],
+                )],
+            ),
+            manifest(
+                vec![],
+                33,
+                vec![p.clone()],
+                vec![comp("provider", vec![a("exported", t())], vec![])],
+            ),
+            // a provider with only a read permission is still open for writes
+        ];
+        for m in &cases {
+            assert!(issues(m).is_empty(), "{:?}", issues(m));
+        }
+        let half = manifest(
+            vec![],
+            33,
+            vec![],
+            vec![comp(
+                "provider",
+                vec![a("exported", t()), a("readPermission", V::Str("r"))],
+                vec![],
+            )],
+        );
+        assert_eq!(issues(&half), [("apk-exported-provider", Severity::High)]);
+    }
+
+    #[test]
+    fn launcher_activity_is_not_flagged_but_other_exported_activity_is() {
+        let main = filter("android.intent.action.MAIN");
+        let launcher = comp("activity", vec![a("exported", t())], vec![main]);
+        assert!(issues(&manifest(vec![], 33, vec![], vec![launcher])).is_empty());
+        let view = comp(
+            "activity",
+            vec![a("exported", t())],
+            vec![filter("android.intent.action.VIEW")],
+        );
+        assert_eq!(
+            issues(&manifest(vec![], 33, vec![], vec![view])),
+            [("apk-exported-component", Severity::Medium)]
+        );
+    }
+
+    #[test]
+    fn implicit_export_follows_the_documented_defaults_one_level_lower() {
+        let svc = || comp("service", vec![], vec![filter("x.ACTION")]);
+        // intent filter, no attribute, targetSdk 30: exported by default, reported at warn.
+        assert_eq!(
+            issues(&manifest(vec![], 30, vec![], vec![svc()])),
+            [("apk-exported-component", Severity::Warn)]
+        );
+        // targetSdk 31+ with an absent attribute is not a valid manifest: not reported.
+        assert!(issues(&manifest(vec![], 33, vec![], vec![svc()])).is_empty());
+        // provider default-exported only below API 17, then at medium rather than high.
+        let prov = || comp("provider", vec![], vec![]);
+        assert_eq!(
+            issues(&manifest(vec![], 16, vec![], vec![prov()])),
+            [("apk-exported-provider", Severity::Medium)]
+        );
+        assert!(issues(&manifest(vec![], 17, vec![], vec![prov()])).is_empty());
+    }
+
+    #[test]
+    fn debuggable_is_high_and_false_is_clean() {
+        let on = manifest(vec![], 33, vec![a("debuggable", t())], vec![]);
+        assert_eq!(issues(&on), [("apk-debuggable", Severity::High)]);
+        assert!(issues(&manifest(vec![], 33, vec![a("debuggable", f())], vec![])).is_empty());
+        assert!(issues(&manifest(vec![], 33, vec![], vec![])).is_empty());
+    }
+
+    #[test]
+    fn cleartext_is_medium_and_only_when_explicitly_true() {
+        let on = manifest(vec![], 33, vec![a("usesCleartextTraffic", t())], vec![]);
+        assert_eq!(issues(&on), [("apk-cleartext-traffic", Severity::Medium)]);
+        let off = manifest(vec![], 33, vec![a("usesCleartextTraffic", f())], vec![]);
+        assert!(issues(&off).is_empty());
+        // targetSdk 28+ defaults to no cleartext: an absent attribute is not a finding.
+        assert!(issues(&manifest(vec![], 28, vec![], vec![])).is_empty());
+        // a network security config overrides the attribute: downgraded.
+        let nsc = manifest(
+            vec![],
+            33,
+            vec![
+                a("usesCleartextTraffic", t()),
+                a("networkSecurityConfig", V::Int(0x7f10_0001)),
+            ],
+            vec![],
+        );
+        assert_eq!(issues(&nsc), [("apk-cleartext-traffic", Severity::Warn)]);
+    }
+
+    #[test]
+    fn shared_user_id_is_medium_and_absent_is_clean() {
+        let on = manifest(
+            vec![a("sharedUserId", V::Str("android.uid.system"))],
+            33,
+            vec![],
+            vec![],
+        );
+        assert_eq!(issues(&on), [("apk-shared-user-id", Severity::Medium)]);
+        assert!(issues(&manifest(vec![], 33, vec![], vec![])).is_empty());
+    }
+
+    #[test]
+    fn allow_backup_true_is_info_and_false_or_absent_is_clean() {
+        let on = manifest(vec![], 33, vec![a("allowBackup", t())], vec![]);
+        assert_eq!(issues(&on), [("apk-allow-backup", Severity::Info)]);
+        assert!(issues(&manifest(vec![], 33, vec![a("allowBackup", f())], vec![])).is_empty());
+        assert!(issues(&manifest(vec![], 33, vec![], vec![])).is_empty());
+    }
+
+    #[test]
+    fn test_only_is_medium_and_false_is_clean() {
+        let on = manifest(vec![], 33, vec![a("testOnly", t())], vec![]);
+        assert_eq!(issues(&on), [("apk-test-only", Severity::Medium)]);
+        assert!(issues(&manifest(vec![], 33, vec![a("testOnly", f())], vec![])).is_empty());
+    }
+
+    #[test]
+    fn only_a_typed_boolean_counts_not_a_string_or_a_foreign_attribute() {
+        // The string "true" is not a boolean value.
+        let s = manifest(vec![], 33, vec![a("debuggable", V::Str("true"))], vec![]);
+        assert!(issues(&s).is_empty());
+        // An app-defined `debuggable` in its own (non-android) namespace is not android:debuggable.
+        let own = manifest(vec![], 33, vec![(false, "debuggable", t())], vec![]);
+        let r = audit_apk_bytes(Path::new("/x.apk"), &apk_with(&axml(&own, false)));
+        assert!(r.info.unwrap().issues().is_empty());
+        // aapt1 style: rawValue holds the source text and the typed value still says true.
+        let old = manifest(
+            vec![],
+            33,
+            vec![a("debuggable", V::LegacyBool(true))],
+            vec![],
+        );
+        assert_eq!(issues(&old), [("apk-debuggable", Severity::High)]);
+    }
+
+    #[test]
+    fn many_issues_are_all_reported_with_a_cap_on_the_component_list() {
+        let comps: Vec<El> = (0..8)
+            .map(|_| comp("receiver", vec![a("exported", t())], vec![]))
+            .collect();
+        let m = manifest(vec![], 33, vec![a("debuggable", t())], comps);
+        let r = audit_apk_bytes(Path::new("/x.apk"), &apk_with(&axml(&m, true)));
+        let list = r.info.unwrap().issues();
+        let d = &list
+            .iter()
+            .find(|i| i.rule == "apk-exported-component")
+            .unwrap()
+            .detail;
+        assert!(
+            d.starts_with("8 exported") && d.contains("and 3 more"),
+            "{d}"
+        );
+        assert!(list.iter().any(|i| i.rule == "apk-debuggable"));
+    }
+
+    #[test]
+    fn hostile_manifests_never_panic_or_hang() {
+        let m = manifest(
+            vec![a("sharedUserId", V::Str("s"))],
+            33,
+            vec![a("debuggable", t())],
+            vec![comp(
+                "provider",
+                vec![a("exported", t())],
+                vec![filter("x")],
+            )],
+        );
+        let good = axml(&m, true);
+        // Every truncation, and every single-byte corruption, of a valid manifest.
+        for n in 0..good.len() {
+            let _ = parse_manifest(&good[..n]);
+        }
+        for i in 0..good.len() {
+            let mut b = good.clone();
+            b[i] ^= 0xFF;
+            let _ = parse_manifest(&b);
+        }
+        // A chunk whose size is 0 would never advance the cursor.
+        let mut zero = good.clone();
+        let pool_size = u32::from_le_bytes(good[12..16].try_into().unwrap()) as usize;
+        let first = 8 + pool_size;
+        zero[first + 4..first + 8].copy_from_slice(&0u32.to_le_bytes());
+        assert!(parse_manifest(&zero).is_err());
+        // Garbage and an APK whose manifest is garbage still audit without error.
+        assert!(parse_manifest(&[0xFF; 64]).is_err());
+        let r = audit_apk_bytes(
+            Path::new("/x.apk"),
+            &apk_with(&[0x03, 0x00, 0x08, 0x00, 1, 2, 3]),
+        );
+        assert!(r.error.is_none() && r.info.unwrap().issues().is_empty());
     }
 
     // --- signing posture fixtures: synthetic APKs, DER certs and signing blocks built here ---
