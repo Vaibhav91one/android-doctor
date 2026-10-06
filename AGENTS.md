@@ -17,7 +17,7 @@ tools `identify`, `doctor`, `audit`, each taking `path`).
 | Goal | Command |
 | --- | --- |
 | What is this file | `android-doctor identify <path> --json` |
-| OTA to images | `android-doctor extract <ota> -o out/` (`--list` writes nothing) |
+| OTA to images | `android-doctor extract <ota> -o out/` (`--list` writes nothing). Also unwraps OEM firmware containers: Huawei `UPDATE.APP`, LG `.kdz`/`.dz`, Sony `.sin` (synthetic-fixture-validated only); `.cpb` and `.nb0` are named but unsupported |
 | Security posture of an image | `android-doctor audit <image> --json` |
 | Health of an unpacked directory | `android-doctor doctor scan <dir> --json` |
 | Health score only | `android-doctor doctor scan <dir> --score` (0-100; prints just the number) |
@@ -40,6 +40,7 @@ Install the skill for an agent with `android-doctor doctor install --agent <clau
     src/main.rs        CLI (clap) and command dispatch
     src/mcp.rs         MCP server (JSON-RPC 2.0 on stdio, pure `handle` function)
     src/skill.rs       agent skill installer; src/skill_body.md is the skill text
+    src/oem.rs         OEM firmware containers (shared sniff/list/extract); huawei.rs, lgkdz.rs, sonysin.rs readers
     src/doctor.rs      health-scan rules
     src/findings.rs    shared finding model: severity scale, fingerprint, score, baseline, SARIF, digest
     src/reporting.rs   the flags and exit status shared by `audit` and `doctor scan`

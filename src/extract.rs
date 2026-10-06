@@ -284,6 +284,9 @@ pub fn partition_names(input: &Path) -> Result<Vec<String>> {
     if let Some(names) = payload::partition_names(input)? {
         return Ok(names);
     }
+    if let Some(kind) = crate::oem::detect(input) {
+        return crate::oem::partition_names(kind, input);
+    }
     let names = Source::open(input)?.names()?;
     Ok(partitions_in(&names)
         .into_iter()
@@ -503,6 +506,9 @@ pub fn list_images(input: &Path, opts: &ExtractOptions) -> Result<Vec<(String, u
     if pac::is_pac(input) {
         return pac::list(input, opts);
     }
+    if let Some(kind) = crate::oem::detect(input) {
+        return crate::oem::list(kind, input, opts);
+    }
     let mut src = Source::open(input)?;
     let names = src.names()?;
     let (parts, raw) = select(&names, &opts.only)?;
@@ -582,6 +588,14 @@ pub(crate) fn extract_all_tracked(
     out_dir: &Path,
     opts: &ExtractOptions,
 ) -> Result<ExtractResult> {
+    if let Some(kind) = crate::oem::detect(input) {
+        let paths = crate::oem::extract(kind, input, out_dir, opts)?;
+        return Ok(ExtractResult {
+            done: paths.into_iter().map(|p| (p, String::new())).collect(),
+            ignored: Vec::new(),
+            unhandled: Vec::new(),
+        });
+    }
     let names = Source::open(input)?.names()?;
     let (parts, raw) = select(&names, &opts.only)?;
     // Determine which top-level inputs were skipped (not a partition, raw image, or
@@ -797,6 +811,8 @@ pub fn run(input: &Path, out_dir: &Path, opts: &ExtractOptions) -> Result<()> {
             "A/B OTA payload"
         } else if pac::is_pac(input) {
             "PAC"
+        } else if let Some(kind) = crate::oem::detect(input) {
+            kind.id()
         } else {
             "block OTA"
         };

@@ -163,6 +163,22 @@ pub fn sniff(head: &[u8]) -> Option<Identified> {
     if at0(&[0x28, 0xB5, 0x2F, 0xFD]) {
         return found("zstd", "zstd compressed data");
     }
+    // OEM full-firmware containers with a magic at offset 0 (the rest are by extension).
+    use crate::oem::Kind;
+    let oem = if at0(&crate::huawei::MAGIC) {
+        Some(Kind::HuaweiApp)
+    } else if at0(&crate::lgkdz::KDZ_MAGIC) || at0(&crate::lgkdz::KDZ_V1_MAGIC) {
+        Some(Kind::LgKdz)
+    } else if at0(&crate::lgkdz::DZ_MAGIC) {
+        Some(Kind::LgDz)
+    } else if at0(&crate::sonysin::MAGIC) {
+        Some(Kind::SonySin)
+    } else {
+        None
+    };
+    if let Some(kind) = oem {
+        return found(kind.id(), kind.description());
+    }
     if head.len() >= 262 && &head[257..262] == b"ustar" {
         return found("tar", "tar archive");
     }
@@ -237,6 +253,15 @@ pub fn identify_path(path: &Path) -> Result<Identified> {
             return Ok(Identified {
                 id: "pac",
                 description: "Spreadtrum/MediaTek .pac firmware container".into(),
+            });
+        }
+        // `.sin`, `.cpb` and `.nb0` have no usable magic: name them by extension.
+        if identified.id == "unknown"
+            && let Some(kind) = crate::oem::kind_by_extension(path)
+        {
+            return Ok(Identified {
+                id: kind.id(),
+                description: kind.description().into(),
             });
         }
         return Ok(identified);
