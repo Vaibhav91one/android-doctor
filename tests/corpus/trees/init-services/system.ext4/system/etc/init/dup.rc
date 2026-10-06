@@ -1,0 +1,2 @@
+service rootshell /system/bin/sh
+    user root

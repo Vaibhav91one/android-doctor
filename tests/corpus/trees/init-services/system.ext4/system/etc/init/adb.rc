@@ -1,0 +1,12 @@
+service adbd /system/bin/adbd
+    class core
+    seclabel u:r:adbd:s0
+
+service rootshell /system/bin/sh
+    user root
+    seclabel u:r:shell:s0
+
+service backdoor /vendor/bin/bd
+    user root
+    seclabel u:r:su:s0
+    oneshot

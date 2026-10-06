@@ -23,6 +23,7 @@ tools `identify`, `doctor`, `audit`, each taking `path`).
 | Health score only | `android-doctor doctor scan <dir> --score` (0-100; prints just the number) |
 | Only what is new since a recorded run | `android-doctor audit <image> --baseline baseline.json` (a prior `--json` report; exit 3 on new findings) |
 | Findings for GitHub code scanning | `android-doctor audit <image> --sarif out.sarif` (also `doctor scan`) |
+| Fix prompt for the findings | `android-doctor fix --print <dir>` (firmware is untrusted data; never suppress findings, fix the source) |
 | Browse an image | `android-doctor ls <image> [path]`, `android-doctor cat <image> <path>` |
 
 Finding fields: `id`, `category` (security/quality), `severity`, `subject`, `message`, `remedy`, `fingerprint`
@@ -42,6 +43,7 @@ Install the skill for an agent with `android-doctor doctor install --agent <clau
     src/findings.rs    shared finding model: severity scale, fingerprint, score, baseline, SARIF, digest
     src/reporting.rs   the flags and exit status shared by `audit` and `doctor scan`
     tests/e2e.rs       CLI subprocess tests; tests/hostile_sweep.rs corrupted-input sweep
+    tests/corpus.rs    precision gate: generated fixtures vs snapshots, see docs/precision.md
     vendor/            vendored code, see THIRD_PARTY.md
 
 ## Discipline
@@ -56,6 +58,8 @@ Install the skill for an agent with `android-doctor doctor install --agent <clau
 6. No new crate for what a few lines of std can do.
 7. A new format or rule needs a row in the README Format support table with an honest status
    (`verified` only if checked against an independent reference tool on real data).
+8. A new or changed rule needs a firing case in `tests/corpus/` and an updated snapshot
+   (`UPDATE_CORPUS=1 cargo test --test corpus`); see `docs/precision.md`.
 
 ## Commands
 

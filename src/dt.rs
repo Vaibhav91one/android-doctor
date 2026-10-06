@@ -310,7 +310,7 @@ fn node_to_json(node: &Node) -> Value {
 
 /// Render whatever this file is, chosen by its magic rather than its name.
 pub fn describe_file(path: &Path) -> Result<String> {
-    let data = read_file(path)?;
+    let (data, gzipped) = read_file(path)?;
     if is_fdt(&data) {
         return Ok(format!(
             "device tree\n\n{}",
@@ -323,36 +323,40 @@ pub fn describe_file(path: &Path) -> Result<String> {
             dtbo_to_text(&parse_dtbo(&data)?)
         ));
     }
-    Ok(describe_opaque(path, &data))
+    Ok(describe_opaque(path, &data, gzipped))
 }
 
 /// The same, as JSON.
 pub fn to_json(path: &Path) -> Result<Value> {
-    let data = read_file(path)?;
+    let (data, gzipped) = read_file(path)?;
     if is_fdt(&data) {
         return Ok(fdt_to_json(&parse_fdt(&data)?));
     }
     if data.len() >= 4 && data[..4] == [0xd7, 0xb7, 0xab, 0x1e] {
         return Ok(dtbo_to_json(&parse_dtbo(&data)?));
     }
-    Ok(opaque_json(path, &data))
+    Ok(opaque_json(path, &data, gzipped))
 }
 
 fn is_fdt(data: &[u8]) -> bool {
     data.len() >= 4 && data[..4] == [0xd0, 0x0d, 0xfe, 0xed]
 }
 
-fn read_file(path: &Path) -> Result<Vec<u8>> {
+/// The file's bytes, gunzipped when it is a gzip-wrapped image (#114), and whether it was.
+fn read_file(path: &Path) -> Result<(Vec<u8>, bool)> {
     crate::detect::refuse_blocking_file(path)?;
     let mut f = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut v = Vec::new();
     f.read_to_end(&mut v)?;
-    Ok(v)
+    crate::ramdisk::unwrap_gzip(v)
 }
 
 /// Shallow entropy and hex view for containers we do not parse (bootloader, logo).
-fn describe_opaque(path: &Path, data: &[u8]) -> String {
+fn describe_opaque(path: &Path, data: &[u8], gzipped: bool) -> String {
     let mut o = vec![format!("{} ({} bytes)", display_name(path), data.len())];
+    if gzipped {
+        o.push("gzip-compressed: size, bytes and entropy are of the decompressed content".into());
+    }
     o.push(format!(
         "first 32 bytes: {}",
         hex(data.get(..32).unwrap_or(&[]))
@@ -370,9 +374,10 @@ fn display_name(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-fn opaque_json(path: &Path, data: &[u8]) -> Value {
+fn opaque_json(path: &Path, data: &[u8], gzipped: bool) -> Value {
     json!({
         "path": display_name(path),
+        "gzip_compressed": gzipped,
         "size": data.len(),
         "first_bytes": hex(data.get(..32).unwrap_or(&[])),
         "entropy": crate::ramdisk::entropy(data),
@@ -637,6 +642,31 @@ mod tests {
         d[0..4].copy_from_slice(&[0xd7, 0xb7, 0xab, 0x1e]);
         d[16..20].copy_from_slice(&0xffffu32.to_be_bytes()); // absurd entry_count
         assert!(parse_dtbo(&d).is_err());
+    }
+
+    fn gzip(body: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        e.write_all(body).unwrap();
+        e.finish().unwrap()
+    }
+
+    #[test]
+    fn a_gzip_wrapped_image_is_described_by_what_it_holds() {
+        // An `AML_` multi-DT container is not parsed here; what matters is that the report is
+        // about the decompressed bytes and says so, not about the gzip stream (#114).
+        let mut inner = b"AML_".to_vec();
+        inner.extend(vec![0x5Au8; 4092]);
+        let d = crate::testutil::Scratch::new("dt-gz");
+        let f = d.join("dt.img");
+        std::fs::write(&f, gzip(&inner)).unwrap();
+        let text = describe_file(&f).unwrap();
+        assert!(text.contains("4096 bytes"), "{text}");
+        assert!(text.contains("gzip-compressed"), "{text}");
+        assert!(text.contains("41 4d 4c 5f"), "first bytes are AML_: {text}");
+        let j = to_json(&f).unwrap();
+        assert_eq!(j["gzip_compressed"], true);
+        assert_eq!(j["size"], 4096);
     }
 
     #[test]

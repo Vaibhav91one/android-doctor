@@ -1,0 +1,45 @@
+{
+  "audit": [],
+  "doctor": [
+    {
+      "id": "avb_signature",
+      "severity": "info",
+      "subject": "vbmeta.img"
+    },
+    {
+      "id": "debug_leftovers",
+      "severity": "info",
+      "subject": "system.img"
+    },
+    {
+      "id": "duplicate_properties",
+      "severity": "info",
+      "subject": "system.img"
+    },
+    {
+      "id": "init_service_hygiene",
+      "severity": "info",
+      "subject": "system.img"
+    },
+    {
+      "id": "mode_anomalies",
+      "severity": "info",
+      "subject": "system.img"
+    },
+    {
+      "id": "partition_coverage",
+      "severity": "warn",
+      "subject": "boot.img"
+    },
+    {
+      "id": "partition_coverage",
+      "severity": "warn",
+      "subject": "vendor.img"
+    },
+    {
+      "id": "selinux_label_gaps",
+      "severity": "info",
+      "subject": "system.img"
+    }
+  ]
+}

@@ -128,6 +128,8 @@ fn invocations(d: &Path) -> Vec<Vec<String>> {
             d.join("sp.img").display().to_string(),
         ],
         vec!["report".into(), ota.display().to_string()],
+        vec!["fix".into(), "--print".into(), ota.display().to_string()],
+        vec!["fix".into(), "--print".into(), img.display().to_string()],
     ]
 }
 
