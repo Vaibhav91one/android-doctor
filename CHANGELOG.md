@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-06
+
 ### Added
 
 - Corpus case `stb-recovery` (#126): a hand-built synthetic ext4 `vendor` tree that reproduces the shape of findings confirmed on a real Amlogic STB image (boot-started shell-domain services at medium, an on-demand one at info, a disabled `adbd`, a `jtag` marker), with no real firmware content. `file-capabilities` stays uncovered because an unprivileged `mke2fs -d` cannot set `security.capability`.
