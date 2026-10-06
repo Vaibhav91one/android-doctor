@@ -130,6 +130,9 @@ pub fn sniff(head: &[u8]) -> Option<Identified> {
     if at0(&[0xD7, 0xB7, 0xAB, 0x1E]) {
         return found("dtbo", "Android dtbo table");
     }
+    if at0(&[0xD0, 0x0D, 0xFE, 0xED]) {
+        return found("fdt", "device tree blob (FDT)");
+    }
     if at0(b"OPPOENCRYPT!") {
         return found("ozip", "Oppo ozip (encrypted zip)");
     }
