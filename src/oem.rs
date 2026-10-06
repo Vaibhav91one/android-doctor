@@ -370,6 +370,46 @@ pub(crate) mod tests {
         }
     }
 
+    /// `identify` names every OEM container, by magic where there is one and by extension where
+    /// there is not; a magic that says something else wins over the extension.
+    #[test]
+    fn identify_names_each_container() {
+        let d = Scratch::new("oem-identify");
+        let parts = fake_parts();
+        let raw = [("boot", expected("boot"))];
+        crate::huawei::build_for_test(&d.join("a.app"), &parts);
+        crate::lgkdz::build_kdz_for_test(&d.join("b.kdz"), &raw);
+        crate::lgkdz::build_dz_for_test(&d.join("c.dz"), &raw);
+        crate::sonysin::build_for_test(&d.join("d.sin"), &parts[0].1);
+        std::fs::write(d.join("e.cpb"), b"opaque").unwrap();
+        std::fs::write(d.join("f.NB0"), b"opaque").unwrap();
+        for (file, id) in [
+            ("a.app", "huawei-update-app"),
+            ("b.kdz", "lg-kdz"),
+            ("c.dz", "lg-dz"),
+            ("d.sin", "sony-sin"),
+            ("e.cpb", "coolpad-cpb"),
+            ("f.NB0", "nokia-nb0"),
+        ] {
+            let got = crate::detect::identify_path(&d.join(file)).unwrap();
+            assert_eq!(got.id, id, "{file}");
+            assert_eq!(Kind::from_id(id).unwrap().description(), got.description);
+        }
+        // a plain file with none of these names or magics stays unknown
+        std::fs::write(d.join("g.bin"), b"opaque").unwrap();
+        let unknown = crate::detect::identify_path(&d.join("g.bin")).unwrap();
+        assert_eq!(unknown.id, "unknown");
+        // a zip that merely carries an OEM extension is still a zip
+        let mut empty_zip = b"PK\x05\x06".to_vec();
+        empty_zip.extend_from_slice(&[0u8; 18]);
+        std::fs::write(d.join("h.sin"), empty_zip).unwrap();
+        assert_eq!(
+            crate::detect::identify_path(&d.join("h.sin")).unwrap().id,
+            "zip"
+        );
+        assert_eq!(detect(&d.join("h.sin")), None);
+    }
+
     /// Set `ANDROID_DOCTOR_WRITE_FIXTURES=<dir>` to leave the synthetic containers on disk for a
     /// manual `identify`/`extract` run; without it this test only checks they build.
     #[test]
