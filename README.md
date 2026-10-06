@@ -76,6 +76,22 @@ tar xzf android-doctor-aarch64-apple-darwin.tar.gz
 sudo mv android-doctor /usr/local/bin/
 ```
 
+Or run the container image, pinned per release (useful for analysing untrusted
+firmware in a locked-down sandbox - it never loop-mounts, so it needs no
+privileges):
+
+```sh
+docker run --rm \
+  --network none --read-only --cap-drop ALL \
+  -v "$PWD:/work:ro" -w /work \
+  ghcr.io/vaibhav91one/android-doctor:v0.2.1 identify ota.zip
+```
+
+The image is published to `ghcr.io/vaibhav91one/android-doctor:v<version>` by
+the release workflow; there is no mutable `:latest`, matching how the GitHub
+Action pins the binary. (Writing output needs a writable mount, e.g.
+`-v "$PWD/out:/out" ... extract ota.zip -o /out`.)
+
 ### 2. Identify and extract
 
 `identify` says what a file is by its magic bytes, never by its name:
