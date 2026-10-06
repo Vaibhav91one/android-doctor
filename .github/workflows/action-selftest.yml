@@ -1,0 +1,105 @@
+# Runs this repository's own action (action.yml, `uses: ./`) end to end against fixtures generated from
+# tests/corpus/trees. No release contains the action's flags yet, so the binary is built from this checkout
+# and handed over through the `binary` input instead of being downloaded.
+name: action-selftest
+
+on:
+  pull_request:
+    paths:
+      - action.yml
+      - scripts/**
+      - src/**
+      - Cargo.toml
+      - Cargo.lock
+      - build.rs
+      - vendor/**
+      - tests/corpus/trees/**
+      - .github/workflows/action-selftest.yml
+  push:
+    branches: [main]
+    paths:
+      - action.yml
+      - scripts/**
+      - src/**
+      - Cargo.toml
+      - Cargo.lock
+      - build.rs
+      - vendor/**
+      - tests/corpus/trees/**
+      - .github/workflows/action-selftest.yml
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - run: sudo apt-get update && sudo apt-get install -y e2fsprogs erofs-utils
+      - name: Generate the fixtures
+        run: |
+          scripts/corpus-fixture.sh clean "$RUNNER_TEMP/fw-clean"
+          scripts/corpus-fixture.sh debug-props "$RUNNER_TEMP/fw-debug"
+          target/release/android-doctor audit --json "$RUNNER_TEMP/fw-debug" > "$RUNNER_TEMP/baseline.json"
+
+      - name: Clean firmware passes
+        id: clean
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/fw-clean
+          binary: target/release/android-doctor
+          fail-on: error
+          upload-sarif: "false"
+      - name: Clean case assertions
+        run: |
+          test "${{ steps.clean.outcome }}" = success
+          test "${{ steps.clean.outputs.status }}" = 0
+          test -n "${{ steps.clean.outputs.score }}"
+          test -s "${{ steps.clean.outputs.sarif }}"
+
+      - name: Debug properties fail the gate
+        id: debug
+        uses: ./
+        continue-on-error: true
+        with:
+          path: ${{ runner.temp }}/fw-debug
+          command: audit
+          fail-on: high
+          binary: target/release/android-doctor
+          upload-sarif: "false"
+      - name: Debug case assertions
+        run: |
+          test "${{ steps.debug.outcome }}" = failure
+          test "${{ steps.debug.outputs.status }}" = 1
+          test -n "${{ steps.debug.outputs.score }}"
+
+      - name: The same findings against their own baseline pass
+        id: baseline
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/fw-debug
+          command: audit
+          fail-on: high
+          baseline: ${{ runner.temp }}/baseline.json
+          binary: target/release/android-doctor
+          upload-sarif: "false"
+      - name: Baseline case assertions
+        run: |
+          test "${{ steps.baseline.outcome }}" = success
+          test "${{ steps.baseline.outputs.status }}" = 0
+
+      - name: A local ref with no version never guesses one
+        id: noversion
+        uses: ./
+        continue-on-error: true
+        with:
+          path: ${{ runner.temp }}/fw-clean
+          upload-sarif: "false"
+      - name: No-version assertions
+        run: |
+          test "${{ steps.noversion.outcome }}" = failure
+          test "${{ steps.noversion.outputs.status }}" = 2

@@ -1,0 +1,92 @@
+name: android-doctor
+description: Scan Android firmware images in CI, fail on findings (or only new ones against a baseline) and upload SARIF to code scanning.
+author: Vaibhav91one
+branding:
+  icon: shield
+  color: gray-dark
+
+inputs:
+  path:
+    description: Firmware directory (doctor scan) or image files / directory (audit) to scan, space separated.
+    required: true
+  version:
+    description: >-
+      android-doctor release to install (for example 0.2.0). Empty means this action's own version:
+      a pinned `uses: Vaibhav91one/android-doctor@vX.Y.Z` installs release vX.Y.Z. A branch or sha
+      ref has no version, so it must set this input; `latest` is never assumed.
+    default: ""
+  command:
+    description: The scan to run, `doctor scan` or `audit`.
+    default: doctor scan
+  fail-on:
+    description: Minimum severity that fails the job (error, high, medium, warn, none). With a baseline only new findings count.
+    default: error
+  baseline:
+    description: Optional path to a committed `--json` report. When set, only findings that are not in it gate (exit 3).
+    default: ""
+  upload-sarif:
+    description: Upload the SARIF report to GitHub code scanning (needs the security-events write permission; skipped with a notice when the token lacks it).
+    default: "true"
+  args:
+    description: Extra android-doctor flags, space separated.
+    default: ""
+  binary:
+    description: Path to an already-built android-doctor binary. Skips the download (air-gapped CI, or testing an unreleased build).
+    default: ""
+
+outputs:
+  score:
+    description: The 0-100 health score of the scan.
+    value: ${{ steps.scan.outputs.score }}
+  status:
+    description: The gating exit status (0 passed, 1 findings at or above fail-on, 3 the same against a baseline, other = the tool failed).
+    value: ${{ steps.scan.outputs.status }}
+  sarif:
+    description: Path of the SARIF report written by the scan.
+    value: ${{ steps.scan.outputs.sarif }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install and scan
+      id: scan
+      shell: bash
+      env:
+        AD_PATH: ${{ inputs.path }}
+        AD_VERSION: ${{ inputs.version }}
+        AD_COMMAND: ${{ inputs.command }}
+        AD_FAIL_ON: ${{ inputs.fail-on }}
+        AD_BASELINE: ${{ inputs.baseline }}
+        AD_ARGS: ${{ inputs.args }}
+        AD_BINARY: ${{ inputs.binary }}
+        ACTION_REF: ${{ github.action_ref }}
+        AD_OUT: ${{ runner.temp }}/android-doctor-action
+      run: |
+        # Do not fail here: the SARIF upload below must run first. The Gate step re-exits this status.
+        set +e
+        "$GITHUB_ACTION_PATH/scripts/android-doctor-action.sh"
+        status=$?
+        # The script writes status itself once the scan ran; cover an early failure (bad input, install).
+        grep -q '^status=' "$GITHUB_OUTPUT" || echo "status=$status" >> "$GITHUB_OUTPUT"
+        exit 0
+
+    - name: Upload SARIF to code scanning
+      id: upload
+      if: ${{ always() && inputs.upload-sarif == 'true' && steps.scan.outputs.sarif != '' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) }}
+      uses: github/codeql-action/upload-sarif@v3
+      continue-on-error: true # a token without security-events write (or no code scanning on a private repo) must not fail the job
+      with:
+        sarif_file: ${{ steps.scan.outputs.sarif }}
+        category: android-doctor
+
+    - name: Note a skipped SARIF upload
+      if: ${{ always() && inputs.upload-sarif == 'true' && (steps.upload.outcome == 'failure' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)) }}
+      shell: bash
+      run: |
+        echo "::notice::SARIF upload skipped or failed. Fork pull requests and tokens without 'security-events: write' cannot upload; the scan result and the gate are unaffected. Grant the permission or set upload-sarif to false."
+
+    - name: Gate
+      shell: bash
+      env:
+        AD_STATUS: ${{ steps.scan.outputs.status }}
+      run: exit "${AD_STATUS:-1}"
