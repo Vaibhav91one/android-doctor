@@ -109,7 +109,7 @@ pub fn install_project(agent: Agent, root: &std::path::Path) -> Result<Option<Pa
                         "{}{}{}",
                         &old[..b],
                         block,
-                        &old[e + BLOCK_END.len()..].trim_start_matches('\n')
+                        old[e + BLOCK_END.len()..].trim_start_matches('\n')
                     )
                 }
                 _ if old.is_empty() => block,
