@@ -137,6 +137,158 @@ pub struct Vbmeta {
     pub signature_verified: SignatureStatus,
     pub descriptors: Vec<Descriptor>,
     pub footer: Option<Footer>,
+    /// Set by `vbmeta --vbmeta <top-level>`: whether a top-level vbmeta covers this image.
+    pub coverage: Option<Coverage>,
+}
+
+/// Whether a top-level vbmeta covers a partition (`vbmeta <partition> --vbmeta <top-level>`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Coverage {
+    /// Covered and proven: the top-level signature verifies and the descriptor matches.
+    Verified { partition: String, how: String },
+    /// Covered by a descriptor whose check is not done here (hashtree, unknown hash).
+    Unchecked { partition: String, why: String },
+    /// A descriptor names this partition but the proof fails.
+    Failed { partition: String, why: String },
+    /// No descriptor in the top-level vbmeta names this partition.
+    NotCovered { tried: Vec<String> },
+}
+
+impl Coverage {
+    fn finding(&self) -> crate::audit::Finding {
+        use crate::audit::{Finding, Severity};
+        match self {
+            Coverage::Verified { partition, how } => Finding {
+                severity: Severity::Info,
+                rule: "avb-footer-covered",
+                detail: format!("{partition}: {how}"),
+            },
+            Coverage::Unchecked { partition, why } => Finding {
+                severity: Severity::Info,
+                rule: "avb-footer-covered",
+                detail: format!("{partition}: named by the top-level vbmeta, not proven: {why}"),
+            },
+            Coverage::Failed { partition, why } => Finding {
+                severity: Severity::High,
+                rule: "avb-footer-not-covered",
+                detail: format!("{partition}: {why}"),
+            },
+            Coverage::NotCovered { tried } => Finding {
+                severity: Severity::High,
+                rule: "avb-footer-not-covered",
+                detail: format!(
+                    "the top-level vbmeta has no descriptor for {}; nothing verifies this partition",
+                    tried.join(" / ")
+                ),
+            },
+        }
+    }
+}
+
+/// Names this partition may go by in a top-level vbmeta: those its own descriptors give, then
+/// the file name without `.img` and without an A/B slot suffix.
+fn partition_names(part: &Vbmeta, path: &Path) -> Vec<String> {
+    let mut names: Vec<String> = part
+        .descriptors
+        .iter()
+        .filter_map(|d| match d {
+            Descriptor::Hash(h) => Some(h.partition.clone()),
+            Descriptor::Hashtree(h) => Some(h.partition.clone()),
+            _ => None,
+        })
+        .collect();
+    if let Some(stem) = path.file_name().and_then(|n| n.to_str()) {
+        let stem = stem.strip_suffix(".img").unwrap_or(stem);
+        names.push(stem.to_string());
+        for slot in ["_a", "_b"] {
+            if let Some(base) = stem.strip_suffix(slot) {
+                names.push(base.to_string());
+            }
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    names.retain(|n| !n.is_empty() && seen.insert(n.clone()));
+    names
+}
+
+/// Check `part` (read from `path`) against the top-level vbmeta `top` (#123). The partition is
+/// only called covered when `top`'s own signature verifies AND its descriptor for the partition
+/// checks out against these bytes.
+pub fn check_coverage(top: &Vbmeta, part: &Vbmeta, path: &Path) -> Result<Coverage> {
+    let tried = partition_names(part, path);
+    let found = top.descriptors.iter().find_map(|d| {
+        let name = match d {
+            Descriptor::Hash(h) => &h.partition,
+            Descriptor::Hashtree(h) => &h.partition,
+            Descriptor::ChainPartition { partition, .. } => partition,
+            _ => return None,
+        };
+        tried.contains(name).then(|| (name.clone(), d))
+    });
+    let Some((partition, descriptor)) = found else {
+        return Ok(Coverage::NotCovered { tried });
+    };
+    if top.signature_verified != SignatureStatus::Valid {
+        return Ok(Coverage::Failed {
+            partition,
+            why: format!(
+                "the top-level vbmeta names it, but its own signature is {:?}, so the descriptor proves nothing",
+                top.signature_verified
+            ),
+        });
+    }
+    let key = top.public_key_sha256.as_deref().unwrap_or("?");
+    Ok(match descriptor {
+        Descriptor::Hash(h) => {
+            let check = match h.algorithm.as_str() {
+                "sha256" => hash_file::<Sha256>(path, h)?,
+                "sha512" => hash_file::<Sha512>(path, h)?,
+                other => Check::Unsupported(format!("hash algorithm {other:?}")),
+            };
+            match check {
+                Check::Ok => Coverage::Verified {
+                    partition,
+                    how: format!(
+                        "{} digest of the first {} bytes matches the top-level vbmeta, whose signature verifies with the key it embeds (sha256 {key}); compare that key with the device's trusted key",
+                        h.algorithm, h.image_size
+                    ),
+                },
+                Check::Unsupported(why) => Coverage::Unchecked { partition, why },
+                _ => Coverage::Failed {
+                    partition,
+                    why: "its bytes do not match the digest in the signed top-level vbmeta (modified or wrong image)".into(),
+                },
+            }
+        }
+        Descriptor::Hashtree(_) => Coverage::Unchecked {
+            partition,
+            why: "it is covered by a dm-verity hashtree descriptor, and the tree is not recomputed here".into(),
+        },
+        Descriptor::ChainPartition { public_key_sha256, .. } => {
+            if part.signature_verified != SignatureStatus::Valid {
+                Coverage::Failed {
+                    partition,
+                    why: format!(
+                        "the top-level vbmeta chains it to its own key, but this image's signature is {:?}",
+                        part.signature_verified
+                    ),
+                }
+            } else if part.public_key_sha256.as_deref() != Some(public_key_sha256.as_str()) {
+                Coverage::Failed {
+                    partition,
+                    why: "it is signed, but not with the key the top-level vbmeta chains to".into(),
+                }
+            } else {
+                Coverage::Verified {
+                    partition,
+                    how: format!(
+                        "chained: signed with the key the top-level vbmeta names (sha256 {public_key_sha256})"
+                    ),
+                }
+            }
+        }
+        _ => unreachable!("only hash, hashtree and chain descriptors are matched"),
+    })
 }
 
 fn hex(b: &[u8]) -> String {
@@ -567,6 +719,7 @@ pub fn parse(data: &[u8], external_key: Option<&RsaPublicKey>) -> Result<Vbmeta>
         signature_verified,
         descriptors,
         footer: None,
+        coverage: None,
     })
 }
 
@@ -824,7 +977,9 @@ impl Vbmeta {
             });
         }
         if self.signature_verified == SignatureStatus::Absent {
-            if self.footer.is_some() {
+            if self.footer.is_some() && self.coverage.is_some() {
+                // Judged against the top-level vbmeta below.
+            } else if self.footer.is_some() {
                 // A partition footer with Algorithm NONE is how AVB normally ships a partition:
                 // the signed top-level vbmeta carries its hash descriptor and the signature.
                 out.push(crate::audit::Finding {
@@ -848,6 +1003,9 @@ impl Vbmeta {
                 rule: "avb-unsupported-algorithm",
                 detail: format!("signature not checked (algorithm {} not supported)", n),
             });
+        }
+        if let Some(c) = &self.coverage {
+            out.push(c.finding());
         }
         out
     }
@@ -1983,6 +2141,104 @@ mod tests {
                 .map(|f| (&f.rule, &f.detail))
                 .collect::<Vec<_>>()
         );
+    }
+
+    /// Issue #123: `vbmeta <partition> --vbmeta <top-level>`. A footer is called covered only
+    /// when the top-level signature verifies and its descriptor matches these bytes; every
+    /// other outcome is high, except a hashtree descriptor, which is reported as not proven.
+    #[test]
+    fn a_partition_footer_is_judged_against_the_signed_top_level_vbmeta() {
+        use crate::audit::Severity;
+        let salt = [5u8; 16];
+        let digest = |data: &[u8]| {
+            let mut h = Sha256::new();
+            h.update(salt);
+            h.update(data);
+            h.finalize().to_vec()
+        };
+        // The partition: 4096 bytes of data, then its own unsigned vbmeta, then the footer.
+        let own = vbmeta(0, 0, &[hash_desc("vendor", 4096, &salt, &[0u8; 32])], &[]);
+        let part_bytes = partition_with_footer(&own);
+        let good = digest(&part_bytes[..4096]);
+        let (_g, part) = write_tmp("cov-part", &part_bytes);
+        let mut meta = read_input(&part, None).unwrap();
+
+        let key = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
+        let top_with = |descs: &[Vec<u8>]| parse(&vbmeta_signed(1, 0, descs, &key), None).unwrap();
+        fn judge(
+            meta: &mut Vbmeta,
+            top: &Vbmeta,
+            part: &Path,
+        ) -> Option<(&'static str, crate::audit::Severity)> {
+            meta.coverage = Some(check_coverage(top, meta, part).unwrap());
+            meta.findings()
+                .into_iter()
+                .find(|f| f.rule.starts_with("avb-footer"))
+                .map(|f| (f.rule, f.severity))
+        }
+
+        // Signed top-level, matching digest: covered, info, and the plain footer finding is gone.
+        let top = top_with(&[hash_desc("vendor", 4096, &salt, &good)]);
+        assert_eq!(top.signature_verified, SignatureStatus::Valid);
+        assert_eq!(
+            judge(&mut meta, &top, &part),
+            Some(("avb-footer-covered", Severity::Info))
+        );
+        assert!(matches!(meta.coverage, Some(Coverage::Verified { .. })));
+        assert!(
+            !meta
+                .findings()
+                .iter()
+                .any(|f| f.rule == "avb-unsigned-footer")
+        );
+
+        // Signed top-level, wrong digest: the partition was modified.
+        let top = top_with(&[hash_desc("vendor", 4096, &salt, &[9u8; 32])]);
+        assert_eq!(
+            judge(&mut meta, &top, &part),
+            Some(("avb-footer-not-covered", Severity::High))
+        );
+
+        // Signed top-level that names other partitions only.
+        let top = top_with(&[hash_desc("boot", 4096, &salt, &good)]);
+        assert_eq!(
+            judge(&mut meta, &top, &part),
+            Some(("avb-footer-not-covered", Severity::High))
+        );
+        assert!(matches!(meta.coverage, Some(Coverage::NotCovered { .. })));
+
+        // Unsigned top-level: its descriptor proves nothing, even when the digest matches.
+        let top = parse(
+            &vbmeta(0, 0, &[hash_desc("vendor", 4096, &salt, &good)], &[]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            judge(&mut meta, &top, &part),
+            Some(("avb-footer-not-covered", Severity::High))
+        );
+
+        // A hashtree descriptor is named but not recomputed: reported, not claimed.
+        let top = top_with(&[tree_desc("vendor")]);
+        assert_eq!(
+            judge(&mut meta, &top, &part),
+            Some(("avb-footer-covered", Severity::Info))
+        );
+        assert!(matches!(meta.coverage, Some(Coverage::Unchecked { .. })));
+    }
+
+    /// The partition name falls back to the file name, without `.img` and an A/B slot suffix.
+    #[test]
+    fn a_slot_suffixed_file_name_finds_its_descriptor() {
+        let d = crate::testutil::Scratch::new("avb-cov-slot");
+        let p = d.join("vendor_b.img");
+        std::fs::write(
+            &p,
+            partition_with_footer(&vbmeta(0, 0, &[prop("k", "v")], &[])),
+        )
+        .unwrap();
+        let meta = read_input(&p, None).unwrap();
+        assert_eq!(partition_names(&meta, &p), ["vendor_b", "vendor"]);
     }
 
     #[test]

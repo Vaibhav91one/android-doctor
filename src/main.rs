@@ -182,6 +182,9 @@ enum Command {
         /// Verify the RSA signature against this PEM-encoded public key (overrides the key embedded in the image)
         #[arg(short, long)]
         key: Option<PathBuf>,
+        /// Check this partition against the signed top-level vbmeta that should cover it
+        #[arg(long, value_name = "TOP_LEVEL")]
+        vbmeta: Option<PathBuf>,
     },
     /// List a boot image's ramdisk (or a ramdisk file), report its ADB properties, and with -o extract it
     Ramdisk {
@@ -603,7 +606,14 @@ fn main() -> anyhow::Result<()> {
             images,
             json,
             key,
-        } => vbmeta_command(&image, images.as_deref(), json, key.as_deref()),
+            vbmeta,
+        } => vbmeta_command(
+            &image,
+            images.as_deref(),
+            json,
+            key.as_deref(),
+            vbmeta.as_deref(),
+        ),
         Command::Files {
             image,
             output,
@@ -758,13 +768,20 @@ fn vbmeta_command(
     images: Option<&std::path::Path>,
     json: bool,
     key: Option<&std::path::Path>,
+    top_level: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     let external_key = if let Some(k) = key {
         Some(avb::read_key(k)?)
     } else {
         None
     };
-    let meta = avb::read_input(image, external_key.as_ref())?;
+    let mut meta = avb::read_input(image, external_key.as_ref())?;
+    if let Some(top) = top_level {
+        let top_meta = anyhow::Context::with_context(avb::read_input(top, None), || {
+            format!("reading the top-level vbmeta {}", top.display())
+        })?;
+        meta.coverage = Some(avb::check_coverage(&top_meta, &meta, image)?);
+    }
     let checks = match images {
         Some(dir) => avb::verify_images(&meta, dir)?,
         None => Vec::new(),
