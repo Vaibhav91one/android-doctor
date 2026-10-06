@@ -5,6 +5,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `audit` checks each APK's binary `AndroidManifest.xml` for insecure posture (#143): `apk-exported-provider` (high), `apk-exported-component` (medium), `apk-debuggable` (high), `apk-cleartext-traffic` (medium), `apk-shared-user-id` (medium), `apk-test-only` (medium) and `apk-allow-backup` (info), each with a remedy. Typed attribute values are read (not strings), matched by `android:` resource id; `exported` defaults follow targetSdk and are reported one level lower. `audit --json` APK entries gain `manifest` and `issues`. Validated on hand-encoded synthetic manifests only.
+
+### Fixed
+
+- A manifest chunk with a size smaller than its header no longer loops forever in the APK parser.
+
 ## [0.2.1] - 2026-10-06
 
 ### Fixed

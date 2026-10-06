@@ -588,6 +588,19 @@ fn findings(a: &ImageAudit) -> Vec<(Finding, (String, String))> {
             "",
         );
     }
+    // APK manifests: one finding per rule per APK, keyed by severity because the exported
+    // rules can fire at two levels in the same APK.
+    for info in a.apks.iter().filter_map(|x| x.info.as_ref()) {
+        for i in info.issues() {
+            add(
+                i.severity,
+                i.rule,
+                format!("{}: {}", info.path, i.detail),
+                &info.path,
+                i.severity.name(),
+            );
+        }
+    }
     f.sort_by_key(|x| x.0.severity);
     f
 }
@@ -677,12 +690,30 @@ fn apk_json(a: &ApkAudit) -> Value {
     let Some(info) = &a.info else {
         return json!({ "error": a.error });
     };
+    let m = &info.manifest;
     json!({
         "path": info.path,
         "package": info.package_name,
         "version_code": info.version_code,
         "version_name": info.version_name,
         "aosp_test_key": info.has_test_key(),
+        "manifest": {
+            "target_sdk": m.target_sdk,
+            "shared_user_id": m.shared_user_id,
+            "debuggable": m.debuggable,
+            "uses_cleartext_traffic": m.uses_cleartext_traffic,
+            "network_security_config": m.has_network_security_config,
+            "allow_backup": m.allow_backup,
+            "test_only": m.test_only,
+            "application_permission": m.app_permission,
+            "components": m.components.iter().map(|c| json!({
+                "kind": c.kind, "name": c.name, "exported": c.exported,
+                "guarded": c.guarded, "intent_filter": c.has_intent_filter,
+            })).collect::<Vec<Value>>(),
+        },
+        "issues": info.issues().iter().map(|i| json!({
+            "severity": i.severity.name(), "rule": i.rule, "detail": i.detail,
+        })).collect::<Vec<Value>>(),
         "signers": info.signers.iter().map(|s| json!({
             "scheme": s.scheme,
             "cert_sha256": s.cert_sha256,
@@ -769,8 +800,14 @@ pub fn to_text(audits: &[ImageAudit], no_color: bool) -> String {
                     } else {
                         ""
                     };
+                    let n = i.issues().len();
+                    let issues = if n > 0 {
+                        format!("  [{n} manifest issue(s)]")
+                    } else {
+                        String::new()
+                    };
                     format!(
-                        "{}  {}  {}{test_key}",
+                        "{}  {}  {}{test_key}{issues}",
                         i.path,
                         i.package_name,
                         i.signers.len()
@@ -1473,5 +1510,61 @@ service plain /system/bin/plain
         }
         assert_eq!(a.setuid[0].label, "u:object_r:system_file:s0");
         assert_eq!(a.entries.len(), 4);
+    }
+
+    #[test]
+    fn apk_manifest_issues_become_findings_json_and_remedies() {
+        let mut m = crate::apk::ManifestAttrs {
+            debuggable: Some(true),
+            allow_backup: Some(true),
+            shared_user_id: Some("android.uid.system".into()),
+            ..Default::default()
+        };
+        m.components.push(crate::apk::Component {
+            kind: "provider".into(),
+            name: ".P".into(),
+            exported: Some(true),
+            ..Default::default()
+        });
+        let info = crate::apk::ApkInfo {
+            path: "system/app/X/X.apk".into(),
+            manifest: m,
+            ..Default::default()
+        };
+        let a = ImageAudit {
+            name: "system".into(),
+            apks: vec![ApkAudit {
+                info: Some(info),
+                error: None,
+            }],
+            ..Default::default()
+        };
+        let fs = findings(&a);
+        let got: Vec<(&str, &str)> = fs
+            .iter()
+            .map(|(f, _)| (f.rule, f.severity.name()))
+            .collect();
+        for want in [
+            ("apk-exported-provider", "high"),
+            ("apk-debuggable", "high"),
+            ("apk-shared-user-id", "medium"),
+            ("apk-allow-backup", "info"),
+        ] {
+            assert!(got.contains(&want), "{want:?} missing from {got:?}");
+        }
+        assert!(
+            fs.iter()
+                .all(|(f, (subj, _))| !f.rule.starts_with("apk-") || subj == "system/app/X/X.apk")
+        );
+        for (f, _) in &fs {
+            assert!(
+                crate::findings::help(f.rule).is_some(),
+                "no help for {}",
+                f.rule
+            );
+        }
+        let j = apk_json(&a.apks[0]);
+        assert_eq!(j["manifest"]["debuggable"], true);
+        assert_eq!(j["issues"].as_array().unwrap().len(), 4);
     }
 }
