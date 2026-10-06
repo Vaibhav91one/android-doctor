@@ -351,13 +351,19 @@ fn is_archive_name(name: &str) -> bool {
         || name.ends_with(".ozip")
 }
 
-/// True when the head of a file is a tar, a tar wrapped in a compression we can undo, or a
-/// Samsung `.tar.md5` (whose body starts with the tar).
-fn is_tar_family(head: &[u8]) -> bool {
-    matches!(
-        crate::archive::kind_of(head),
-        Some(crate::archive::Kind::Tar) | Some(crate::archive::Kind::Compressed(_))
-    ) || head.windows(4).any(|w| w == b"ustar")
+/// True when `name` is a tar, a tar wrapped in a compression we can undo, or a Samsung
+/// `.tar.md5` (whose body starts with the tar). A compressed file only counts when what it
+/// decompresses to is a tar: a gzip `dt.img` is an image, not an archive (#114).
+fn is_tar_family(src: &mut Source, name: &str, head: &[u8]) -> bool {
+    use crate::archive::{Kind, compressed_holds_tar, kind_of};
+    let tar = match kind_of(head) {
+        Some(Kind::Tar) => true,
+        Some(Kind::Compressed(c)) => src
+            .open_file(name)
+            .is_ok_and(|r| compressed_holds_tar(c, r)),
+        _ => false,
+    };
+    tar || head.windows(4).any(|w| w == b"ustar")
 }
 
 /// Copy a file out of the OTA unchanged (`.part` + rename, like partition images).
@@ -661,7 +667,7 @@ pub(crate) fn extract_all_tracked(
             v.truncate(n);
             v
         };
-        if is_tar_family(&head) {
+        if is_tar_family(&mut src, name, &head) {
             // A JioSTB-style update keeps its partition images in a tar (optionally
             // .tar.md5 or wrapped in gzip/xz); unpack it instead of copying the blob.
             // Stage under the original name: the .md5 suffix is how the archive knows it
@@ -1260,6 +1266,66 @@ mod tests {
                 vec![0x22; 64]
             );
             assert!(!out.join("readme.txt").exists() && !out.join("dirnamed.img").exists());
+        }
+    }
+
+    /// Issue #114: a gzip-wrapped `dt.img` holds an Amlogic `AML_` container, not a tar. The
+    /// compression magic alone made `extract` treat it as a `.tar.gz`, hand the container to the
+    /// tar reader ("numeric field was not a number ... cksum for AML_"), and stop, so every
+    /// image sorted after it was never written. It is an image: copy it unchanged and go on. A
+    /// real gzip-compressed tar in the same update must still be unpacked.
+    #[test]
+    fn a_gzip_image_that_is_not_a_tar_is_copied_unchanged_and_the_run_continues() {
+        use flate2::{Compression, write::GzEncoder};
+        let gzip = |body: &[u8]| {
+            let mut e = GzEncoder::new(Vec::new(), Compression::default());
+            e.write_all(body).unwrap();
+            e.finish().unwrap()
+        };
+        let mut aml = b"AML_".to_vec();
+        aml.extend((0..2000u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8));
+        let dt = gzip(&aml);
+        assert_eq!(&dt[..2], [0x1F, 0x8B]);
+
+        let mut tar_bytes = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_size(4);
+        h.set_mode(0o644);
+        h.set_cksum();
+        tar_bytes
+            .append_data(&mut h, "inner.img", &b"DATA"[..])
+            .unwrap();
+        let tgz = gzip(&tar_bytes.into_inner().unwrap());
+
+        let (ota, out, work) = (
+            fresh_dir("gzimg-in"),
+            fresh_dir("gzimg-out"),
+            fresh_dir("gzimg-zip"),
+        );
+        let mut files = sample_files();
+        files.push(("boot.img", vec![0x11; 300]));
+        files.push(("dt.img", dt.clone()));
+        files.push(("logo.img", vec![0x44; 90]));
+        files.push(("recovery.img", vec![0x55; 90]));
+        files.push(("PAYLOAD.tar", tgz));
+        write_dir(&ota, &files);
+        let zip_path = work.join("ota.zip");
+        zip_of(&files, &zip_path);
+        for input in [ota.as_path(), zip_path.as_path()] {
+            let _ = std::fs::remove_dir_all(&out);
+            extract_all(input, &out, &ExtractOptions::default())
+                .unwrap_or_else(|e| panic!("one gzip image stopped the run: {e:#}"));
+            assert_eq!(std::fs::read(out.join("dt.img")).unwrap(), dt, "{input:?}");
+            assert_eq!(std::fs::read(out.join("logo.img")).unwrap(), vec![0x44; 90]);
+            assert_eq!(
+                std::fs::read(out.join("recovery.img")).unwrap(),
+                vec![0x55; 90]
+            );
+            assert_eq!(
+                std::fs::read(out.join("PAYLOAD/files/inner.img")).unwrap(),
+                b"DATA",
+                "a gzip-compressed tar is still unpacked"
+            );
         }
     }
 
