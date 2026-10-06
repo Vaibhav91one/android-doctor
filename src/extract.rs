@@ -701,6 +701,23 @@ pub(crate) fn extract_all_tracked(
             let _ = std::fs::remove_dir_all(&incoming);
             unpacked?;
             paths.push(target);
+        } else if head.starts_with(&[0x3A, 0xFF, 0x26, 0xED]) {
+            // A sparse partition image (system/vendor/product/... as flashed) expands to the
+            // real filesystem image, under the same name, before anything reads it.
+            let final_path = out_dir.join(name);
+            let tmp_path = out_dir.join(format!("{name}.part"));
+            let expanded = (|| -> Result<()> {
+                let reader = src.open_file(name)?;
+                let mut out = create_part(&tmp_path)?;
+                crate::sparse::unsparse(vec![reader], &mut out)?;
+                Ok(())
+            })();
+            if let Err(e) = expanded {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(e.context(format!("unsparsing {name}")));
+            }
+            std::fs::rename(&tmp_path, &final_path)?;
+            paths.push(final_path);
         } else if head.len() >= 4100 && head[4096..4100] == *b"gDla" {
             // super.img holds dynamic partitions: split it into <partition>.img files.
             let bytes = {
@@ -1423,6 +1440,131 @@ mod tests {
             std::fs::read(out.join("PAYLOAD/files/inner.img")).unwrap(),
             b"DATA"
         );
+    }
+
+    /// Issue #127: the coverage guarantee. An OTA holding one of every standard Android
+    /// partition image must extract with no error - the known containers resolved, the rest
+    /// copied raw - and `identify` must name each type. This is the regression net behind
+    /// "works on any Android firmware".
+    #[test]
+    fn every_standard_partition_image_is_identified_and_extracted() {
+        // A 4096-byte block carrying an ext4 superblock magic, wrapped in a one-chunk sparse
+        // image the way system/vendor are flashed.
+        let mut ext4_block = vec![0u8; 4096];
+        ext4_block[1024 + 0x38..1024 + 0x3A].copy_from_slice(&0xEF53u16.to_le_bytes());
+        ext4_block[1024 + 0x60..1024 + 0x64].copy_from_slice(&0x40u32.to_le_bytes()); // INCOMPAT_EXTENTS
+        let sparse_system = {
+            let mut s = Vec::new();
+            s.extend(0xED26_FF3Au32.to_le_bytes()); // magic
+            s.extend(1u16.to_le_bytes()); // major
+            s.extend(0u16.to_le_bytes()); // minor
+            s.extend(28u16.to_le_bytes()); // file hdr size
+            s.extend(12u16.to_le_bytes()); // chunk hdr size
+            s.extend(4096u32.to_le_bytes()); // blk_sz
+            s.extend(1u32.to_le_bytes()); // total_blks
+            s.extend(1u32.to_le_bytes()); // total_chunks
+            s.extend(0u32.to_le_bytes()); // checksum (unused)
+            s.extend(0xCAC1u16.to_le_bytes()); // RAW
+            s.extend(0u16.to_le_bytes());
+            s.extend(1u32.to_le_bytes()); // one block
+            s.extend((12 + ext4_block.len() as u32).to_le_bytes());
+            s.extend(&ext4_block);
+            s
+        };
+        let pad = |magic: &[u8]| {
+            let mut v = magic.to_vec();
+            v.resize(256, 0);
+            v
+        };
+        let erofs = {
+            let mut v = vec![0u8; 1128];
+            v[1024..1028].copy_from_slice(&0xE0F5_E1E2u32.to_le_bytes());
+            v
+        };
+        let ext4 = {
+            let mut v = vec![0u8; 1128];
+            v[1024 + 0x38..1024 + 0x3A].copy_from_slice(&0xEF53u16.to_le_bytes());
+            v[1024 + 0x60..1024 + 0x64].copy_from_slice(&0x40u32.to_le_bytes());
+            v
+        };
+        let super_img = crate::lp::tests::lp_image(&[("my_super_part", &[0x11u8; 512])]);
+
+        // name, bytes, expected identify id, whether extract transforms it (not a raw copy)
+        let fixtures: Vec<(&str, Vec<u8>, &str, bool)> = vec![
+            ("boot.img", pad(b"ANDROID!"), "boot-image", false),
+            ("recovery.img", pad(b"ANDROID!"), "boot-image", false),
+            ("init_boot.img", pad(b"ANDROID!"), "boot-image", false),
+            ("vendor_boot.img", pad(b"VNDRBOOT"), "vendor-boot", false),
+            ("dtbo.img", pad(&[0xD7, 0xB7, 0xAB, 0x1E]), "dtbo", false),
+            ("dt.img", pad(&[0xD0, 0x0D, 0xFE, 0xED]), "fdt", false), // FDT device tree
+            ("dt_aml.img", pad(b"@AML"), "aml-container", false),
+            ("vbmeta.img", pad(b"AVB0"), "avb-vbmeta", false),
+            ("vbmeta_system.img", pad(b"AVB0"), "avb-vbmeta", false),
+            ("product.img", ext4.clone(), "ext4", false),
+            ("odm.img", ext4.clone(), "ext4", false),
+            ("system_ext.img", ext4, "ext4", false),
+            ("vendor.img", erofs, "erofs", false),
+            ("system.img", sparse_system, "android-sparse", true), // sparse -> expanded
+            ("super.img", super_img, "lp-super", true),            // split into partitions
+        ];
+
+        let (ota, out, work) = (
+            fresh_dir("cov-in"),
+            fresh_dir("cov-out"),
+            fresh_dir("cov-zip"),
+        );
+        // A valid block OTA needs transfer-list partitions; the raw images sit alongside them.
+        let mut files = sample_files();
+        files.extend(fixtures.iter().map(|(n, b, _, _)| (*n, b.clone())));
+        write_dir(&ota, &files);
+
+        // identify names every partition image type, plus payload.bin on its own.
+        for (name, _, id, _) in &fixtures {
+            let got = crate::detect::identify_path(&ota.join(name)).unwrap();
+            assert_eq!(&got.id, id, "identify of {name}");
+        }
+        std::fs::write(ota.join("payload.bin.sample"), pad(b"CrAU")).unwrap();
+        assert_eq!(
+            crate::detect::identify_path(&ota.join("payload.bin.sample"))
+                .unwrap()
+                .id,
+            "payload-bin"
+        );
+        let _ = std::fs::remove_file(ota.join("payload.bin.sample"));
+
+        let zip_path = work.join("ota.zip");
+        zip_of(&files, &zip_path);
+        for input in [ota.as_path(), zip_path.as_path()] {
+            let _ = std::fs::remove_dir_all(&out);
+            extract_all(input, &out, &ExtractOptions::default())
+                .unwrap_or_else(|e| panic!("extract aborted on {input:?}: {e:#}"));
+            for (name, bytes, _, transformed) in &fixtures {
+                if *transformed {
+                    continue;
+                }
+                assert_eq!(
+                    &std::fs::read(out.join(name)).unwrap_or_else(|_| panic!("{name} missing")),
+                    bytes,
+                    "{name} from {input:?}"
+                );
+            }
+            // system.img was sparse: it comes out as the expanded 4096-byte image.
+            assert_eq!(
+                std::fs::read(out.join("system.img")).unwrap().len(),
+                4096,
+                "sparse system.img expands, from {input:?}"
+            );
+            assert_eq!(std::fs::read(out.join("system.img")).unwrap(), ext4_block);
+            // super.img was split, not copied.
+            assert!(
+                !out.join("super.img").exists(),
+                "super is split, from {input:?}"
+            );
+            assert_eq!(
+                std::fs::read(out.join("my_super_part.img")).unwrap(),
+                vec![0x11u8; 512]
+            );
+        }
     }
 
     #[test]
