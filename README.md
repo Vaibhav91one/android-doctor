@@ -438,7 +438,7 @@ wrote ./.github/workflows/android-doctor.yml
 $ android-doctor ci install --path out/firmware
 ./.github/workflows/android-doctor.yml already exists; use --force to replace it
 $ cat .github/workflows/android-doctor.yml
-# Written by `android-doctor ci install`. Pinned to android-doctor 0.2.0; re-run with --force to repin.
+# Written by `android-doctor ci install`. Pinned to android-doctor 0.2.1; re-run with --force to repin.
 name: android-doctor
 
 on:
@@ -455,9 +455,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Vaibhav91one/android-doctor@v0.2.0
+      - uses: Vaibhav91one/android-doctor@v0.2.1
         with:
-          version: 0.2.0
+          version: 0.2.1
           # The firmware directory to scan, relative to the repository root. Edit it to match your layout.
           path: 'out/firmware'
           command: doctor scan
