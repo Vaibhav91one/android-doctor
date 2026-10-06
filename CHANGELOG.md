@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-06
+
 ### Fixed
 
 - `extract` no longer overwrites the partition images it built from the update's transfer lists with 0-byte files when the update also ships a `super_empty.img`. That image is LP metadata only (every partition has no extents); since the LP parser was fixed in 0.2.0 it was being split into empty `system.img` / `vendor.img` / `product.img` / `odm.img`. Partitions with no data are no longer written, a metadata-only super image is kept as it is, and a super image that does carry data refuses (before writing anything) to replace an image the same run already produced.
