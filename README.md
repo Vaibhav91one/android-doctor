@@ -119,6 +119,21 @@ setuid/setgid files:
   4755 501:0 /system/xbin/su
 ```
 
+`audit` also judges how each APK in the image is signed, from the v1 (META-INF), v2 and v3
+signatures it already reads:
+
+| Rule | Severity | Fires when |
+| --- | --- | --- |
+| `apk-v1-only-signing` | medium | the APK has v1 signers and no v2/v3 signer (Janus-class tampering on older platforms) |
+| `apk-debug-signing-cert` | high on a production-looking build, medium when `ro.build.type` is `eng`/`userdebug` | a signer is the Android debug certificate (`CN=Android Debug`) or a known AOSP test/platform key |
+| `apk-cert-expired` | medium | a signing certificate's notAfter is before now |
+| `apk-cert-not-yet-valid` | medium | a signing certificate's notBefore is after now |
+
+Firmware has no trusted clock, so the two date rules compare against the clock of the machine
+running `audit` and say so in the finding ("expired 2021-01-01 (as of 2026-10-06, host clock)").
+Android does not enforce certificate expiry when installing, so treat these as a hygiene signal.
+`audit --json` adds `is_debug_cert`, `not_before` and `not_after` (Unix seconds) to each signer.
+
 ### 4. Health-scan a directory
 
 `doctor scan` runs the deterministic rule set over an unpacked firmware
@@ -205,6 +220,7 @@ android-doctor doctor scan fw --json
 | Privilege | `su` binaries, setuid/setgid files, file capabilities, world-writable files |
 | Boot chain | AVB flags, rollback index, chained vbmeta, unsigned images, RSA signature and partition hash checks |
 | Secrets and apps | Hardcoded credentials in file contents, APK package names and signing certificates |
+| APK signing posture | `apk-v1-only-signing`, `apk-debug-signing-cert`, `apk-cert-expired`, `apk-cert-not-yet-valid` |
 | Quality | Missing partitions, duplicate properties, SELinux label gaps, mode anomalies, init service hygiene, debug leftovers |
 | Staleness | Security patch level age from OTA metadata: `ok`, `stale` (over 90 days), `very stale` (over 365) |
 

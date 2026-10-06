@@ -5,6 +5,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `audit` APK signing-posture rules (#145): `apk-v1-only-signing` (medium), `apk-debug-signing-cert` (high on a production-looking build, medium on `eng`/`userdebug`; the Android debug cert or an AOSP test key), `apk-cert-expired` and `apk-cert-not-yet-valid` (medium). Certificate validity is read from the X.509 and judged against the host clock, since firmware has no trusted one; the finding says so. `--json` signers gain `is_debug_cert`, `not_before`, `not_after`.
+
+### Fixed
+
+- APK v2/v3 signers were never found in real APKs: the signing block was looked for before the EOCD instead of before the central directory, the magic constant was wrong, and the signer layout was misread. v2/v3 signers (and their certificate CN) are now parsed from real APKs.
+
 ## [0.2.1] - 2026-10-06
 
 ### Fixed
