@@ -7,8 +7,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
-- `audit` triages native ELF objects (`.so` files and executables) for missing exploit mitigations, checksec style (#144): `elf-no-pie` (high), `elf-exec-stack` (medium), `elf-no-relro` (medium), `elf-partial-relro` (warn), `elf-no-canary` (warn, heuristic) and `elf-no-fortify` (info, heuristic). A clean-room parser written from the public ELF format reads 32 and 64-bit, little and big-endian objects, never runs or loads them, and returns an error rather than panic on a truncated or hostile file. On by default and bounded (20,000 objects, 512 MiB, 64 MiB each); per-object results are under `elf` in `--json`.
+- `audit` APK signing-posture rules (#145): `apk-v1-only-signing` (medium), `apk-debug-signing-cert` (high on a production-looking build, medium on `eng`/`userdebug`; the Android debug cert or an AOSP test key), `apk-cert-expired` and `apk-cert-not-yet-valid` (medium). Certificate validity is read from the X.509 and judged against the host clock, since firmware has no trusted one; the finding says so. `--json` signers gain `is_debug_cert`, `not_before`, `not_after`.
 
+### Fixed
+
+- APK v2/v3 signers were never found in real APKs: the signing block was looked for before the EOCD instead of before the central directory, the magic constant was wrong, and the signer layout was misread. v2/v3 signers (and their certificate CN) are now parsed from real APKs.- `audit` triages native ELF objects (`.so` files and executables) for missing exploit mitigations, checksec style (#144): `elf-no-pie` (high), `elf-exec-stack` (medium), `elf-no-relro` (medium), `elf-partial-relro` (warn), `elf-no-canary` (warn, heuristic) and `elf-no-fortify` (info, heuristic). A clean-room parser written from the public ELF format reads 32 and 64-bit, little and big-endian objects, never runs or loads them, and returns an error rather than panic on a truncated or hostile file. On by default and bounded (20,000 objects, 512 MiB, 64 MiB each); per-object results are under `elf` in `--json`.
 ## [0.2.1] - 2026-10-06
 
 ### Fixed

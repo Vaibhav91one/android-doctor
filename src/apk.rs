@@ -33,6 +33,11 @@ pub struct Signer {
     pub subject_cn: Option<String>,
     /// Whether the cert subject matches a known AOSP public test key.
     pub is_aosp_test_key: bool,
+    /// Whether the cert subject is the Android SDK debug keystore ("CN=Android Debug").
+    pub is_debug_cert: bool,
+    /// Certificate validity window as Unix seconds (notBefore, notAfter), when it parsed.
+    pub not_before: Option<i64>,
+    pub not_after: Option<i64>,
 }
 
 /// The auditable contents of one APK.
@@ -49,6 +54,84 @@ impl ApkInfo {
     pub fn has_test_key(&self) -> bool {
         self.signers.iter().any(|s| s.is_aosp_test_key)
     }
+
+    /// Weak signing posture, as `(rule, detail)`. `now` is Unix seconds from the host clock
+    /// (firmware has no trusted clock), so certificate dates are judged against it.
+    pub fn posture(&self, now: i64) -> Vec<(&'static str, String)> {
+        let mut out = Vec::new();
+        let has = |v: &str| self.signers.iter().any(|s| s.scheme == v);
+        if has("v1") && !has("v2") && !has("v3") {
+            out.push((
+                "apk-v1-only-signing",
+                "signed with APK Signature Scheme v1 only (no v2/v3): exposed to Janus-class tampering on older platforms".to_string(),
+            ));
+        }
+        for s in &self.signers {
+            let cn = s.subject_cn.as_deref().unwrap_or("");
+            if s.is_debug_cert || s.is_aosp_test_key {
+                let what = if s.is_debug_cert {
+                    "the Android debug keystore certificate"
+                } else {
+                    "a known AOSP test/platform key"
+                };
+                out.push((
+                    "apk-debug-signing-cert",
+                    format!("signer (CN={cn}) is {what}"),
+                ));
+            }
+            if let Some(na) = s.not_after.filter(|&na| na < now) {
+                out.push((
+                    "apk-cert-expired",
+                    format!(
+                        "signer (CN={cn}) expired {} (as of {}, host clock; firmware has no trusted clock)",
+                        ymd(na),
+                        ymd(now)
+                    ),
+                ));
+            }
+            if let Some(nb) = s.not_before.filter(|&nb| nb > now) {
+                out.push((
+                    "apk-cert-not-yet-valid",
+                    format!(
+                        "signer (CN={cn}) is not valid before {} (as of {}, host clock)",
+                        ymd(nb),
+                        ymd(now)
+                    ),
+                ));
+            }
+        }
+        // The same cert usually signs both v1 and v2: report each finding once.
+        let mut seen = Vec::new();
+        out.retain(|p| {
+            let new = !seen.contains(p);
+            seen.push(p.clone());
+            new
+        });
+        out
+    }
+}
+
+/// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468
+}
+
+/// `YYYY-MM-DD` for Unix seconds (inverse of `days_from_civil`).
+pub fn ymd(secs: i64) -> String {
+    let z = secs.div_euclid(86400) + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 /// One APK audit result: the parsed info plus any error encountered.
@@ -316,6 +399,56 @@ impl<'a> Iterator for DerIter<'a> {
     }
 }
 
+/// Parse an X.509 Time (UTCTime 0x17 or GeneralizedTime 0x18, in Zulu) to Unix seconds.
+fn parse_time(d: &Der) -> Option<i64> {
+    let s = std::str::from_utf8(d.payload).ok()?;
+    let (year, rest) = match d.tag {
+        0x17 => {
+            let yy: i64 = s.get(0..2)?.parse().ok()?;
+            (if yy >= 50 { 1900 + yy } else { 2000 + yy }, s.get(2..)?)
+        }
+        0x18 => (s.get(0..4)?.parse().ok()?, s.get(4..)?),
+        _ => return None,
+    };
+    let num = |r: std::ops::Range<usize>| -> Option<i64> {
+        let t = rest.get(r)?;
+        t.bytes()
+            .all(|b| b.is_ascii_digit())
+            .then(|| t.parse().ok())?
+    };
+    let (mo, day, h, mi) = (num(0..2)?, num(2..4)?, num(4..6)?, num(6..8)?);
+    let sec = num(8..10).unwrap_or(0);
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&day) || h > 23 || mi > 59 || sec > 60 {
+        return None;
+    }
+    Some(days_from_civil(year, mo, day) * 86400 + h * 3600 + mi * 60 + sec)
+}
+
+/// Read (notBefore, notAfter) from a Certificate. Accepts the full DER Certificate (v2/v3) or
+/// just its body, the TBSCertificate + algorithm + signature items (the v1 path).
+fn cert_validity(cert: &[u8]) -> Option<(i64, i64)> {
+    let (first, _) = der_one(cert).ok()?;
+    let tbs = match DerIter::new(first.payload).next() {
+        Some(inner) if inner.tag == 0x30 => inner,
+        _ => first,
+    };
+    let mut f = DerIter::new(tbs.payload).peekable();
+    if f.peek()?.tag == 0xA0 {
+        f.next(); // [0] version
+    }
+    // serial, signature algorithm, issuer, then validity
+    let validity = f.nth(3)?;
+    let mut t = DerIter::new(validity.payload);
+    Some((parse_time(&t.next()?)?, parse_time(&t.next()?)?))
+}
+
+/// Debug flag and validity window for one certificate.
+fn cert_meta(cert: &[u8], cn: Option<&str>) -> (bool, Option<i64>, Option<i64>) {
+    let v = cert_validity(cert);
+    let debug = cn.is_some_and(|c| c.eq_ignore_ascii_case("Android Debug"));
+    (debug, v.map(|v| v.0), v.map(|v| v.1))
+}
+
 /// Extract the CN from an X.509 certificate.
 ///
 /// Walks the DER tree looking for the commonName attribute OID (2.5.4.3, encoded
@@ -380,8 +513,11 @@ fn find_cn(buf: &[u8], depth: usize) -> Option<String> {
 }
 
 /// Decode a DER length starting at `at`, returning (value, bytes consumed including tag-len).
+/// (CN, SHA-256 hex, certificate bytes) for one PKCS#7 certificate.
+type P7Cert = (String, Option<String>, Vec<u8>);
+
 /// Extract signer certificates from PKCS#7 SignedData.
-fn extract_pkcs7_certs(p7_der: &[u8]) -> Result<Vec<(String, Option<String>)>> {
+fn extract_pkcs7_certs(p7_der: &[u8]) -> Result<Vec<P7Cert>> {
     let ci = der_one(p7_der)?.0;
     ensure!((ci.tag & 0x1F) == 0x10, "pkcs7: not a SEQUENCE");
     let mut ci_fields = DerIter::new(ci.payload);
@@ -421,7 +557,7 @@ fn extract_pkcs7_certs(p7_der: &[u8]) -> Result<Vec<(String, Option<String>)>> {
                 .iter()
                 .map(|b| format!("{:02x}", b))
                 .collect::<String>();
-            result.push((cn.unwrap_or_default(), Some(digest)));
+            result.push((cn.unwrap_or_default(), Some(digest), cert_der.to_vec()));
         }
     }
     Ok(result)
@@ -472,12 +608,16 @@ pub fn audit_apk_bytes(path: &Path, bytes: &[u8]) -> ApkAudit {
             let Ok(certs) = extract_pkcs7_certs(&der) else {
                 continue;
             };
-            for (cn, sha) in certs {
+            for (cn, sha, cert) in certs {
+                let (is_debug_cert, not_before, not_after) = cert_meta(&cert, Some(&cn));
                 signers.push(Signer {
                     scheme: "v1",
                     cert_sha256: sha.unwrap_or_default(),
                     subject_cn: Some(cn.clone()),
                     is_aosp_test_key: AOSP_TEST_KEY_SUBJECTS.iter().any(|t| cn.contains(t)),
+                    is_debug_cert,
+                    not_before,
+                    not_after,
                 });
             }
         }
@@ -549,28 +689,34 @@ fn signing_block(bytes: &[u8]) -> Option<Vec<(u32, &[u8])>> {
     if bytes.len() < EOCD_MIN_SIZE + 2 * 8 + MAGIC_LEN {
         return None;
     }
-    // The block size is the uint64 immediately before the 16-byte footer magic, which in
-    // turn sits immediately before the EOCD signature.
-    let footer = bytes.len().checked_sub(EOCD_MIN_SIZE)?;
-    if le32(bytes, footer).ok()? != EOCD_SIG {
+    // The block sits immediately before the zip central directory (not before the EOCD):
+    //   entries | size | pairs | size | magic | central directory | EOCD
+    // The EOCD can carry a trailing comment, so find it by scanning back from the end.
+    let tail = bytes.len().saturating_sub(EOCD_MIN_SIZE + 0xFFFF);
+    let eocd = (tail..=bytes.len() - EOCD_MIN_SIZE)
+        .rev()
+        .find(|&i| le32(bytes, i).ok() == Some(EOCD_SIG))?;
+    let cd_off = le32(bytes, eocd + 16).ok()? as usize;
+    if cd_off > eocd {
         return None;
     }
-    let magic_at = footer.checked_sub(MAGIC_LEN)?;
+    let magic_at = cd_off.checked_sub(MAGIC_LEN)?;
     if bytes[magic_at..magic_at + MAGIC_LEN] != MAGIC {
         return None;
     }
     let size_at = magic_at.checked_sub(8)?;
+    // The block size counts the pairs plus the trailing size field and magic (24 bytes).
     let block_size = le64(bytes, size_at).ok()? as usize;
-    if block_size < 8 || block_size > bytes.len() {
+    if block_size < 24 {
         return None;
     }
-    let block_start = size_at.checked_sub(block_size)?;
+    let block_start = size_at.checked_sub(block_size - 24)?.checked_sub(8)?;
     let mut out = Vec::new();
     let mut at = block_start + 8; // skip the leading size field
     let end = size_at;
     while at + 12 <= end {
         let len = le64(bytes, at).ok()? as usize;
-        if len < 4 || at + 8 + len > end {
+        if len < 4 || at.checked_add(8 + len).is_none_or(|e| e > end) {
             break;
         }
         let id = le32(bytes, at + 8).ok()?;
@@ -582,57 +728,57 @@ fn signing_block(bytes: &[u8]) -> Option<Vec<(u32, &[u8])>> {
     Some(out)
 }
 
-/// Extract signers from one v2/v3 block value (a length-prefixed signer sequence).
+/// Extract signers from one v2/v3 block value: a length-prefixed sequence of length-prefixed
+/// signers.
 fn signers_in_block(value: &[u8]) -> Vec<Signer> {
     let mut out = Vec::new();
-    let mut at = 0usize;
-    while at + 4 <= value.len() {
-        let len = le32(value, at).unwrap_or(0) as usize;
-        if len == 0 || at + 4 + len > value.len() {
-            break;
-        }
-        let signer = &value[at + 4..at + 4 + len];
-        if let Some(s) = signer_from(signer) {
-            out.push(s);
-        }
-        at += 4 + len;
+    let Some(seq) = lp(value, &mut 0) else {
+        return out;
+    };
+    let mut at = 0;
+    while let Some(signer) = lp(seq, &mut at) {
+        out.extend(signer_from(signer));
     }
     out
 }
 
-/// One signer: signed-data digest, signatures, public key, certificate (AOSP).
+/// A uint32-length-prefixed field at `*at`, advancing past it.
+fn lp<'a>(data: &'a [u8], at: &mut usize) -> Option<&'a [u8]> {
+    let len = le32(data, *at).ok()? as usize;
+    let end = (*at).checked_add(4)?.checked_add(len)?;
+    let out = data.get(*at + 4..end)?;
+    *at = end;
+    Some(out)
+}
+
+/// One v2/v3 signer: `signed data | signatures | public key`, each length-prefixed. The signed
+/// data holds `digests | certificates | ...`, and the first certificate is the signer's own.
 fn signer_from(signer: &[u8]) -> Option<Signer> {
-    let mut at = 0usize;
-    let mut certs: Option<Vec<u8>> = None;
-    while at + 12 <= signer.len() {
-        let len = le32(signer, at).ok()? as usize;
-        let id = le32(signer, at + 4).ok()?;
-        if len < 4 || at + 8 + len > signer.len() {
-            break;
-        }
-        // 0x100001 == X.509 certificate (AOSP apk_signature_scheme.h).
-        if id == 0x0001_0001 && certs.is_none() {
-            certs = Some(signer[at + 8..at + 8 + len].to_vec());
-        }
-        at += 8 + len;
-    }
-    let der = certs?;
-    let sha = Sha256::digest(&der);
-    let cn = extract_cn_from_cert(&der);
+    let signed = lp(signer, &mut 0)?;
+    let mut at = 0;
+    lp(signed, &mut at)?; // digests
+    let certs = lp(signed, &mut at)?;
+    let der = lp(certs, &mut 0)?;
+    let cn = extract_cn_from_cert(der);
+    let (is_debug_cert, not_before, not_after) = cert_meta(der, cn.as_deref());
     Some(Signer {
         scheme: "v2",
-        cert_sha256: sha.iter().map(|b| format!("{b:02x}")).collect(),
+        cert_sha256: Sha256::digest(der)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect(),
         is_aosp_test_key: cn
             .as_deref()
             .is_some_and(|c| AOSP_TEST_KEY_SUBJECTS.iter().any(|t| c.contains(t))),
         subject_cn: cn,
+        is_debug_cert,
+        not_before,
+        not_after,
     })
 }
 
 /// The 16-byte APK Signing Block magic (AOSP, Apache-2.0).
-const MAGIC: [u8; 16] = [
-    b'a', b'p', b'k', b' ', b'S', b'i', b'g', b' ', b'B', b'l', b'o', b'c', b'k', 0xdb, 0, 0,
-];
+const MAGIC: [u8; 16] = *b"APK Sig Block 42";
 const MAGIC_LEN: usize = 16;
 
 #[cfg(test)]
@@ -685,5 +831,221 @@ mod tests {
             info.signers.is_empty(),
             "garbage DER must not become a signer"
         );
+    }
+
+    // --- signing posture fixtures: synthetic APKs, DER certs and signing blocks built here ---
+
+    const NOW: i64 = 1_800_000_000; // 2027-01-15
+
+    fn der(tag: u8, body: &[u8]) -> Vec<u8> {
+        let mut v = vec![tag];
+        match body.len() {
+            n if n < 128 => v.push(n as u8),
+            n => v.extend([0x82, (n >> 8) as u8, n as u8]),
+        }
+        v.extend(body);
+        v
+    }
+
+    /// A DER X.509 Certificate with the given CN and UTCTime validity ("YYMMDDHHMMSSZ").
+    fn cert(cn: &str, nb: &str, na: &str) -> Vec<u8> {
+        let name = der(
+            0x30,
+            &der(
+                0x31,
+                &der(
+                    0x30,
+                    &[der(0x06, &[0x55, 0x04, 0x03]), der(0x0C, cn.as_bytes())].concat(),
+                ),
+            ),
+        );
+        let alg = der(0x30, &der(0x06, &[0x2A, 0x03]));
+        let tbs = der(
+            0x30,
+            &[
+                der(0xA0, &der(0x02, &[2])),
+                der(0x02, &[1]),
+                alg.clone(),
+                name.clone(),
+                der(
+                    0x30,
+                    &[der(0x17, nb.as_bytes()), der(0x17, na.as_bytes())].concat(),
+                ),
+                name,
+                der(0x30, &[]),
+            ]
+            .concat(),
+        );
+        der(0x30, &[tbs, alg, der(0x03, &[0, 0])].concat())
+    }
+
+    /// PKCS#7 SignedData carrying `cert` (the shape `extract_pkcs7_certs` walks).
+    fn pkcs7(cert: &[u8]) -> Vec<u8> {
+        let sd = der(
+            0x30,
+            &[
+                der(0x02, &[1]),
+                der(0x31, &[]),
+                der(0x30, &der(0x06, &[0x2A])),
+                der(0xA0, cert),
+            ]
+            .concat(),
+        );
+        der(0x30, &[der(0x06, &[0x2A]), der(0xA0, &sd)].concat())
+    }
+
+    fn lp32(b: &[u8]) -> Vec<u8> {
+        [&(b.len() as u32).to_le_bytes()[..], b].concat()
+    }
+
+    /// An APK zip. `v1` adds a META-INF/CERT.RSA; `v2` inserts a v2 signing block before the
+    /// central directory, as a real signer does.
+    fn signed_apk(v1: Option<&[u8]>, v2: Option<&[u8]>) -> Vec<u8> {
+        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let opt = zip::write::SimpleFileOptions::default();
+        w.start_file("AndroidManifest.xml", opt).unwrap();
+        w.write_all(b"x").unwrap();
+        if let Some(c) = v1 {
+            w.start_file("META-INF/CERT.RSA", opt).unwrap();
+            w.write_all(&pkcs7(c)).unwrap();
+        }
+        let mut z = w.finish().unwrap().into_inner();
+        let Some(c) = v2 else { return z };
+        let signed = [lp32(&[]), lp32(&lp32(c)), lp32(&[])].concat();
+        let signer = [lp32(&signed), lp32(&[]), lp32(&[])].concat();
+        let value = lp32(&lp32(&signer));
+        let pair = [
+            &(4 + value.len() as u64).to_le_bytes()[..],
+            &V2_BLOCK_ID.to_le_bytes(),
+            &value,
+        ]
+        .concat();
+        let size = (pair.len() + 24) as u64;
+        let block = [&size.to_le_bytes()[..], &pair, &size.to_le_bytes(), &MAGIC].concat();
+        let eocd = z.len() - EOCD_MIN_SIZE;
+        let cd = u32::from_le_bytes(z[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
+        z.splice(cd..cd, block.iter().copied());
+        let eocd = z.len() - EOCD_MIN_SIZE;
+        z[eocd + 16..eocd + 20].copy_from_slice(&((cd + block.len()) as u32).to_le_bytes());
+        z
+    }
+
+    fn rules_for(bytes: &[u8]) -> Vec<&'static str> {
+        let a = audit_apk_bytes(Path::new("/system/app/X.apk"), bytes);
+        assert!(a.error.is_none(), "{:?}", a.error);
+        a.info.unwrap().posture(NOW).iter().map(|p| p.0).collect()
+    }
+
+    const OK_NB: &str = "200101000000Z";
+    const OK_NA: &str = "400101000000Z";
+
+    #[test]
+    fn a_v1_only_apk_is_flagged() {
+        let c = cert("Acme Release", OK_NB, OK_NA);
+        assert_eq!(
+            rules_for(&signed_apk(Some(&c), None)),
+            ["apk-v1-only-signing"]
+        );
+    }
+
+    #[test]
+    fn a_v2_signed_apk_is_not_v1_only_and_a_clean_one_has_no_findings() {
+        let c = cert("Acme Release", OK_NB, OK_NA);
+        // v2 alone, and v1+v2 (the usual shape), are both fine.
+        assert!(rules_for(&signed_apk(None, Some(&c))).is_empty());
+        assert!(rules_for(&signed_apk(Some(&c), Some(&c))).is_empty());
+        let info = audit_apk_bytes(Path::new("/x.apk"), &signed_apk(None, Some(&c)))
+            .info
+            .unwrap();
+        assert_eq!(info.signers.len(), 1);
+        assert_eq!(info.signers[0].scheme, "v2");
+        assert_eq!(info.signers[0].subject_cn.as_deref(), Some("Acme Release"));
+    }
+
+    #[test]
+    fn the_android_debug_cert_is_flagged_for_both_schemes() {
+        let c = cert("Android Debug", OK_NB, OK_NA);
+        assert_eq!(
+            rules_for(&signed_apk(None, Some(&c))),
+            ["apk-debug-signing-cert"]
+        );
+        assert_eq!(
+            rules_for(&signed_apk(Some(&c), None)),
+            ["apk-v1-only-signing", "apk-debug-signing-cert"]
+        );
+        let info = audit_apk_bytes(Path::new("/x.apk"), &signed_apk(None, Some(&c)))
+            .info
+            .unwrap();
+        assert!(info.signers[0].is_debug_cert);
+    }
+
+    #[test]
+    fn an_aosp_test_key_is_flagged_as_a_weak_signing_cert() {
+        let c = cert("testkey", OK_NB, OK_NA);
+        assert_eq!(
+            rules_for(&signed_apk(None, Some(&c))),
+            ["apk-debug-signing-cert"]
+        );
+    }
+
+    #[test]
+    fn an_expired_certificate_is_flagged_against_the_given_clock() {
+        let c = cert("Acme Release", OK_NB, "210101000000Z");
+        let apk = signed_apk(None, Some(&c));
+        assert_eq!(rules_for(&apk), ["apk-cert-expired"]);
+        let info = audit_apk_bytes(Path::new("/x.apk"), &apk).info.unwrap();
+        let detail = &info.posture(NOW)[0].1;
+        assert!(detail.contains("expired 2021-01-01"), "{detail}");
+        assert!(detail.contains("as of 2027-01-15"), "{detail}");
+        assert!(detail.contains("no trusted clock"), "{detail}");
+        // Before expiry the same APK is clean.
+        assert!(info.posture(1_600_000_000).is_empty());
+    }
+
+    #[test]
+    fn a_certificate_not_yet_valid_is_flagged() {
+        let c = cert("Acme Release", "490101000000Z", "491231000000Z");
+        assert_eq!(
+            rules_for(&signed_apk(None, Some(&c))),
+            ["apk-cert-not-yet-valid"]
+        );
+    }
+
+    #[test]
+    fn validity_times_parse_both_encodings_and_reject_junk() {
+        let t = |tag: u8, s: &str| {
+            parse_time(&Der {
+                tag,
+                payload: s.as_bytes(),
+            })
+        };
+        assert_eq!(t(0x17, "210101000000Z"), Some(1_609_459_200));
+        assert_eq!(t(0x17, "2101010000Z"), Some(1_609_459_200)); // no seconds
+        assert_eq!(t(0x18, "20210101000000Z"), Some(1_609_459_200));
+        assert_eq!(t(0x17, "500101000000Z"), Some(-631_152_000)); // YY>=50 -> 19YY
+        assert_eq!(t(0x17, "21ab01000000Z"), None);
+        assert_eq!(t(0x17, "211301000000Z"), None);
+        assert_eq!(t(0x17, "2"), None);
+        assert_eq!(ymd(1_609_459_200), "2021-01-01");
+        assert_eq!(ymd(0), "1970-01-01");
+    }
+
+    #[test]
+    fn a_truncated_or_corrupt_signing_block_never_panics() {
+        let c = cert("Acme Release", OK_NB, OK_NA);
+        let apk = signed_apk(Some(&c), Some(&c));
+        for n in (0..apk.len()).step_by(3) {
+            if let Some(i) = audit_apk_bytes(Path::new("/x.apk"), &apk[..n]).info {
+                let _ = i.posture(NOW);
+            }
+        }
+        // Flip every byte in turn: still no panic.
+        for i in 0..apk.len() {
+            let mut b = apk.clone();
+            b[i] ^= 0xFF;
+            if let Some(info) = audit_apk_bytes(Path::new("/x.apk"), &b).info {
+                let _ = info.posture(NOW);
+            }
+        }
     }
 }

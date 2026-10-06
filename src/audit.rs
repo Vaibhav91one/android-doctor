@@ -591,8 +591,29 @@ fn findings(a: &ImageAudit) -> Vec<(Finding, (String, String))> {
             "",
         );
     }
-    f.extend(crate::elf::findings(&a.elf));
-    f.sort_by_key(|x| x.0.severity);
+    // APK signing posture. Dates are judged against the host clock: firmware has no trusted one.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    let debug_build = prop_values(a, "ro.build.type")
+        .iter()
+        .any(|p| p.value == "userdebug" || p.value == "eng");
+    for info in a.apks.iter().filter_map(|x| x.info.as_ref()) {
+        for (rule, detail) in info.posture(now) {
+            let sev = match rule {
+                // A debug/test key is expected on a debug build, a defect on a production one.
+                "apk-debug-signing-cert" if !debug_build => Severity::High,
+                _ => Severity::Medium,
+            };
+            add(
+                sev,
+                rule,
+                format!("{}: {detail}", info.path),
+                &info.path,
+                rule,
+            );
+        }
+    }    f.extend(crate::elf::findings(&a.elf));    f.sort_by_key(|x| x.0.severity);
     f
 }
 
@@ -692,6 +713,9 @@ fn apk_json(a: &ApkAudit) -> Value {
             "cert_sha256": s.cert_sha256,
             "subject_cn": s.subject_cn,
             "is_aosp_test_key": s.is_aosp_test_key,
+            "is_debug_cert": s.is_debug_cert,
+            "not_before": s.not_before,
+            "not_after": s.not_after,
         })).collect::<Vec<Value>>(),
     })
 }
@@ -908,6 +932,64 @@ mod tests {
 
     fn rules(a: &ImageAudit) -> Vec<&'static str> {
         a.findings.iter().map(|f| f.rule).collect()
+    }
+
+    fn apk_with(scheme: &'static str, cn: &str, debug: bool, na: i64) -> ApkAudit {
+        ApkAudit {
+            info: Some(crate::apk::ApkInfo {
+                path: "/system/app/X.apk".into(),
+                signers: vec![crate::apk::Signer {
+                    scheme,
+                    cert_sha256: String::new(),
+                    subject_cn: Some(cn.into()),
+                    is_aosp_test_key: false,
+                    is_debug_cert: debug,
+                    not_before: Some(0),
+                    not_after: Some(na),
+                }],
+                ..Default::default()
+            }),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn apk_signing_posture_becomes_findings_with_build_aware_severity() {
+        let far = 4_000_000_000;
+        let mut a = ImageAudit {
+            apks: vec![apk_with("v1", "Android Debug", true, 1)],
+            ..Default::default()
+        };
+        let got: Vec<_> = findings(&a)
+            .into_iter()
+            .map(|(f, _)| (f.rule, f.severity))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("apk-debug-signing-cert", Severity::High),
+                ("apk-v1-only-signing", Severity::Medium),
+                ("apk-cert-expired", Severity::Medium),
+            ]
+        );
+        // The same debug cert on a userdebug build is expected, so only medium.
+        a.props.push(PropHit {
+            file: "build.prop".into(),
+            key: "ro.build.type".into(),
+            value: "userdebug".into(),
+        });
+        assert!(
+            findings(&a)
+                .iter()
+                .all(|(f, _)| f.severity == Severity::Medium || f.rule == "debug-build-type")
+        );
+        // A well-signed APK raises nothing.
+        a.apks = vec![apk_with("v2", "Acme", false, far)];
+        assert!(
+            findings(&a)
+                .iter()
+                .all(|(f, _)| f.rule == "debug-build-type")
+        );
     }
 
     #[test]
