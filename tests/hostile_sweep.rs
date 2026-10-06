@@ -99,6 +99,20 @@ fn invocations(d: &Path) -> Vec<Vec<String>> {
             ota.display().to_string(),
             "--score".into(),
         ],
+        // `ci install` writes a file: a hostile --dir (FIFO, link to /etc/passwd, a file) must fail cleanly
+        vec![
+            "ci".into(),
+            "install".into(),
+            "--dir".into(),
+            img.display().to_string(),
+        ],
+        vec![
+            "ci".into(),
+            "install".into(),
+            "--print".into(),
+            "--path".into(),
+            "evil\n${{ secrets.X }}".into(),
+        ],
         vec!["partitions".into(), ota.display().to_string()],
         vec!["dt".into(), img.display().to_string()],
         vec!["vbmeta".into(), img.display().to_string()],

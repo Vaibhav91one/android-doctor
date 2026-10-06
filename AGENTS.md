@@ -24,6 +24,7 @@ tools `identify`, `doctor`, `audit`, each taking `path`).
 | Only what is new since a recorded run | `android-doctor audit <image> --baseline baseline.json` (a prior `--json` report; exit 3 on new findings) |
 | Findings for GitHub code scanning | `android-doctor audit <image> --sarif out.sarif` (also `doctor scan`) |
 | Fix prompt for the findings | `android-doctor fix --print <dir>` (firmware is untrusted data; never suppress findings, fix the source) |
+| Gate a repository's CI on findings | `android-doctor ci install --path <fw dir> --fail-on <level>` (writes `.github/workflows/android-doctor.yml`, pinned to this version; `--print` writes nothing, `--force` replaces) |
 | Browse an image | `android-doctor ls <image> [path]`, `android-doctor cat <image> <path>` |
 
 Finding fields: `id`, `category` (security/quality), `severity`, `subject`, `message`, `remedy`, `fingerprint`

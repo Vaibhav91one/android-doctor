@@ -34,6 +34,7 @@ android-doctor doctor scan out/
 - [Get started](#get-started)
 - [What it catches](#what-it-catches)
 - [Reports for CI: SARIF, baseline, score](#reports-for-ci-sarif-baseline-score)
+- [GitHub Action](#github-action)
 - [Agent integration](#agent-integration)
 - [CLI reference](#cli-reference)
 - [Format support](#format-support)
@@ -367,6 +368,110 @@ Next steps: android-doctor doctor scan fw --json > baseline.json  |  android-doc
 For `audit` the digest replaces the per-image report on a terminal; pipe it (`| cat`) or use
 `--json` for the full inventory (properties, setuid files, APKs, services).
 
+## GitHub Action
+
+`action.yml` at the root of this repository is a composite action. It installs the release binary
+for the runner (Linux x86_64, macOS arm64 or x86_64; anything else fails with a clear message),
+runs the scan with `--sarif` and `--json`, writes a step summary (score, counts by severity, top
+findings, and with a baseline the suppressed/new split), uploads the SARIF to code scanning and
+fails the job according to `fail-on`.
+
+```yaml
+name: android-doctor
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write   # for the SARIF upload
+
+jobs:
+  android-doctor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Vaibhav91one/android-doctor@v0.2.0   # pin a release tag
+        with:
+          path: firmware            # a directory of images (doctor scan) or image files (audit)
+          command: doctor scan      # or: audit
+          fail-on: error
+          # baseline: baseline.json # a committed `--json` report: only NEW findings gate (exit 3)
+```
+
+| Input | Default | |
+| --- | --- | --- |
+| `path` | required | Firmware directory, or for `audit` image files, space separated |
+| `version` | the action's own version | The release to install. `@vX.Y.Z` installs `X.Y.Z`; a branch or sha ref has no version, so set this. `latest` is never assumed |
+| `command` | `doctor scan` | `doctor scan` or `audit` |
+| `fail-on` | `error` | Minimum severity that fails the job: `error`, `high`, `medium`, `warn`, `none`. Judged from the `--json` findings |
+| `baseline` | none | Committed `--json` report; only findings not in it count, and a failure exits `3` |
+| `upload-sarif` | `true` | Upload to code scanning. Needs `security-events: write`; skipped with a notice (never a failure) on fork pull requests or when the token lacks it |
+| `args` | none | Extra flags, space separated |
+| `binary` | none | Path to an already-built `android-doctor`; skips the download (air-gapped CI, unreleased builds) |
+
+Outputs: `score` (0-100), `status` (the gating exit code: `0`, `1` findings at or above `fail-on`,
+`3` the same against a baseline, any other value means the tool itself failed) and `sarif` (the
+report's path). The job exits with `status`. `audit` never fails on its own (see
+[Exit codes](#exit-codes)), so `fail-on` is what gates it; with `fail-on: error` an `audit` run
+cannot fail because `audit` has no `error` severity, use `high` there.
+
+The release assets carry no `.sha256` file yet, so the download is fetched over HTTPS from the
+release without a checksum check (the action says so in the log); if a `.sha256` is published
+next to the tarball the action verifies it. The action needs `bash`, `curl`, `tar` and `jq`, all
+on GitHub-hosted runners. Paths and `args` are split on spaces.
+
+**Availability.** The pinned ref `@v<version>` only resolves once the release that contains
+`action.yml` is tagged; the current `v0.1.0` release predates it (and the reporting flags the
+action relies on), so do not point a workflow at `@v0.1.0`. Until the next release the action is
+exercised by `.github/workflows/action-selftest.yml`, which builds the binary from the checkout
+and runs `uses: ./` with `binary:` over firmware generated from `tests/corpus/trees`.
+
+### `ci install`
+
+`android-doctor ci install` writes the workflow above for you, pinned to the version of the binary
+that wrote it (`uses: Vaibhav91one/android-doctor@v<version>` and `version: <version>`):
+
+```console
+$ cd my-firmware-repo
+$ android-doctor ci install --path out/firmware --fail-on high
+wrote ./.github/workflows/android-doctor.yml
+$ android-doctor ci install --path out/firmware
+./.github/workflows/android-doctor.yml already exists; use --force to replace it
+$ cat .github/workflows/android-doctor.yml
+# Written by `android-doctor ci install`. Pinned to android-doctor 0.1.0; re-run with --force to repin.
+name: android-doctor
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Uploads the SARIF report to code scanning; fork pull requests cannot, and the action skips the upload there.
+  security-events: write
+
+jobs:
+  android-doctor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Vaibhav91one/android-doctor@v0.1.0
+        with:
+          version: 0.1.0
+          # The firmware directory to scan, relative to the repository root. Edit it to match your layout.
+          path: 'out/firmware'
+          command: doctor scan
+          fail-on: high
+```
+
+Flags: `--dir DIR` (project root, default `.`), `--print` (show it, write nothing), `--force`
+(replace an existing file; without it the command exits `1`), `--path FIRMWARE_DIR` (default
+`firmware`, so a repository without that directory fails loudly rather than passing on nothing)
+and `--fail-on LEVEL` (default `error`). It creates `.github/workflows/`, and never writes through
+a symlink. The workflow it writes names the version of the binary that wrote it; as above, that
+ref resolves once a release containing the action is tagged.
+
 ## Agent integration
 
 Two ways to hand the tool to an AI coding agent.
@@ -418,6 +523,7 @@ Every subcommand takes `--help`. `--no-color` (or `NO_COLOR`) disables colour.
 | `hash-tree <image>` | Regenerate the dm-verity hash tree for a rebuilt partition |
 | `doctor scan <dir> [--json] [--sarif FILE] [--baseline FILE] [--score]` | Deterministic health scan |
 | `doctor install [--agent <name>] [--print-only]` | Install the agent skill |
+| `ci install [--dir DIR] [--print] [--force] [--path FIRMWARE_DIR] [--fail-on LEVEL]` | Write the pinned GitHub Actions workflow |
 | `mcp [--verbose]` | MCP server on stdio |
 
 ### What `extract` does
