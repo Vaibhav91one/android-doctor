@@ -226,3 +226,53 @@ fn extract_does_not_follow_a_symlink_out_of_its_output_directory() {
     );
     let _ = fs::remove_dir_all(&d);
 }
+
+/// The OEM firmware containers (Huawei UPDATE.APP, LG kdz/dz, Sony sin, Coolpad cpb, Nokia nb0)
+/// are driven with garbage that carries their magic or extension. Nothing may panic or hang.
+#[test]
+fn oem_firmware_containers_survive_garbage() {
+    let d = fixture("oem");
+    let mut cases: Vec<(String, Vec<u8>)> = Vec::new();
+    let magics: [(&str, &[u8]); 5] = [
+        ("app", &[0x55, 0xAA, 0x5A, 0xA5]),
+        ("kdz", &[0x24, 0x05, 0x00, 0x00, 0x38, 0x31, 0x25, 0x80]),
+        ("kdz", &[0x28, 0x05, 0x00, 0x00, 0x34, 0x31, 0x25, 0x80]),
+        ("dz", &[0x32, 0x96, 0x18, 0x74]),
+        ("sin", &[0x03, b'S', b'I', b'N']),
+    ];
+    for (i, (ext, magic)) in magics.iter().enumerate() {
+        // the bare magic, the magic then 0xFF (huge sizes everywhere), then 0x00 padding
+        for (j, fill) in [None, Some(0xFFu8), Some(0x00u8)].into_iter().enumerate() {
+            let mut b = magic.to_vec();
+            if let Some(f) = fill {
+                b.resize(4096, f);
+            }
+            cases.push((format!("g{i}{j}.{ext}"), b));
+        }
+    }
+    for ext in ["sin", "cpb", "nb0", "app", "kdz", "dz"] {
+        cases.push((format!("empty.{ext}"), Vec::new()));
+        cases.push((format!("ten.{ext}"), vec![7u8; 10]));
+    }
+    for (name, bytes) in &cases {
+        fs::write(d.join(name), bytes).unwrap();
+    }
+    for (name, _) in &cases {
+        let p = d.join(name).display().to_string();
+        let out = d.join(format!("out-{name}")).display().to_string();
+        for args in [
+            vec!["identify".to_string(), p.clone()],
+            vec!["extract".into(), p.clone(), "-o".into(), out.clone()],
+            vec!["extract".into(), p.clone(), "--list".into()],
+            vec!["partitions".into(), p.clone()],
+        ] {
+            let err = run(&args);
+            assert!(
+                !err.contains("panicked"),
+                "{} panicked on {name}: {err}",
+                args[0]
+            );
+        }
+    }
+    let _ = fs::remove_dir_all(&d);
+}

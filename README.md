@@ -549,6 +549,28 @@ Full **block OTAs** (`<part>.new.dat.br` or `.new.dat` plus `<part>.transfer.lis
 
 `report` rates the security patch level by age: up to 90 days is `ok`, up to 365 is `stale`, older is `very stale`. The Android version line is informational.
 
+## Firmware containers
+
+OEM full-firmware files unwrap into partition images (`boot.img`, `system.img`, ...) that the rest of the
+pipeline then reads. `identify` names each one, and `extract`, `extract --list` and `partitions` take them
+like any other input. An Android sparse payload inside is expanded on the way out.
+
+| Container | `identify` id | Status | Notes |
+|---|---|---|---|
+| Huawei `UPDATE.APP` | `huawei-update-app` | supported (synthetic) | Record walker: magic, header length, size, partition name; per-block CRCs are not verified |
+| LG `.kdz` | `lg-kdz` | supported (synthetic) | File table, then the `.dz` entry; the v1 header variant is named and refused |
+| LG `.dz` | `lg-dz` | supported (synthetic) | zlib chunks joined per partition; each chunk must inflate to its declared size |
+| Sony `.sin` | `sony-sin` | supported (synthetic) | Header version 3; the hash/signature blocks are skipped and reported as **not verified**; a compressed payload is refused by name |
+| Coolpad `.cpb` | `coolpad-cpb` | named, unsupported | Often encrypted and thinly documented; `extract` says "recognized but unsupported" |
+| Nokia `.nb0` | `nokia-nb0` | named, unsupported | Niche and thinly documented; `extract` says "recognized but unsupported" |
+
+**Caveat: these readers are validated only against synthetic fixtures built in the tests from the layouts
+documented at the top of each module (`src/huawei.rs`, `src/lgkdz.rs`, `src/sonysin.rs`), not against real device
+firmware, and they were written from the public layouts rather than from the GPL reference tools. A real sample
+would catch any misread of a field offset, so treat a refusal on a genuine file as a likely spec gap and open an
+issue. Anything the readers cannot process (unknown header version, unexpected magic, out-of-range offsets, a
+wrapped payload) is refused with a named error, never guessed at.**
+
 ## Format support
 
 Status: **verified** = checked against an independent reference tool on real firmware; **synthetic** = implemented and tested with generated fixtures only; **planned** = not implemented yet; **no** = not supported.
@@ -581,6 +603,8 @@ Status: **verified** = checked against an independent reference tool on real fir
 | Device tree / dtbo tables (`dt`) | synthetic | Parses and displays the device tree blob and dtbo table headers; tested on AOSP `mkdtboimg` output |
 | Other vendor containers (Amlogic, ...) | planned | Without real samples these will be marked unverified |
 | Spreadtrum/MediaTek `.pac` containers | synthetic | Parser and extractor (adapted from SR Labs PacHandler, Apache-2.0); tested with generated fixtures, not yet verified on real firmware |
+| Huawei `UPDATE.APP`, LG `.kdz`/`.dz`, Sony `.sin` containers | synthetic | See [Firmware containers](#firmware-containers); spec-built fixtures only, no real sample yet |
+| Coolpad `.cpb`, Nokia `.nb0` containers | detected | Named by `identify`; `extract` refuses with "recognized but unsupported" |
 | Incremental OTAs (`*.patch.dat`, delta payloads) | no | Fails with a clear error |
 | dm-verity hash tree and FEC regeneration for A/B partitions | planned | Needed to check the whole-image hash of partitions that declare those extents |
 | Files out of f2fs images (same `files`, `ls`, `cat`, `audit`, `extract --files`) | verified | Clean-room reader written from the public on-disk format (no GPL kernel code is read or copied), checked against volumes formatted by `mkfs.f2fs` 1.16 and populated by `sload.f2fs` in three layouts (defaults, Android's `-g android`, and extra-attr + inode and superblock checksums + quota + verity + crtime): every regular file equals the source tree byte for byte (inline data, direct, single-indirect block maps, a 300-entry directory over several dentry blocks), hard links, symlinks (short and long), modes (including setuid), mtimes and SELinux labels match, and `audit` gives the same 11 findings as on the ext4 and erofs corpus; the same volume built twice is byte-identical. Reads the newest valid checkpoint (CRC checked, normal and compact summaries, NAT journal), the NAT, inline data and inline directories, direct / indirect / double-indirect addressing, and inline plus node-block xattrs (`security.selinux`, `security.capability`). Bounded like the other readers (depth, entries, directory and symlink size, file size, pieces per file); one-off sweeps of 8,000 random byte changes over each of two real images, and a committed sweep over the metadata of a hand-built volume, produced no panic or hang, and `tests/f2fs.rs` damages and truncates real images through the binary. Refused with a clear error, never guessed: compressed files, encrypted files and directories (an `encrypt` feature bit alone is not a reason), zoned, multi-device and device-alias volumes, large NAT bitmaps (`mkfs.f2fs -i`), unknown feature bits, a checkpoint whose CRC fails, and any node whose footer does not name the node asked for. Not verified: images written by a Linux kernel mount (inline directories and the flexible inline-xattr layout are covered by hand-built volumes, not by a real kernel-made image), inode checksums (not checked) |
