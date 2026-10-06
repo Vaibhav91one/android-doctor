@@ -1,26 +1,202 @@
-# android-doctor
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.svg">
+    <img src="docs/assets/logo-light.svg" alt="android-doctor" width="360">
+  </picture>
+</p>
 
-Command-line tool to extract and audit Android firmware packages.
+<p align="center">
+  <a href="https://github.com/Vaibhav91one/android-doctor/actions/workflows/ci.yml"><img src="https://github.com/Vaibhav91one/android-doctor/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/Rust-2024-000000?style=flat&color=000000&labelColor=000000" alt="Rust 2024">
+  <img src="https://img.shields.io/badge/license-MIT-000000?style=flat&color=000000&labelColor=000000" alt="license MIT">
+  <img src="https://img.shields.io/badge/telemetry-none-000000?style=flat&color=000000&labelColor=000000" alt="telemetry none">
+</p>
+
+Extracts and audits Android OTA and firmware images, without running them.
+
+Firmware is a pile of containers inside containers: an OTA zip holds a
+`payload.bin`, which holds partitions, which hold ext4 or erofs trees, which
+hold init scripts and properties. `android-doctor` opens every layer, with no
+root, no mount and no device, and answers one question: **is this build
+shipping a debuggable, rooted or unsigned configuration?** Output is plain
+text for people and `--json` for agents.
+
+```sh
+npx android-doctor extract ota.zip -o out/
+android-doctor audit out/system.img
+android-doctor doctor scan out/
+```
+
+## Contents
+
+- [Get started](#get-started)
+- [What it catches](#what-it-catches)
+- [Agent integration](#agent-integration)
+- [CLI reference](#cli-reference)
+- [Format support](#format-support)
+- [What it will not tell you](#what-it-will-not-tell-you)
+- [Exit codes](#exit-codes)
+- [Privacy and telemetry](#privacy-and-telemetry)
+- [Build](#build)
+- [Third-party code and references](#third-party-code-and-references)
+- [License](#license)
+
+## Get started
+
+### 1. Install
+
+Prebuilt release binaries for macOS (aarch64 and x86_64) and Linux (x86_64) are
+attached to each [GitHub release](https://github.com/Vaibhav91one/android-doctor/releases).
+Download the `android-doctor-<target>.tar.gz` for your platform, extract it, and
+place the binary on your `PATH`:
+
+```sh
+tar xzf android-doctor-aarch64-apple-darwin.tar.gz
+sudo mv android-doctor /usr/local/bin/
+```
+
+Or from source with Cargo:
+
+```sh
+cargo install --git https://github.com/Vaibhav91one/android-doctor android-doctor
+```
+
+`npx android-doctor ...` also works: the npm package in [`npm/`](npm/) is a
+small launcher that runs the native binary on your `PATH` and passes on its
+exit code.
+
+### 2. Identify and extract
+
+`identify` says what a file is by its magic bytes, never by its name:
+
+```sh
+android-doctor identify system.img
+```
 
 ```
-android-doctor extract  <ota.zip|dir|payload.bin> [-o out] [--only a,b] [--list] [--force]
-android-doctor unpack   <boot.img|vendor_boot.img> [-o dir] [--json] [--force]   # header, and with -o the sections
-android-doctor ramdisk  <boot.img|vendor_boot.img|ramdisk> [-o dir] [--json] [--list]   # ramdisk contents and ADB properties
-android-doctor audit    <image.img|dir>... [--json]   # ADB properties, setuid files, su binaries, init services, findings
-android-doctor vbmeta   <vbmeta.img|image-with-footer> [--images dir] [--json] [--key key.pem]   # AVB header, key, signature verification, descriptors, partition hashes
-android-doctor ls       <image.img> [path] [--json]   # list a directory inside an ext2/3/4 or erofs image
-android-doctor cat      <image.img> <path>   # print one file from an ext2/3/4 or erofs image to stdout
-android-doctor files    <image.img> [-o dir] [--json]   # list or extract an ext2/3/4 or erofs image (no root), with SELinux labels
-android-doctor unsparse <file>... -o out.img [--force]   # Android sparse image(s) to a raw image
-android-doctor identify <path>... [--json]               # what is this file, by magic bytes
-android-doctor info     <ota.zip|dir> [--json]           # build metadata (META-INF/com/android/metadata)
-android-doctor report   <ota.zip|dir> [--json]           # staleness verdict from the security patch level
-android-doctor dt       <dt.img|dtbo.img|boot.img|...> [--json]   # device tree, dtbo table, or container header
-android-doctor partitions <dir> [--json] [--sector-size 4096]   # flash manifest (Qualcomm rawprogram.xml / MediaTek scatter.txt)
-android-doctor doctor   <dir> [--json]   # deterministic health scan on an unpacked firmware directory
+system.img: ext4 filesystem
 ```
 
-## What `extract` does today
+`extract` reads an OTA zip, a directory or a bare `payload.bin` and writes the
+partition images. See [What `extract` does](#what-extract-does).
+
+### 3. Audit an image
+
+`audit` reads the file system inside the image (ext2/3/4 or erofs) and reports
+ADB properties, setuid files, `su` binaries and init services. This image was
+built from a tree with a debuggable `build.prop` and a setuid `su`:
+
+```sh
+android-doctor audit system.img
+```
+
+```
+ADB: ro.secure=0 ro.adb.secure=0 ro.debuggable=1 usb=not set: adbd can run as root
+
+== system (5 entries)
+[high] debuggable-build: ro.debuggable=1 in system/build.prop: adbd runs as root
+[high] insecure-adb: ro.secure=0 in system/build.prop: adbd keeps root
+[high] adb-unauthenticated: ro.adb.secure=0 in system/build.prop: ADB connections need no authorization
+[high] su-binary: /system/xbin/su looks like a su binary
+[info] setuid-files: 1 setuid/setgid files
+properties:
+  ro.debuggable=1  (system/build.prop)
+  ro.secure=0  (system/build.prop)
+  ro.adb.secure=0  (system/build.prop)
+  ro.build.version.security_patch=2021-01-05  (system/build.prop)
+setuid/setgid files:
+  4755 501:0 /system/xbin/su
+```
+
+### 4. Health-scan a directory
+
+`doctor scan` runs the deterministic rule set over an unpacked firmware
+directory: security rules plus quality rules (missing partitions, duplicate
+properties, SELinux label gaps, mode anomalies, service hygiene, debug
+leftovers). Add `--json` for one object per finding with `id`, `category`,
+`severity`, `subject`, `message` and `remedy`:
+
+```sh
+android-doctor doctor scan fw/
+```
+
+```
+warn quality partition_coverage: system.img: expected partition image system is missing
+    └ ensure system.img is present; the device may not boot without it
+warn quality partition_coverage: vendor.img: expected partition image vendor is missing
+    └ ensure vendor.img is present; the device may not boot without it
+info security avb_signature: vbmeta.img: no vbmeta.img found; AVB signature not checked
+    └ point doctor at a directory containing vbmeta.img
+```
+
+A rule that cannot evaluate says so (`info ... cannot evaluate`) instead of
+staying silent.
+
+## What it catches
+
+| Area | Examples |
+| --- | --- |
+| ADB and debug posture | `ro.debuggable=1`, `ro.secure=0`, `ro.adb.secure=0`, adbd services running as root or shell |
+| Privilege | `su` binaries, setuid/setgid files, file capabilities, world-writable files |
+| Boot chain | AVB flags, rollback index, chained vbmeta, unsigned images, RSA signature and partition hash checks |
+| Secrets and apps | Hardcoded credentials in file contents, APK package names and signing certificates |
+| Quality | Missing partitions, duplicate properties, SELinux label gaps, mode anomalies, init service hygiene, debug leftovers |
+| Staleness | Security patch level age from OTA metadata: `ok`, `stale` (over 90 days), `very stale` (over 365) |
+
+## Agent integration
+
+Two ways to hand the tool to an AI coding agent.
+
+**MCP server.** `android-doctor mcp` speaks the Model Context Protocol over
+stdio and exposes three tools, `identify`, `doctor` and `audit`, each taking a
+`path`. Findings arrive as structured data instead of scraped stdout. Register
+it in your agent's MCP config:
+
+```json
+{ "mcpServers": { "android-doctor": { "command": "android-doctor", "args": ["mcp"] } } }
+```
+
+**Skill installer.** `doctor install` writes a short skill describing the
+commands, findings and severities:
+
+```sh
+android-doctor doctor install                    # list where each agent would go
+android-doctor doctor install --agent claude     # claude-code | cursor | codex | opencode
+android-doctor doctor install --print-only       # print the skill
+```
+
+Besides the per-user skill file, `--agent cursor` writes
+`.cursor/rules/android-doctor.mdc` and `--agent codex` / `--agent opencode`
+add a managed block to `AGENTS.md`, both in the current directory. Re-running
+replaces the block and never touches the rest of the file.
+
+See [AGENTS.md](AGENTS.md) for the contributor and agent-usage contract.
+
+## CLI reference
+
+Every subcommand takes `--help`. `--no-color` (or `NO_COLOR`) disables colour.
+
+| Command | What it does |
+| --- | --- |
+| `extract <ota.zip\|dir\|payload.bin> [-o out] [--only a,b] [--list] [--force]` | OTA to partition images (add `--files` for file trees, `--base` for incremental OTAs) |
+| `unpack <boot.img\|vendor_boot.img> [-o dir] [--json]` | Header, and with `-o` the kernel, ramdisk and dtb sections |
+| `ramdisk <boot.img\|ramdisk> [-o dir] [--json] [--list]` | Ramdisk contents and ADB properties |
+| `audit <image\|dir>... [--json]` | ADB properties, setuid files, `su` binaries, init services, findings |
+| `vbmeta <vbmeta.img> [--images dir] [--json] [--key key.pem]` | AVB header, key, signature, descriptors, partition hashes |
+| `ls <image> [path]` / `cat <image> <path>` | Browse and read files inside an ext2/3/4 or erofs image |
+| `files <image> [-o dir] [--json]` | List or extract an image's files with SELinux labels |
+| `unsparse <file>... -o out.img` | Android sparse images to a raw image |
+| `identify <path>... [--json]` | What is this file, by magic bytes |
+| `info <ota> [--json]` / `report <ota> [--json]` | Build metadata / staleness verdict |
+| `dt <file> [--json]` | Device tree, dtbo table or container header |
+| `amlogic <file>` | Describe an Amlogic image container |
+| `partitions <dir> [--json] [--sector-size N]` | Qualcomm `rawprogram*.xml` / MediaTek `scatter.txt` flash manifest |
+| `hash-tree <image>` | Regenerate the dm-verity hash tree for a rebuilt partition |
+| `doctor scan <dir> [--json]` | Deterministic health scan |
+| `doctor install [--agent <name>] [--print-only]` | Install the agent skill |
+| `mcp [--verbose]` | MCP server on stdio |
+
+### What `extract` does
 
 `extract` recognises the kind of OTA by looking inside it.
 
@@ -81,28 +257,37 @@ Status: **verified** = checked against an independent reference tool on real fir
 
 Roadmap and issue list: see the milestones on GitHub.
 
-## Install
+## What it will not tell you
 
-Prebuilt release binaries for macOS (aarch64 and x86_64) and Linux (x86_64) are
-attached to each [GitHub release](https://github.com/Vaibhav91one/android-doctor/releases).
-Download the `android-doctor-<target>.tar.gz` for your platform, extract it, and
-place the binary on your `PATH`:
+- It never runs firmware. It reads bytes, so runtime behaviour (what a service
+  actually does once booted) is out of scope.
+- No APK or SELinux policy analysis beyond package names, signing certificates
+  and label gaps.
+- The whole-image hash of a partition with dm-verity/FEC extents is reported as
+  "not checked"; the device adds those bytes at install time.
+- f2fs is detected but not readable. Key-protected containers (`.ofp`, encrypted
+  Amlogic sections) are not decrypted.
+- Unsupported or unreadable input is reported as such, never as clean.
 
-```
-tar xzf android-doctor-aarch64-apple-darwin.tar.gz
-sudo mv android-doctor /usr/local/bin/
-```
+## Exit codes
 
-Or install from source with Cargo:
+| | |
+| --- | --- |
+| `0` | ran to completion |
+| `1` | `doctor scan` found an `error`-severity finding, or a failure: bad flag, unreadable or hostile input |
 
-```
-cargo install --git https://github.com/Vaibhav91one/android-doctor android-doctor
-```
+`audit` reports its findings in the output; it exits `0` unless it fails to read the input.
+
+## Privacy and telemetry
+
+None. No network calls, no analytics. Everything runs locally on the files you
+point it at.
 
 ## Build
 
-```
+```sh
 cargo build --release
+cargo test
 ```
 
 ## Third-party code and references
