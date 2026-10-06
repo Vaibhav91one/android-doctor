@@ -1,0 +1,4 @@
+4755 system.erofs/system/xbin/su
+6777 system.erofs/system/bin/rootsh
+4755 system.erofs/system/bin/ping
+666 system.erofs/system/data/shared.txt

@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Corpus/precision gate (#109): `tests/corpus.rs` generates deterministic ext4 and erofs fixtures from text source trees, asserts exact `audit` and `doctor scan` findings against committed snapshots, and checks two builds are byte-identical; a required `corpus` CI job and `docs/precision.md`.
 - `fix [--agent claude|codex|cursor] [--print] [--yolo] <dir>`: runs the doctor scan and renders one prompt for a coding agent (findings worst first, firmware text fenced as untrusted, a clause forbidding suppressing findings, and the `doctor scan <dir> --json` re-run command). Launches the agent only if its binary is on PATH, with its approval prompts kept unless `--yolo`; never launches inside an agent (`CLAUDECODE`, `CODEX_THREAD_ID`, `CODEX_SANDBOX`, `CURSOR_SANDBOX`, `ANDROID_DOCTOR_AGENT=1`). A clean scan prints "nothing to fix" and exits 0 (#107).
 - Tag-triggered publishing: the release workflow checks that the tag, `Cargo.toml` and `npm/package.json` agree, then publishes GitHub release binaries, the crate to crates.io (`CARGO_REGISTRY_TOKEN`) and the launcher to npm with provenance (`NPM_TOKEN`); each registry step is skipped with a notice when its secret is unset.
 - `npx android-doctor` downloads and caches the matching release binary on first run (falls back to a binary on `PATH`).

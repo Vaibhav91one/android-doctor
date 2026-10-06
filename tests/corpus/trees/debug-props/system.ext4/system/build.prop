@@ -1,0 +1,7 @@
+ro.build.type=userdebug
+ro.build.tags=test-keys
+ro.secure=0
+ro.debuggable=1
+ro.adb.secure=0
+service.adb.root=1
+persist.sys.usb.config=mtp,adb

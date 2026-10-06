@@ -353,6 +353,9 @@ cargo build --release
 cargo test
 ```
 
+The rules are held by a corpus/precision gate that builds deterministic firmware fixtures and
+asserts the exact findings; see [docs/precision.md](docs/precision.md).
+
 ## Third-party code and references
 
 See [THIRD_PARTY.md](THIRD_PARTY.md). Code is adapted only from permissively licensed projects and credited there.

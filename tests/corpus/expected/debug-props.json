@@ -1,0 +1,61 @@
+{
+  "audit": [
+    {
+      "id": "adb-by-default",
+      "severity": "medium",
+      "subject": "system"
+    },
+    {
+      "id": "adb-root",
+      "severity": "high",
+      "subject": "system"
+    },
+    {
+      "id": "adb-unauthenticated",
+      "severity": "high",
+      "subject": "system"
+    },
+    {
+      "id": "debug-build-type",
+      "severity": "medium",
+      "subject": "system"
+    },
+    {
+      "id": "debuggable-build",
+      "severity": "high",
+      "subject": "system"
+    },
+    {
+      "id": "insecure-adb",
+      "severity": "high",
+      "subject": "system"
+    },
+    {
+      "id": "test-keys",
+      "severity": "medium",
+      "subject": "system"
+    }
+  ],
+  "doctor": [
+    {
+      "id": "avb_signature",
+      "severity": "info",
+      "subject": "vbmeta.img"
+    },
+    {
+      "id": "partition_coverage",
+      "severity": "warn",
+      "subject": "boot.img"
+    },
+    {
+      "id": "partition_coverage",
+      "severity": "warn",
+      "subject": "vendor.img"
+    },
+    {
+      "id": "selinux_label_gaps",
+      "severity": "info",
+      "subject": "system"
+    }
+  ]
+}

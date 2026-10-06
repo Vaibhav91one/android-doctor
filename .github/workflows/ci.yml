@@ -11,3 +11,20 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+  corpus:
+    # Precision gate (docs/precision.md): generated fixtures, exact findings. The tools are
+    # required here (CORPUS_REQUIRED makes a missing tool fail instead of skip); the log is checked too.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y e2fsprogs erofs-utils
+      - name: Run the corpus gate
+        run: |
+          set -o pipefail
+          CORPUS_REQUIRED=1 cargo test --test corpus -- --nocapture 2>&1 | tee corpus.log
+      - name: Assert the gate really ran
+        run: |
+          if grep -q 'CORPUS GATE SKIPPED' corpus.log; then echo "corpus gate skipped"; exit 1; fi
+          grep -q 'test result: ok. 3 passed; 0 failed; 0 ignored' corpus.log \
+            || { echo "expected exactly 3 passing corpus tests"; exit 1; }
