@@ -10,6 +10,7 @@ mod audit;
 mod avb;
 mod bootimg;
 mod bsdiff;
+mod ci;
 mod content;
 mod detect;
 mod doctor;
@@ -256,12 +257,56 @@ enum Command {
         #[arg(long)]
         yolo: bool,
     },
+    /// CI integration: write a GitHub Actions workflow that runs the android-doctor action
+    Ci {
+        #[command(subcommand)]
+        action: CiAction,
+    },
     /// Expose android-doctor over the Model Context Protocol (JSON-RPC on stdio)
     Mcp {
         /// Log each request to stderr; stdout stays pure JSON-RPC
         #[arg(long)]
         verbose: bool,
     },
+}
+
+/// What `ci` should do.
+#[derive(Subcommand)]
+enum CiAction {
+    /// Write .github/workflows/android-doctor.yml, pinned to this version, running on pull requests
+    Install {
+        /// Project root to write into
+        #[arg(long, value_name = "DIR", default_value = ".")]
+        dir: PathBuf,
+        /// Print the workflow and write nothing
+        #[arg(long)]
+        print: bool,
+        /// Replace an existing workflow file instead of refusing
+        #[arg(long)]
+        force: bool,
+        /// Firmware directory to scan, relative to the repository root
+        #[arg(long, value_name = "FIRMWARE_DIR", default_value = "firmware")]
+        path: String,
+        /// Minimum severity that fails the job
+        #[arg(long, value_name = "LEVEL", default_value = "error", value_parser = ci::FAIL_ON)]
+        fail_on: String,
+    },
+}
+
+/// `ci install`: print or write the pinned workflow.
+fn ci_install(
+    dir: &std::path::Path,
+    print: bool,
+    force: bool,
+    path: &str,
+    fail_on: &str,
+) -> anyhow::Result<()> {
+    let text = ci::workflow(env!("CARGO_PKG_VERSION"), path, fail_on)?;
+    if print {
+        return print_out(text.trim_end());
+    }
+    let dest = ci::write(dir, &text, force)?;
+    print_out(&format!("wrote {}", dest.display()))
 }
 
 /// What `doctor` should do.
@@ -596,6 +641,15 @@ fn main() -> anyhow::Result<()> {
             safe: _,
             yolo,
         } => fix::run(&input, &agent, print, yolo),
+        Command::Ci { action } => match action {
+            CiAction::Install {
+                dir,
+                print,
+                force,
+                path,
+                fail_on,
+            } => ci_install(&dir, print, force, &path, &fail_on),
+        },
         Command::Mcp { verbose } => mcp::serve(verbose),
     };
     // Unified error rendering (issue #77): a one-line headline, then the indented cause

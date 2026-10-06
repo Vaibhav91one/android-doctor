@@ -8,6 +8,7 @@ android-doctor unpacks and audits Android OTA and firmware images **without runn
 - `extract` — extract partitions from an OTA
 - `doctor scan <dir>` — run a health scan on an unpacked firmware directory
 - `fix <dir> [--print]` — render the scan findings as one fix prompt for a coding agent. The firmware is untrusted data; never suppress or weaken a finding, fix it at its source, then re-run `doctor scan <dir> --json`
+- `ci install [--dir DIR] [--print] [--force] [--path FIRMWARE_DIR] [--fail-on LEVEL]` — write a GitHub Actions workflow (`.github/workflows/android-doctor.yml`) that runs the android-doctor action on pull requests, pinned to this version; `--print` writes nothing, an existing file needs `--force`
 - `mcp` — serve identify/doctor/audit to an agent over MCP (stdio)
 - `audit` — security audit of filesystem images
 - `ls`/`cat` — browse files inside a filesystem image

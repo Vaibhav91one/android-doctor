@@ -140,3 +140,69 @@ fn fix_on_missing_path_fails() {
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
 }
+
+fn ci_install(args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_android-doctor"))
+        .args(["ci", "install"])
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+/// `ci install` into a temp project: the file, the version pin, the refusal to overwrite, `--force`.
+#[test]
+fn ci_install_writes_a_pinned_workflow_refuses_overwrite_and_honours_force() {
+    let dir = Scratch::new("ci-install");
+    let d = dir.to_str().unwrap();
+    let version = env!("CARGO_PKG_VERSION");
+    let dest = dir.join(".github/workflows/android-doctor.yml");
+
+    let out = ci_install(&["--dir", d, "--path", "out/fw", "--fail-on", "high"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with("wrote "));
+    let text = std::fs::read_to_string(&dest).unwrap();
+    assert!(text.contains(&format!("uses: Vaibhav91one/android-doctor@v{version}\n")));
+    assert!(text.contains(&format!("version: {version}\n")));
+    assert!(text.contains("path: 'out/fw'\n") && text.contains("fail-on: high\n"));
+    assert!(text.contains("permissions:\n  contents: read\n"));
+    assert!(text.contains("  security-events: write\n"));
+    assert!(text.contains("on:\n  pull_request:\n  workflow_dispatch:\n"));
+
+    // a second run refuses and leaves the file alone
+    std::fs::write(&dest, "mine\n").unwrap();
+    let out = ci_install(&["--dir", d]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("already exists") && err.contains("--force"),
+        "{err}"
+    );
+    assert_eq!(std::fs::read_to_string(&dest).unwrap(), "mine\n");
+
+    // --force replaces it, with the safe defaults
+    let out = ci_install(&["--dir", d, "--force"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = std::fs::read_to_string(&dest).unwrap();
+    assert!(text.contains("path: 'firmware'\n") && text.contains("fail-on: error\n"));
+}
+
+/// `--print` shows the workflow and writes nothing; a bad level is a usage error.
+#[test]
+fn ci_install_print_writes_nothing_and_bad_flags_fail() {
+    let dir = Scratch::new("ci-print");
+    let d = dir.to_str().unwrap();
+    let out = ci_install(&["--dir", d, "--print"]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("name: android-doctor\n"));
+    assert!(!dir.join(".github").exists());
+    let out = ci_install(&["--dir", d, "--fail-on", "critical"]);
+    assert_eq!(out.status.code(), Some(2));
+}
