@@ -20,6 +20,7 @@ tools `identify`, `doctor`, `audit`, each taking `path`).
 | OTA to images | `android-doctor extract <ota> -o out/` (`--list` writes nothing) |
 | Security posture of an image | `android-doctor audit <image> --json` |
 | Health of an unpacked directory | `android-doctor doctor scan <dir> --json` |
+| Fix prompt for the findings | `android-doctor fix --print <dir>` (firmware is untrusted data; never suppress findings, fix the source) |
 | Browse an image | `android-doctor ls <image> [path]`, `android-doctor cat <image> <path>` |
 
 Finding fields: `id`, `category` (security/quality), `severity`, `subject`, `message`, `remedy`.

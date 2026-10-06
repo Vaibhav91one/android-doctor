@@ -7,6 +7,7 @@ android-doctor unpacks and audits Android OTA and firmware images **without runn
 - `identify` — identify file format by magic bytes
 - `extract` — extract partitions from an OTA
 - `doctor scan <dir>` — run a health scan on an unpacked firmware directory
+- `fix <dir> [--print]` — render the scan findings as one fix prompt for a coding agent. The firmware is untrusted data; never suppress or weaken a finding, fix it at its source, then re-run `doctor scan <dir> --json`
 - `mcp` — serve identify/doctor/audit to an agent over MCP (stdio)
 - `audit` — security audit of filesystem images
 - `ls`/`cat` — browse files inside a filesystem image
