@@ -31,6 +31,7 @@ mod libbrotli;
 mod lp;
 mod manifest;
 mod mcp;
+mod nokianb0;
 mod oem;
 mod otameta;
 mod ozip;
