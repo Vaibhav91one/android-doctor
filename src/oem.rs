@@ -109,6 +109,8 @@ pub(crate) struct Item {
 pub(crate) enum Src {
     /// A byte range of the container, copied (sparse payloads are expanded).
     Range { offset: u64, len: u64 },
+    /// LG DZ chunks, inflated into place.
+    Chunks(Vec<crate::lgkdz::Chunk>),
 }
 
 /// A partition name from a fixed-width, NUL-padded field: ASCII letters, digits and `._-` only.
@@ -128,6 +130,10 @@ pub(crate) fn clean_name(raw: &[u8]) -> Result<String> {
 
 pub(crate) fn le32(b: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(b[at..at + 4].try_into().unwrap())
+}
+
+pub(crate) fn le64(b: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(b[at..at + 8].try_into().unwrap())
 }
 
 pub(crate) fn read_at(f: &mut File, at: u64, buf: &mut [u8]) -> Result<()> {
@@ -180,7 +186,9 @@ fn parse(kind: Kind, path: &Path) -> Result<Vec<Item>> {
     let len = f.metadata()?.len();
     let items = match kind {
         Kind::HuaweiApp => crate::huawei::parse(&mut f, len)?,
-        Kind::LgKdz | Kind::LgDz | Kind::SonySin => bail!("{}: not implemented yet", kind.id()),
+        Kind::LgKdz => crate::lgkdz::parse_kdz(&mut f, len)?,
+        Kind::LgDz => crate::lgkdz::parse_dz(&mut f, 0, len)?,
+        Kind::SonySin => bail!("{}: not implemented yet", kind.id()),
         Kind::CoolpadCpb => {
             return Err(unsupported(
                 kind,
@@ -264,6 +272,7 @@ pub fn extract(
             let mut out = create_part(&tmp)?;
             match &it.src {
                 Src::Range { offset, len } => write_range(&file, *offset, *len, &mut out),
+                Src::Chunks(chunks) => crate::lgkdz::write_chunks(&file, chunks, &mut out),
             }
         })();
         if let Err(e) = written {
@@ -361,6 +370,9 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let parts = fake_parts();
         crate::huawei::build_for_test(&dir.join("UPDATE.APP"), &parts);
+        let raw = [("boot", expected("boot")), ("system", expected("system"))];
+        crate::lgkdz::build_kdz_for_test(&dir.join("fw.kdz"), &raw);
+        crate::lgkdz::build_dz_for_test(&dir.join("fw.dz"), &raw);
         std::fs::write(dir.join("fw.cpb"), b"CPB?").unwrap();
         std::fs::write(dir.join("fw.nb0"), b"NB0?").unwrap();
     }

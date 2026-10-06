@@ -24,6 +24,7 @@ mod fix;
 mod hashtree;
 mod huawei;
 mod info;
+mod lgkdz;
 mod libbrotli;
 mod lp;
 mod manifest;

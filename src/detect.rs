@@ -164,11 +164,18 @@ pub fn sniff(head: &[u8]) -> Option<Identified> {
         return found("zstd", "zstd compressed data");
     }
     // OEM full-firmware containers with a magic at offset 0 (the rest are by extension).
-    if at0(&crate::huawei::MAGIC) {
-        return found(
-            crate::oem::Kind::HuaweiApp.id(),
-            crate::oem::Kind::HuaweiApp.description(),
-        );
+    use crate::oem::Kind;
+    let oem = if at0(&crate::huawei::MAGIC) {
+        Some(Kind::HuaweiApp)
+    } else if at0(&crate::lgkdz::KDZ_MAGIC) || at0(&crate::lgkdz::KDZ_V1_MAGIC) {
+        Some(Kind::LgKdz)
+    } else if at0(&crate::lgkdz::DZ_MAGIC) {
+        Some(Kind::LgDz)
+    } else {
+        None
+    };
+    if let Some(kind) = oem {
+        return found(kind.id(), kind.description());
     }
     if head.len() >= 262 && &head[257..262] == b"ustar" {
         return found("tar", "tar archive");
