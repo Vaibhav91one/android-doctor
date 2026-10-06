@@ -421,11 +421,10 @@ release without a checksum check (the action says so in the log); if a `.sha256`
 next to the tarball the action verifies it. The action needs `bash`, `curl`, `tar` and `jq`, all
 on GitHub-hosted runners. Paths and `args` are split on spaces.
 
-**Availability.** The pinned ref `@v<version>` only resolves once the release that contains
-`action.yml` is tagged; the current `v0.1.0` release predates it (and the reporting flags the
-action relies on), so do not point a workflow at `@v0.1.0`. Until the next release the action is
-exercised by `.github/workflows/action-selftest.yml`, which builds the binary from the checkout
-and runs `uses: ./` with `binary:` over firmware generated from `tests/corpus/trees`.
+**Availability.** `v0.2.0` is the first release that ships `action.yml` and the reporting flags
+it relies on; `v0.1.0` predates both, so pin `@v0.2.0` or later. Every change is also exercised
+by `.github/workflows/action-selftest.yml`, which builds the binary from the checkout and runs
+`uses: ./` with `binary:` over firmware generated from `tests/corpus/trees`.
 
 ### `ci install`
 
@@ -439,7 +438,7 @@ wrote ./.github/workflows/android-doctor.yml
 $ android-doctor ci install --path out/firmware
 ./.github/workflows/android-doctor.yml already exists; use --force to replace it
 $ cat .github/workflows/android-doctor.yml
-# Written by `android-doctor ci install`. Pinned to android-doctor 0.1.0; re-run with --force to repin.
+# Written by `android-doctor ci install`. Pinned to android-doctor 0.2.0; re-run with --force to repin.
 name: android-doctor
 
 on:
@@ -456,9 +455,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Vaibhav91one/android-doctor@v0.1.0
+      - uses: Vaibhav91one/android-doctor@v0.2.0
         with:
-          version: 0.1.0
+          version: 0.2.0
           # The firmware directory to scan, relative to the repository root. Edit it to match your layout.
           path: 'out/firmware'
           command: doctor scan
