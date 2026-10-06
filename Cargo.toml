@@ -2,6 +2,14 @@
 name = "android-doctor"
 version = "0.1.0"
 edition = "2024"
+description = "Extract and audit Android OTA and firmware images (payload.bin, super.img, ext4, erofs) without running them"
+license = "MIT"
+repository = "https://github.com/Vaibhav91one/android-doctor"
+homepage = "https://github.com/Vaibhav91one/android-doctor"
+readme = "README.md"
+keywords = ["android", "firmware", "ota", "security", "forensics"]
+categories = ["command-line-utilities", "development-tools"]
+exclude = ["/docs/", "/npm/", "/.github/", "/AGENTS.md"]
 
 [build-dependencies]
 cc = "1"

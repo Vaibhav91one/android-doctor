@@ -7,6 +7,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Tag-triggered publishing: the release workflow checks that the tag, `Cargo.toml` and `npm/package.json` agree, then publishes GitHub release binaries, the crate to crates.io (`CARGO_REGISTRY_TOKEN`) and the launcher to npm with provenance (`NPM_TOKEN`); each registry step is skipped with a notice when its secret is unset.
+- `npx android-doctor` downloads and caches the matching release binary on first run (falls back to a binary on `PATH`).
+- Illustrated logo (layered partition stack under a magnifier) and a standalone `docs/assets/mark.svg`.
+- Crate metadata and package excludes so `cargo publish` passes.
 - `doctor install --agent cursor` also writes `.cursor/rules/android-doctor.mdc`, and `--agent codex` / `--agent opencode` add a managed block to `AGENTS.md`; `--agent claude` is accepted for `claude-code`.
 - README rewrite, `AGENTS.md`, logo assets and an npm launcher (`npx android-doctor`).
 
