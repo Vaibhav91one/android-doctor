@@ -1339,6 +1339,41 @@ mod tests {
         }
     }
 
+    /// Issue #118: an update with a super image stopped at it ("LP geometry struct_size 52 is too
+    /// small", exit 1), so the `vbmeta.img` listed after it was never written.
+    #[test]
+    fn a_super_image_is_split_into_its_partitions_and_the_images_after_it_are_written() {
+        let system = vec![0xA5u8; 1536];
+        let (ota, out, work) = (
+            fresh_dir("super-in"),
+            fresh_dir("super-out"),
+            fresh_dir("super-zip"),
+        );
+        let mut files = sample_files();
+        files.push((
+            "super.img",
+            crate::lp::tests::lp_image(&[("system_a", &system)]),
+        ));
+        files.push(("vbmeta.img", vec![0x22; 64]));
+        write_dir(&ota, &files);
+        let zip_path = work.join("ota.zip");
+        zip_of(&files, &zip_path);
+        for input in [ota.as_path(), zip_path.as_path()] {
+            let _ = std::fs::remove_dir_all(&out);
+            extract_all(input, &out, &ExtractOptions::default())
+                .unwrap_or_else(|e| panic!("a super image stopped the run: {e:#}"));
+            assert_eq!(
+                std::fs::read(out.join("system_a.img")).unwrap(),
+                system,
+                "{input:?}"
+            );
+            assert_eq!(
+                std::fs::read(out.join("vbmeta.img")).unwrap(),
+                vec![0x22; 64]
+            );
+        }
+    }
+
     /// Issue #117: `archive_stem` promised that `SUPER.tar.gz` becomes `SUPER` but only stripped
     /// `.md5`, `.tar` and `.ozip`, so every compressed tar name kept its dots and was refused as
     /// an unsafe archive name.

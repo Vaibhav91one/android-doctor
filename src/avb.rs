@@ -160,6 +160,9 @@ fn algorithm_name(a: u32) -> String {
     }
 }
 
+/// `sizeof(AvbRSAPublicKeyHeader)`: `key_num_bits` and `n0inv`, both big-endian u32.
+const AVB_KEY_HEADER_LEN: usize = 8;
+
 /// Which digest the authentication block uses for an algorithm type.
 fn auth_hash(algorithm: u32, data: &[u8]) -> Option<Vec<u8>> {
     match algorithm {
@@ -197,11 +200,11 @@ fn pkcs1v15_sha512_prefix() -> Vec<u8> {
 
 /// Verify an RSA signature against the signed data (header + auxiliary block).
 ///
-/// The public key blob in the auxiliary block starts with a 4-byte big-endian
-/// key size in bits, followed by the big-endian RSA modulus padded to that
-/// size. The exponent is always 65537 (0x10001) per AVB convention. The
-/// signature uses PKCS#1 v1.5 padding with the hash algorithm determined by
-/// the AVB algorithm type.
+/// The public key blob in the auxiliary block is libavb's `AvbRSAPublicKeyHeader`: a 4-byte
+/// big-endian key size in bits and a 4-byte `n0inv` (Montgomery constant, unused here), then
+/// the big-endian RSA modulus padded to that size, then `rr` (also unused). The exponent is
+/// always 65537 (0x10001) per AVB convention. The signature uses PKCS#1 v1.5 padding with
+/// the hash algorithm determined by the AVB algorithm type.
 fn verify_rsa_signature(
     algorithm: u32,
     key: &[u8],
@@ -214,8 +217,8 @@ fn verify_rsa_signature(
     };
     let key_bytes = key_bits / 8;
 
-    // The key blob must contain at least the 4-byte size prefix plus the modulus.
-    if key.len() < 4 + key_bytes {
+    // The key blob must contain at least the 8-byte header plus the modulus.
+    if key.len() < AVB_KEY_HEADER_LEN + key_bytes {
         return SignatureStatus::Invalid;
     }
 
@@ -226,7 +229,7 @@ fn verify_rsa_signature(
     }
 
     // Extract the RSA modulus (n).
-    let modulus = &key[4..4 + key_bytes];
+    let modulus = &key[AVB_KEY_HEADER_LEN..AVB_KEY_HEADER_LEN + key_bytes];
 
     // AVB always uses the standard RSA public exponent 65537 (0x10001).
     let exponent = rsa::BigUint::from_bytes_be(&65537u64.to_be_bytes());
@@ -820,13 +823,23 @@ impl Vbmeta {
                 detail: format!("{}: {}", s.as_str(), s.explanation()),
             });
         }
-        // An unsigned image (Algorithm NONE / 0) means verified boot proves nothing.
         if self.signature_verified == SignatureStatus::Absent {
-            out.push(crate::audit::Finding {
-                severity: crate::audit::Severity::High,
-                rule: "avb-unsigned-image",
-                detail: "no signature present; verified boot proves nothing".into(),
-            });
+            if self.footer.is_some() {
+                // A partition footer with Algorithm NONE is how AVB normally ships a partition:
+                // the signed top-level vbmeta carries its hash descriptor and the signature.
+                out.push(crate::audit::Finding {
+                    severity: crate::audit::Severity::Info,
+                    rule: "avb-unsigned-footer",
+                    detail: "partition footer carries no signature (algorithm NONE); normal when a signed top-level vbmeta covers this partition, which is not checked here".into(),
+                });
+            } else {
+                // An unsigned top-level vbmeta (Algorithm NONE / 0) means verified boot proves nothing.
+                out.push(crate::audit::Finding {
+                    severity: crate::audit::Severity::High,
+                    rule: "avb-unsigned-image",
+                    detail: "no signature present; verified boot proves nothing".into(),
+                });
+            }
         }
         // Unsupported algorithm: cannot check the signature.
         if let SignatureStatus::Unsupported(n) = self.signature_verified {
@@ -839,13 +852,13 @@ impl Vbmeta {
         out
     }
 
-    /// Interpret the rollback index. Reports the raw value and whether it
-    /// indicates "image is older than device" (index 0 on a production device
-    /// is suspicious). Never infers security from absence.
+    /// Interpret the rollback index. Reports the raw value. Index 0 is what `avbtool` writes
+    /// by default, so it is no evidence of an old image: it only means the image records no
+    /// rollback protection value. Never infers security from absence.
     pub fn rollback_index_interpretation(&self) -> RollbackIndexInterpretation {
         let detail = if self.rollback_index == 0 {
             format!(
-                "rollback index {} (location {}): index 0 - the image may be older than what the device has recorded",
+                "rollback index {} (location {}): the default; this image records no rollback protection value",
                 self.rollback_index, self.rollback_index_location
             )
         } else {
@@ -856,11 +869,7 @@ impl Vbmeta {
         };
         RollbackIndexInterpretation {
             detail,
-            severity: if self.rollback_index == 0 {
-                crate::audit::Severity::High
-            } else {
-                crate::audit::Severity::Info
-            },
+            severity: crate::audit::Severity::Info,
         }
     }
 
@@ -1025,9 +1034,18 @@ impl Vbmeta {
             }
             // Check for unsigned / unsupported algorithm in chained vbmeta.
             for f in chained.findings() {
-                if f.rule == "avb-unsigned-image" || f.rule == "avb-unsupported-algorithm" {
+                // A chained partition's own vbmeta must be signed with the chain descriptor's
+                // key, so an unsigned footer here is a real problem, unlike on a bare partition.
+                if matches!(
+                    f.rule,
+                    "avb-unsigned-image" | "avb-unsigned-footer" | "avb-unsupported-algorithm"
+                ) {
                     out.push(crate::audit::Finding {
-                        severity: f.severity,
+                        severity: if f.rule == "avb-unsigned-footer" {
+                            crate::audit::Severity::High
+                        } else {
+                            f.severity
+                        },
                         rule: "avb-chained-security-state",
                         detail: format!("chained vbmeta {}: {}", partition, f.detail),
                     });
@@ -1175,24 +1193,43 @@ mod tests {
         [h, auth, aux].concat()
     }
 
-    /// Create an AVB-format public key blob from an RSA private key.
-    /// The blob is: 4-byte big-endian key size in bits, followed by the raw modulus.
+    /// Create an AVB-format public key blob from an RSA private key, as `avbtool` writes it
+    /// (`AvbRSAPublicKeyHeader`): `key_num_bits` and `n0inv` as big-endian u32, then the modulus
+    /// and `rr` = 2^(2 * bits) mod n, each `bits / 8` bytes big-endian. 520 bytes for RSA-2048.
     fn key_blob_from_key(key: &RsaPrivateKey) -> Vec<u8> {
         let bits = key.n().bits() as u32;
-        let n_bytes = key.n().to_bytes_be();
+        let key_bytes = (bits / 8) as usize;
+        let pad = |v: Vec<u8>| {
+            let mut out = vec![0u8; key_bytes - v.len()];
+            out.extend(v);
+            out
+        };
+        // n0inv = -(n^-1) mod 2^32, by Newton's iteration on the low word.
+        let n0 = key.n().to_bytes_le()[..4]
+            .iter()
+            .rev()
+            .fold(0u32, |a, b| (a << 8) | u32::from(*b));
+        let mut inv = n0;
+        for _ in 0..5 {
+            inv = inv.wrapping_mul(2u32.wrapping_sub(n0.wrapping_mul(inv)));
+        }
+        let rr = (rsa::BigUint::from(1u8) << (2 * bits as usize)) % key.n();
         let mut k = bits.to_be_bytes().to_vec();
-        k.extend(n_bytes);
+        k.extend(inv.wrapping_neg().to_be_bytes());
+        k.extend(pad(key.n().to_bytes_be()));
+        k.extend(pad(rr.to_bytes_be()));
+        assert_eq!(k.len(), 8 + 2 * key_bytes);
         k
     }
 
     /// Create an AVB-format public key blob with a fake key of the given bit size.
-    /// Only the 4-byte header is real; the modulus is zeros. Used for tests that
+    /// Only the header is real; the modulus and `rr` are filler. Used for tests that
     /// don't exercise RSA verification.
     fn key_blob(bits: u32) -> Vec<u8> {
-        let mut k = bits.to_be_bytes().to_vec();
         let key_bytes = (bits as usize) / 8;
-        k.extend(vec![5u8; 60]);
-        k.resize(4 + key_bytes, 5u8);
+        let mut k = bits.to_be_bytes().to_vec();
+        k.extend([0u8; 4]); // n0inv
+        k.resize(8 + 2 * key_bytes, 5u8);
         k
     }
 
@@ -1784,9 +1821,20 @@ mod tests {
         let m = parse(&v, None).unwrap();
         assert_eq!(m.rollback_index, 0);
         let ri = m.rollback_index_interpretation();
-        assert_eq!(ri.severity, crate::audit::Severity::High);
-        assert!(ri.detail.contains("index 0"));
+        // Index 0 is the default, not evidence of rollback (#118).
+        assert_eq!(ri.severity, crate::audit::Severity::Info);
+        assert!(ri.detail.contains("index 0") && ri.detail.contains("default"));
+        assert!(!ri.detail.contains("older"), "{}", ri.detail);
         assert!(m.to_text(&[]).contains("rollback index 0"));
+        let text = m.to_text(&[]);
+        let line = text
+            .lines()
+            .find(|l| l.starts_with("rollback index 0 (location"))
+            .expect("the rollback line");
+        assert!(
+            line.ends_with("[info]") && !line.contains("[high]"),
+            "{line}"
+        );
     }
 
     #[test]
@@ -1862,6 +1910,79 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, "avb-unsigned-image");
         assert_eq!(findings[0].severity, crate::audit::Severity::High);
+    }
+
+    /// A 1 MiB partition image: filler, the vbmeta block at 4096, an AVB footer in the last 64.
+    fn partition_with_footer(v: &[u8]) -> Vec<u8> {
+        let mut part = vec![0xAAu8; 1 << 20];
+        part[4096..4096 + v.len()].copy_from_slice(v);
+        let mut footer = b"AVBf".to_vec();
+        footer.extend(1u32.to_be_bytes());
+        footer.extend(0u32.to_be_bytes());
+        footer.extend(4096u64.to_be_bytes());
+        footer.extend(4096u64.to_be_bytes());
+        footer.extend((v.len() as u64).to_be_bytes());
+        footer.resize(64, 0);
+        let n = part.len();
+        part[n - 64..].copy_from_slice(&footer);
+        part
+    }
+
+    /// Issue #118: every per-partition footer (algorithm NONE) was reported `[high]`
+    /// "no signature present; verified boot proves nothing", although a signed top-level
+    /// vbmeta normally carries the signature. Only a bare unsigned vbmeta says that.
+    #[test]
+    fn an_unsigned_partition_footer_is_informational_but_an_unsigned_vbmeta_is_high() {
+        let v = vbmeta(0, 0, &[prop("k", "v")], &[]);
+        let (_g, p) = write_tmp("footer-info", &partition_with_footer(&v));
+        let m = read_input(&p, None).unwrap();
+        assert!(m.footer.is_some());
+        let findings = m.findings();
+        assert_eq!(
+            findings.len(),
+            1,
+            "{:?}",
+            findings.iter().map(|f| f.rule).collect::<Vec<_>>()
+        );
+        assert_eq!(findings[0].rule, "avb-unsigned-footer");
+        assert_eq!(findings[0].severity, crate::audit::Severity::Info);
+        assert!(!m.to_text(&[]).contains("[high]"), "{}", m.to_text(&[]));
+
+        let (_g, bare) = write_tmp("bare-unsigned", &v);
+        let top = read_input(&bare, None).unwrap().findings();
+        assert_eq!(top[0].rule, "avb-unsigned-image");
+        assert_eq!(top[0].severity, crate::audit::Severity::High);
+    }
+
+    /// The footer relief must not reach a chained partition: its vbmeta has to be signed with
+    /// the chain descriptor's key, so an unsigned one is still a high finding there.
+    #[test]
+    fn an_unsigned_footer_on_a_chained_partition_is_still_high() {
+        let top = parse(
+            &vbmeta(0, 2, &[chain("vendor", 1, &key_blob(2048))], &[]),
+            None,
+        )
+        .unwrap();
+        let dir = crate::testutil::Scratch::new("chained_footer");
+        let inner = vbmeta(0, 0, &[prop("a", "b")], &[]);
+        std::fs::write(
+            dir.as_path().join("vendor.img"),
+            partition_with_footer(&inner),
+        )
+        .unwrap();
+        let findings = top.cross_check_chained(dir.as_path());
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.severity == crate::audit::Severity::High
+                    && f.detail.contains("chained vbmeta vendor")
+                    && f.detail.contains("no signature")),
+            "{:?}",
+            findings
+                .iter()
+                .map(|f| (&f.rule, &f.detail))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
