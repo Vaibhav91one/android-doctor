@@ -393,6 +393,16 @@ fn is_safe_name(p: &str) -> bool {
 /// become SUPER. For .ozip, the stem strips the .ozip suffix.
 fn archive_stem(name: &str) -> &str {
     let base = name.strip_suffix(".md5").unwrap_or(name);
+    if let Some(stem) = [".tgz", ".txz", ".tbz2"]
+        .iter()
+        .find_map(|short| base.strip_suffix(short))
+    {
+        return stem;
+    }
+    let base = [".gz", ".xz", ".bz2", ".zst", ".lz4"]
+        .iter()
+        .find_map(|compression| base.strip_suffix(compression))
+        .unwrap_or(base);
     let base = base.strip_suffix(".tar").unwrap_or(base);
     base.strip_suffix(".ozip").unwrap_or(base)
 }
@@ -1362,6 +1372,57 @@ mod tests {
                 vec![0x22; 64]
             );
         }
+    }
+
+    /// Issue #117: `archive_stem` promised that `SUPER.tar.gz` becomes `SUPER` but only stripped
+    /// `.md5`, `.tar` and `.ozip`, so every compressed tar name kept its dots and was refused as
+    /// an unsafe archive name.
+    #[test]
+    fn a_compressed_tar_name_loses_its_suffixes_to_become_the_directory_name() {
+        for name in [
+            "SUPER.tar",
+            "SUPER.tar.md5",
+            "SUPER.tar.gz",
+            "SUPER.tgz",
+            "SUPER.tar.xz",
+            "SUPER.txz",
+            "SUPER.tar.bz2",
+            "SUPER.tbz2",
+            "SUPER.tar.zst",
+            "SUPER.tar.lz4",
+            "SUPER.ozip",
+        ] {
+            assert_eq!(archive_stem(name), "SUPER", "{name}");
+            assert!(is_safe_name(archive_stem(name)), "{name}");
+        }
+        // Not an archive suffix: left alone, so it is still refused rather than half-stripped.
+        assert_eq!(archive_stem("SUPER.img"), "SUPER.img");
+    }
+
+    #[test]
+    fn a_tar_gz_in_an_update_is_unpacked_into_a_directory_of_its_stem() {
+        use flate2::{Compression, write::GzEncoder};
+        let mut tar_bytes = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_size(4);
+        h.set_mode(0o644);
+        h.set_cksum();
+        tar_bytes
+            .append_data(&mut h, "inner.img", &b"DATA"[..])
+            .unwrap();
+        let mut e = GzEncoder::new(Vec::new(), Compression::default());
+        e.write_all(&tar_bytes.into_inner().unwrap()).unwrap();
+        let tgz = e.finish().unwrap();
+
+        let (ota, out) = (fresh_dir("tgz-in"), fresh_dir("tgz-out"));
+        let mut files = sample_files();
+        files.push(("PAYLOAD.tar.gz", tgz));
+        write_dir(&ota, &files);
+        extract_all(&ota, &out, &ExtractOptions::default()).unwrap();
+        assert_eq!(
+            std::fs::read(out.join("PAYLOAD/files/inner.img")).unwrap(),
+            b"DATA"
+        );
     }
 
     #[test]
