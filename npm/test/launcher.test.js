@@ -12,7 +12,7 @@ const LAUNCHER = path.join(__dirname, "..", "bin", "android-doctor.js");
 
 function run(pathDir, args) {
   return spawnSync(process.execPath, [LAUNCHER, ...args], {
-    env: { PATH: pathDir },
+    env: { PATH: pathDir, ANDROID_DOCTOR_NO_DOWNLOAD: "1" },
     encoding: "utf8",
   });
 }
@@ -31,4 +31,34 @@ test("exits 127 with an install hint when the binary is missing", () => {
   const r = run(dir, ["--version"]);
   assert.strictEqual(r.status, 127);
   assert.match(r.stderr, /releases/);
+});
+
+const { targetFor, assetUrl, ensureBinary } = require("../bin/android-doctor.js");
+
+test("maps platforms to the release asset names", () => {
+  assert.strictEqual(targetFor("darwin", "arm64"), "aarch64-apple-darwin");
+  assert.strictEqual(targetFor("darwin", "x64"), "x86_64-apple-darwin");
+  assert.strictEqual(targetFor("linux", "x64"), "x86_64-unknown-linux-gnu");
+  assert.strictEqual(targetFor("win32", "x64"), null);
+  assert.strictEqual(
+    assetUrl("0.1.0", "aarch64-apple-darwin"),
+    "https://github.com/Vaibhav91one/android-doctor/releases/download/v0.1.0/android-doctor-aarch64-apple-darwin.tar.gz",
+  );
+});
+
+test("downloads, extracts and caches the binary (injected downloader)", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ad-cache-"));
+  const src = fs.mkdtempSync(path.join(os.tmpdir(), "ad-src-"));
+  fs.writeFileSync(path.join(src, "android-doctor"), "#!/bin/sh\necho ok\n");
+  const urls = [];
+  const fetchFile = async (url, dest) => {
+    urls.push(url);
+    const t = spawnSync("tar", ["czf", dest, "-C", src, "android-doctor"]);
+    assert.strictEqual(t.status, 0);
+  };
+  const bin = await ensureBinary({ version: "9.9.9", target: "x86_64-unknown-linux-gnu", dir, fetchFile });
+  assert.strictEqual(bin, path.join(dir, "android-doctor"));
+  assert.strictEqual(spawnSync(bin, []).status, 0);
+  await ensureBinary({ version: "9.9.9", target: "x86_64-unknown-linux-gnu", dir, fetchFile });
+  assert.strictEqual(urls.length, 1, "second call uses the cache");
 });

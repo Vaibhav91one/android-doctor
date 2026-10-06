@@ -7,6 +7,8 @@
 
 <p align="center">
   <a href="https://github.com/Vaibhav91one/android-doctor/actions/workflows/ci.yml"><img src="https://github.com/Vaibhav91one/android-doctor/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://www.npmjs.com/package/android-doctor"><img src="https://img.shields.io/npm/v/android-doctor?style=flat&color=000000&labelColor=000000" alt="npm version"></a>
+  <a href="https://crates.io/crates/android-doctor"><img src="https://img.shields.io/crates/v/android-doctor?style=flat&color=000000&labelColor=000000" alt="crates.io version"></a>
   <img src="https://img.shields.io/badge/Rust-2024-000000?style=flat&color=000000&labelColor=000000" alt="Rust 2024">
   <img src="https://img.shields.io/badge/license-MIT-000000?style=flat&color=000000&labelColor=000000" alt="license MIT">
   <img src="https://img.shields.io/badge/telemetry-none-000000?style=flat&color=000000&labelColor=000000" alt="telemetry none">
@@ -45,25 +47,32 @@ android-doctor doctor scan out/
 
 ### 1. Install
 
-Prebuilt release binaries for macOS (aarch64 and x86_64) and Linux (x86_64) are
-attached to each [GitHub release](https://github.com/Vaibhav91one/android-doctor/releases).
-Download the `android-doctor-<target>.tar.gz` for your platform, extract it, and
-place the binary on your `PATH`:
+Three ways to get it. The npm and crates.io packages are published from each
+tagged release together with the binaries.
+
+```sh
+npx android-doctor <command>
+```
+
+The npm package in [`npm/`](npm/) is a small launcher. On first run it downloads
+the release binary for your platform (macOS aarch64 or x86_64, Linux x86_64)
+into `~/.cache/android-doctor/<version>/`, then runs it and passes on its exit
+code. It falls back to an `android-doctor` on your `PATH`.
+
+```sh
+cargo install android-doctor
+```
+
+Or take a prebuilt binary from the
+[GitHub releases](https://github.com/Vaibhav91one/android-doctor/releases):
+download `android-doctor-<target>.tar.gz` (`aarch64-apple-darwin`,
+`x86_64-apple-darwin` or `x86_64-unknown-linux-gnu`), extract it, and place the
+binary on your `PATH`:
 
 ```sh
 tar xzf android-doctor-aarch64-apple-darwin.tar.gz
 sudo mv android-doctor /usr/local/bin/
 ```
-
-Or from source with Cargo:
-
-```sh
-cargo install --git https://github.com/Vaibhav91one/android-doctor android-doctor
-```
-
-`npx android-doctor ...` also works: the npm package in [`npm/`](npm/) is a
-small launcher that runs the native binary on your `PATH` and passes on its
-exit code.
 
 ### 2. Identify and extract
 
