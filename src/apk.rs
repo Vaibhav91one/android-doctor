@@ -322,9 +322,10 @@ pub(crate) fn parse_manifest(data: &[u8]) -> Result<ManifestAttrs> {
         );
         match ct {
             0x0180 => {
-                res_ids = data[pos + 8..pos + cs]
-                    .chunks_exact(4)
-                    .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+                let end = pos + cs - (cs - 8) % 4;
+                res_ids = (pos + 8..end)
+                    .step_by(4)
+                    .filter_map(|o| le32(data, o).ok())
                     .collect();
             }
             0x0103 => {
