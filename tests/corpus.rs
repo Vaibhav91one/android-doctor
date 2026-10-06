@@ -163,6 +163,7 @@ fn build_case(case: &str, out: &Path, (mke2fs, erofs): &(PathBuf, PathBuf)) -> b
                 .arg("-d")
                 .arg(e.path())
                 .arg(&img));
+            pin_superblock_times(&img);
         } else {
             run(Command::new(erofs)
                 .env("SOURCE_DATE_EPOCH", "0")
@@ -172,6 +173,26 @@ fn build_case(case: &str, out: &Path, (mke2fs, erofs): &(PathBuf, PathBuf)) -> b
         }
     }
     built
+}
+
+/// mke2fs older than 1.47.1 stamps the superblock with the wall clock whatever the environment
+/// says. Zero mtime, wtime, lastcheck and mkfs_time, then redo the superblock crc32c
+/// (metadata_csum: crc32c over the first 1020 bytes, seed ~0, no final inversion).
+fn pin_superblock_times(img: &Path) {
+    let mut d = fs::read(img).unwrap();
+    let sb = &mut d[1024..2048];
+    for off in [0x2C, 0x30, 0x40, 0x108] {
+        sb[off..off + 4].fill(0);
+    }
+    let mut crc = !0u32;
+    for &b in &sb[..0x3FC] {
+        crc ^= u32::from(b);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0x82F6_3B78 & (!(crc & 1)).wrapping_add(1));
+        }
+    }
+    sb[0x3FC..0x400].copy_from_slice(&crc.to_le_bytes());
+    fs::write(img, d).unwrap();
 }
 
 fn bin_json(args: &[&str], dir: &Path) -> Value {
