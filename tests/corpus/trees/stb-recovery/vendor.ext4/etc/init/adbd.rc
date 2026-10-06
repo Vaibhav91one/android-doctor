@@ -1,0 +1,4 @@
+service adbd /system/bin/adbd
+    class core
+    disabled
+    seclabel u:r:adbd:s0

@@ -48,11 +48,14 @@ machine, not necessarily across machines. Findings do not depend on it.
 | `init-services` | `adbd-service`, `shell-service`, `su-service`, `init_service_hygiene` |
 | `secret-key` / `secret-cloud` / `secret-debug` | `hardcoded_credentials` / `cloud_credentials` / `debug_endpoints` |
 | `leftovers` | `debug_leftovers`, `duplicate_properties`, `unhandled_input` |
+| `stb-recovery` | `shell-service` (medium x3 for the boot-started shell-domain services, info for the `disabled` one), `adbd-service` (info), `debug_endpoints` (medium) |
 | `ota-blocks` | the "cannot evaluate" infos for every quality rule (OTA with no images) |
 | `corrupt-image` | the same infos, from an unreadable image |
 
 Every `doctor` case also shows `partition_coverage`, `selinux_label_gaps` and `avb_signature`
-where they apply. Not covered: `file-capabilities` (needs `security.capability` xattrs, which an
+where they apply. `stb-recovery` mirrors the shape of findings confirmed on a real Amlogic set-top-box image (a recovery-style `init.recovery.*.rc` with a `console` and two oneshot shell-domain services, an on-demand shell service, a disabled `adbd`, and a `jtag` marker in a Wi-Fi nvram-style text file, issue #126). It contains nothing from that image: every file is minimal and written from scratch.
+
+Not covered: `file-capabilities` (needs `security.capability` xattrs, which an
 unprivileged `mke2fs -d` cannot set) and `avb_signature` with a real `vbmeta.img`.
 
 ## Adding a case

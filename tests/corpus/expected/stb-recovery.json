@@ -1,0 +1,56 @@
+{
+  "audit": [
+    {
+      "id": "adbd-service",
+      "severity": "info",
+      "subject": "vendor"
+    },
+    {
+      "id": "debug_endpoints",
+      "severity": "medium",
+      "subject": "vendor"
+    },
+    {
+      "id": "shell-service",
+      "severity": "info",
+      "subject": "vendor"
+    },
+    {
+      "id": "shell-service",
+      "severity": "medium",
+      "subject": "vendor"
+    },
+    {
+      "id": "shell-service",
+      "severity": "medium",
+      "subject": "vendor"
+    },
+    {
+      "id": "shell-service",
+      "severity": "medium",
+      "subject": "vendor"
+    }
+  ],
+  "doctor": [
+    {
+      "id": "avb_signature",
+      "severity": "info",
+      "subject": "vbmeta.img"
+    },
+    {
+      "id": "partition_coverage",
+      "severity": "warn",
+      "subject": "boot.img"
+    },
+    {
+      "id": "partition_coverage",
+      "severity": "warn",
+      "subject": "system.img"
+    },
+    {
+      "id": "selinux_label_gaps",
+      "severity": "info",
+      "subject": "vendor"
+    }
+  ]
+}
