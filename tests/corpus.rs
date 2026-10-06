@@ -372,7 +372,16 @@ fn two_builds_are_byte_identical() {
         for n in imgs {
             let (x, y) = (sha256(&a.join(&n)), sha256(&b.join(&n)));
             if x != y {
-                bad += &format!("{case}/{}: {x} != {y}\n", n.to_string_lossy());
+                let (da, db) = (fs::read(a.join(&n)).unwrap(), fs::read(b.join(&n)).unwrap());
+                let at: Vec<String> = (0..da.len().min(db.len()))
+                    .filter(|&i| da[i] != db[i])
+                    .take(8)
+                    .map(|i| format!("{i:#x}"))
+                    .collect();
+                bad += &format!(
+                    "{case}/{}: {x} != {y} (first differing offsets {at:?})\n",
+                    n.to_string_lossy()
+                );
             }
         }
     }
