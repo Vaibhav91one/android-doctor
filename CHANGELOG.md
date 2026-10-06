@@ -27,6 +27,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `extract` no longer stops at one image it cannot unpack (a corrupt super image, a sparse image that will not expand, a broken tar or ozip): the image is copied raw, listed as unhandled with the reason, and the images after it are still written. The run still fails on it unless `--allow-partial`, so nothing is skipped silently. A failed integrity check (a `.tar.md5` whose MD5 does not match) stays fatal even with `--allow-partial` (#116, #123).
 - f2fs images are recognised by the real superblock magic, `0xF2F52010` at byte 1024. Detection used `0xF2F52011` at `0x170`, which is neither the superblock magic nor an offset inside the superblock, so no real f2fs image was ever identified as f2fs.
 - `extract` no longer aborts on a gzip-wrapped image that is not a tar (a gzip `dt.img` holding an Amlogic `AML_` container failed with "numeric field was not a number ... cksum for AML_" and left every later image unwritten). A compressed file now counts as a tar only if its decompressed first block is a tar header; otherwise it is copied unchanged. `dt` and `amlogic` read through a gzip wrapper (#114, #118).
 - `extract` unpacks `*.tar.gz`, `*.tgz`, `*.tar.xz`, `*.txz`, `*.tar.bz2`, `*.tbz2`, `*.tar.zst` and `*.tar.lz4` entries instead of rejecting the name as unsafe (#117).
