@@ -17,6 +17,7 @@ mod engine;
 mod erofsfs;
 mod ext4fs;
 mod extract;
+mod fix;
 mod hashtree;
 mod info;
 mod libbrotli;
@@ -232,6 +233,23 @@ enum Command {
     Doctor {
         #[command(subcommand)]
         action: DoctorAction,
+    },
+    /// Scan, then hand the findings to a coding agent as one fix prompt
+    Fix {
+        /// Directory to scan (same input as `doctor scan`)
+        input: PathBuf,
+        /// Agent to launch if its binary is on PATH
+        #[arg(long, value_parser = ["claude", "codex", "cursor"], default_value = "claude")]
+        agent: String,
+        /// Only print the prompt; launch nothing
+        #[arg(long)]
+        print: bool,
+        /// Keep the agent's approval prompts (already the default)
+        #[arg(long, conflicts_with = "yolo")]
+        safe: bool,
+        /// Launch the agent with its approval prompts skipped (unsafe: the firmware is untrusted)
+        #[arg(long)]
+        yolo: bool,
     },
     /// Expose android-doctor over the Model Context Protocol (JSON-RPC on stdio)
     Mcp {
@@ -571,6 +589,13 @@ fn main() -> anyhow::Result<()> {
             DoctorAction::Scan { input, json } => doctor_scan(&input, json),
             DoctorAction::Install { agent, print_only } => doctor_install(agent, print_only),
         },
+        Command::Fix {
+            input,
+            agent,
+            print,
+            safe: _,
+            yolo,
+        } => fix::run(&input, &agent, print, yolo),
         Command::Mcp { verbose } => mcp::serve(verbose),
     };
     // Unified error rendering (issue #77): a one-line headline, then the indented cause
