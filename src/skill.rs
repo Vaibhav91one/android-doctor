@@ -79,6 +79,50 @@ pub fn install_in(agent: Agent, dir: &std::path::Path) -> Result<PathBuf> {
     Ok(dest)
 }
 
+const BLOCK_BEGIN: &str =
+    "<!-- android-doctor:begin (managed; re-run `android-doctor doctor install`) -->";
+const BLOCK_END: &str = "<!-- android-doctor:end -->";
+
+/// Project-level channels an agent reads from the repo itself: Cursor's `.cursor/rules/*.mdc`
+/// and the `AGENTS.md` convention (Codex, opencode). Claude Code only reads its skill dir.
+/// Idempotent: the `.mdc` is overwritten, the AGENTS.md block is replaced in place and the
+/// rest of the file is never touched.
+pub fn install_project(agent: Agent, root: &std::path::Path) -> Result<Option<PathBuf>> {
+    let dest = match agent {
+        Agent::Cursor => {
+            let dest = root.join(".cursor/rules/android-doctor.mdc");
+            std::fs::create_dir_all(dest.parent().unwrap())
+                .with_context(|| format!("creating {}", dest.display()))?;
+            let mdc = format!(
+                "---\ndescription: Audit Android firmware images with android-doctor\nalwaysApply: false\n---\n{SKILL_BODY}"
+            );
+            std::fs::write(&dest, mdc).with_context(|| format!("writing {}", dest.display()))?;
+            dest
+        }
+        Agent::Codex | Agent::Opencode => {
+            let dest = root.join("AGENTS.md");
+            let old = std::fs::read_to_string(&dest).unwrap_or_default();
+            let block = format!("{BLOCK_BEGIN}\n{SKILL_BODY}\n{BLOCK_END}\n");
+            let new = match (old.find(BLOCK_BEGIN), old.find(BLOCK_END)) {
+                (Some(b), Some(e)) if b < e => {
+                    format!(
+                        "{}{}{}",
+                        &old[..b],
+                        block,
+                        old[e + BLOCK_END.len()..].trim_start_matches('\n')
+                    )
+                }
+                _ if old.is_empty() => block,
+                _ => format!("{}\n\n{}", old.trim_end(), block),
+            };
+            std::fs::write(&dest, new).with_context(|| format!("writing {}", dest.display()))?;
+            dest
+        }
+        Agent::ClaudeCode => return Ok(None),
+    };
+    Ok(Some(dest))
+}
+
 /// The skill body on its own, for `--print`.
 pub fn content() -> String {
     SKILL_BODY.to_string()
@@ -122,6 +166,34 @@ mod tests {
         assert!(
             content.contains("name: android-doctor"),
             "frontmatter has name"
+        );
+    }
+
+    #[test]
+    fn cursor_gets_an_mdc_rule_and_codex_an_agents_md_block() {
+        let s = Scratch::new("skill-project");
+        let mdc = install_project(Agent::Cursor, s.as_ref()).unwrap().unwrap();
+        assert!(mdc.ends_with(".cursor/rules/android-doctor.mdc"));
+        assert!(
+            std::fs::read_to_string(mdc)
+                .unwrap()
+                .starts_with("---\ndescription:")
+        );
+        std::fs::write(s.as_ref().join("AGENTS.md"), "# mine\n").unwrap();
+        for _ in 0..2 {
+            install_project(Agent::Codex, s.as_ref()).unwrap();
+        }
+        let md = std::fs::read_to_string(s.as_ref().join("AGENTS.md")).unwrap();
+        assert!(md.starts_with("# mine\n"));
+        assert_eq!(
+            md.matches(BLOCK_BEGIN).count(),
+            1,
+            "block is replaced, not duplicated"
+        );
+        assert!(
+            install_project(Agent::ClaudeCode, s.as_ref())
+                .unwrap()
+                .is_none()
         );
     }
 

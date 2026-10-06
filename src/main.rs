@@ -305,6 +305,11 @@ fn doctor_install(agent: Option<String>, print_only: bool) -> anyhow::Result<()>
         }
         Some(name) => {
             let all = skill::Agent::all();
+            let name = if name == "claude" {
+                "claude-code".into()
+            } else {
+                name
+            };
             let Some(a) = all.iter().find(|a| a.name() == name) else {
                 anyhow::bail!(
                     "unknown agent {name:?}; expected one of {}",
@@ -316,7 +321,11 @@ fn doctor_install(agent: Option<String>, print_only: bool) -> anyhow::Result<()>
                 );
             };
             let dest = skill::install_in(*a, &a.skill_dir())?;
-            print_out(&format!("wrote {}", dest.display()))
+            let mut out = format!("wrote {}", dest.display());
+            if let Some(extra) = skill::install_project(*a, &std::env::current_dir()?)? {
+                out.push_str(&format!("\nwrote {}", extra.display()));
+            }
+            print_out(&out)
         }
     }
 }
