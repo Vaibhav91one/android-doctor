@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use reporting::{Emit, ReportArgs, emit};
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -17,6 +18,7 @@ mod engine;
 mod erofsfs;
 mod ext4fs;
 mod extract;
+mod findings;
 mod hashtree;
 mod info;
 mod libbrotli;
@@ -29,6 +31,7 @@ mod pac;
 mod payload;
 mod ramdisk;
 mod report;
+mod reporting;
 mod sdat;
 mod skill;
 mod sparse;
@@ -157,6 +160,8 @@ enum Command {
         /// Print JSON instead of text
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        report: ReportArgs,
     },
     /// Show an AVB vbmeta image (or a partition with an AVB footer): header, key, signature, descriptors, hashes
     Vbmeta {
@@ -251,6 +256,8 @@ enum DoctorAction {
         /// Print findings as JSON
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        report: ReportArgs,
     },
     /// Write the agent skill into an agent config dir so a coding agent can use this tool
     Install {
@@ -264,31 +271,22 @@ enum DoctorAction {
 }
 
 /// `doctor scan`: report findings for a directory, as text or JSON.
-fn doctor_scan(input: &std::path::Path, json: bool) -> anyhow::Result<()> {
-    let findings = doctor::scan(input)?;
-    let text = if json {
-        let rows: Vec<serde_json::Value> = findings
-            .iter()
-            .map(|f| {
-                serde_json::json!({
-                    "id": f.id,
-                    "category": f.category,
-                    "severity": f.severity,
-                    "subject": f.subject,
-                    "message": f.message,
-                    "remedy": f.remedy,
-                })
-            })
-            .collect();
-        serde_json::to_string_pretty(&rows)?
-    } else {
-        render_findings(&findings)
-    };
-    print_out(&text)?;
-    if findings.iter().any(|f| f.severity == "error") {
-        anyhow::bail!("one or more findings have severity error");
-    }
-    Ok(())
+fn doctor_scan(input: &std::path::Path, json: bool, report: &ReportArgs) -> anyhow::Result<()> {
+    let all = findings::from_doctor(doctor::scan_scoped(input)?);
+    emit(
+        Emit {
+            json,
+            fail_on_error: true,
+        },
+        report,
+        all,
+        |shown| {
+            // Still an array of rows, as before; each row gains `fingerprint`.
+            let rows: Vec<_> = shown.iter().map(findings::Finding::to_json).collect();
+            Ok(serde_json::to_string_pretty(&rows)?)
+        },
+        findings::render_flat,
+    )
 }
 /// `doctor install`: write the agent skill, or show where it would go.
 fn doctor_install(agent: Option<String>, print_only: bool) -> anyhow::Result<()> {
@@ -446,24 +444,7 @@ fn ramdisk_command(
     Ok(())
 }
 
-fn render_findings(findings: &[doctor::Finding]) -> String {
-    let mut lines = Vec::new();
-    for f in findings {
-        lines.push(format!(
-            "{} {} {}: {}: {}",
-            f.severity, f.category, f.id, f.subject, f.message
-        ));
-        if let Some(r) = &f.remedy {
-            lines.push(format!("    └ {}", r));
-        }
-    }
-    lines.join(
-        "
-",
-    )
-}
-
-fn print_out(text: &str) -> anyhow::Result<()> {
+pub fn print_out(text: &str) -> anyhow::Result<()> {
     match writeln!(std::io::stdout(), "{text}") {
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()), // e.g. `| head`
         other => Ok(other?),
@@ -533,7 +514,11 @@ fn main() -> anyhow::Result<()> {
         } => ramdisk_command(&input, output.as_deref(), json, list),
         Command::Ls { image, path, json } => ls_command(&image, &path, json),
         Command::Cat { image, path } => cat_command(&image, &path),
-        Command::Audit { images, json } => audit_command(&images, json, no_color),
+        Command::Audit {
+            images,
+            json,
+            report,
+        } => audit_command(&images, json, &report, no_color),
         Command::Vbmeta {
             image,
             images,
@@ -568,7 +553,11 @@ fn main() -> anyhow::Result<()> {
             print_out(&report::render(&report, json)?)
         }
         Command::Doctor { action } => match action {
-            DoctorAction::Scan { input, json } => doctor_scan(&input, json),
+            DoctorAction::Scan {
+                input,
+                json,
+                report,
+            } => doctor_scan(&input, json, &report),
             DoctorAction::Install { agent, print_only } => doctor_install(agent, print_only),
         },
         Command::Mcp { verbose } => mcp::serve(verbose),
@@ -775,17 +764,27 @@ fn cat_command(image: &std::path::Path, path: &str) -> anyhow::Result<()> {
     }
 }
 
-fn audit_command(images: &[PathBuf], json: bool, no_color: bool) -> anyhow::Result<()> {
+fn audit_command(
+    images: &[PathBuf],
+    json: bool,
+    report: &ReportArgs,
+    no_color: bool,
+) -> anyhow::Result<()> {
     let audits = audit::image_list(images)?
         .iter()
         .map(|p| audit::audit_image(p))
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let text = if json {
-        serde_json::to_string_pretty(&audit::to_json(&audits))?
-    } else {
-        audit::to_text(&audits, no_color)
-    };
-    print_out(&text)
+    let all = findings::from_audit(&audits);
+    emit(
+        Emit {
+            json,
+            fail_on_error: false,
+        },
+        report,
+        all,
+        |_| Ok(serde_json::to_string_pretty(&audit::to_json(&audits))?),
+        |_| audit::to_text(&audits, no_color),
+    )
 }
 
 fn info_command(input: &std::path::Path, json: bool, details: bool) -> anyhow::Result<()> {

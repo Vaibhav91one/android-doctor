@@ -33,6 +33,7 @@ android-doctor doctor scan out/
 
 - [Get started](#get-started)
 - [What it catches](#what-it-catches)
+- [Reports for CI: SARIF, baseline, score](#reports-for-ci-sarif-baseline-score)
 - [Agent integration](#agent-integration)
 - [CLI reference](#cli-reference)
 - [Format support](#format-support)
@@ -152,6 +153,60 @@ staying silent.
 | Quality | Missing partitions, duplicate properties, SELinux label gaps, mode anomalies, init service hygiene, debug leftovers |
 | Staleness | Security patch level age from OTA metadata: `ok`, `stale` (over 90 days), `very stale` (over 365) |
 
+## Reports for CI: SARIF, baseline, score
+
+`audit` and `doctor scan` share one reporting layer. Both convert their findings to a common
+shape: a stable rule id, a severity on one scale, a subject (the path inside the image where
+there is one), a message, a remedy and a **fingerprint**.
+
+| Unified severity | Comes from |
+| --- | --- |
+| `error` | `doctor` `error`: the firmware is unusable or tampered with |
+| `high` | `audit` `High`, hardcoded credentials |
+| `medium` | `audit` `Medium`, debug endpoints |
+| `warn` | `audit` `Warn`, `doctor` `warn` |
+| `info` | `audit` `Info`, `doctor` `info` (a rule that could not evaluate, or an all-clear) |
+
+The fingerprint is `sha256(rule, image, subject, key)`, shortened to 16 hex digits. It is built
+from the rule id and the path inside the image (an init service name or a property key where a
+file holds several), never from the message, the order, a timestamp or a host path, so the same
+firmware scanned from another directory gives the same fingerprints. `--json` rows carry it as
+`fingerprint` (an additive field; every existing key is unchanged).
+
+### SARIF (`--sarif FILE`)
+
+`--sarif FILE` writes SARIF 2.1.0 in addition to the normal output, for GitHub code scanning and
+IDEs. There is one rule per rule id, with the remedy as its help text; each result has a `level`
+(`error`/`high` map to `error`, `medium`/`warn` to `warning`, `info` to `note`), the fingerprint
+under `partialFingerprints`, and a location when the finding names a file. A location is the path
+inside the image prefixed with the image name (`system/build.prop`), or the file name relative to
+the scanned directory for `doctor scan`. The health score is in
+`runs[0].properties.score`. Findings that name no file (a missing partition, a rule that could not
+run) get no location rather than a made-up one. The output validates against the official
+SARIF 2.1.0 JSON schema.
+
+```sh
+android-doctor audit system.img --sarif report.sarif
+jq '.runs[0] | {rules: (.tool.driver.rules | length), score: .properties.score,
+   results: [.results[] | {ruleId, level, uri: .locations[0].physicalLocation.artifactLocation.uri}]}' report.sarif
+```
+
+```json
+{
+  "rules": 26,
+  "score": {
+    "coverage_gaps": 0,
+    "label": "needs work",
+    "value": 70
+  },
+  "results": [
+    { "ruleId": "debuggable-build", "level": "error", "uri": "system/build.prop" },
+    { "ruleId": "insecure-adb", "level": "error", "uri": "system/build.prop" },
+    { "ruleId": "su-binary", "level": "error", "uri": "system/xbin/su" }
+  ]
+}
+```
+
 ## Agent integration
 
 Two ways to hand the tool to an AI coding agent.
@@ -190,7 +245,7 @@ Every subcommand takes `--help`. `--no-color` (or `NO_COLOR`) disables colour.
 | `extract <ota.zip\|dir\|payload.bin> [-o out] [--only a,b] [--list] [--force]` | OTA to partition images (add `--files` for file trees, `--base` for incremental OTAs) |
 | `unpack <boot.img\|vendor_boot.img> [-o dir] [--json]` | Header, and with `-o` the kernel, ramdisk and dtb sections |
 | `ramdisk <boot.img\|ramdisk> [-o dir] [--json] [--list]` | Ramdisk contents and ADB properties |
-| `audit <image\|dir>... [--json]` | ADB properties, setuid files, `su` binaries, init services, findings |
+| `audit <image\|dir>... [--json] [--sarif FILE]` | ADB properties, setuid files, `su` binaries, init services, findings |
 | `vbmeta <vbmeta.img> [--images dir] [--json] [--key key.pem]` | AVB header, key, signature, descriptors, partition hashes |
 | `ls <image> [path]` / `cat <image> <path>` | Browse and read files inside an ext2/3/4 or erofs image |
 | `files <image> [-o dir] [--json]` | List or extract an image's files with SELinux labels |
@@ -201,7 +256,7 @@ Every subcommand takes `--help`. `--no-color` (or `NO_COLOR`) disables colour.
 | `amlogic <file>` | Describe an Amlogic image container |
 | `partitions <dir> [--json] [--sector-size N]` | Qualcomm `rawprogram*.xml` / MediaTek `scatter.txt` flash manifest |
 | `hash-tree <image>` | Regenerate the dm-verity hash tree for a rebuilt partition |
-| `doctor scan <dir> [--json]` | Deterministic health scan |
+| `doctor scan <dir> [--json] [--sarif FILE]` | Deterministic health scan |
 | `doctor install [--agent <name>] [--print-only]` | Install the agent skill |
 | `mcp [--verbose]` | MCP server on stdio |
 

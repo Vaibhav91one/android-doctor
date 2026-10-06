@@ -107,6 +107,10 @@ pub struct ImageAudit {
     pub su: Vec<String>,
     pub services: Vec<Service>,
     pub findings: Vec<Finding>,
+    /// For each entry of `findings`, the same index: the in-image path or name it is about
+    /// (empty when it is about the whole image) and a discriminator for findings that share a
+    /// subject. These feed the stable fingerprint in `findings.rs`; they are not printed.
+    pub finding_keys: Vec<(String, String)>,
     pub content_findings: Vec<ContentHit>,
     pub content_bytes_scanned: u64,
     /// One entry per APK found in the image, with its package name and signers.
@@ -283,7 +287,9 @@ fn analyse_with(
     let (hits, scanned) = scan_content(entries, read);
     a.content_findings = hits;
     a.content_bytes_scanned = scanned;
-    a.findings = findings(&a);
+    let (f, keys) = findings(&a).into_iter().unzip();
+    a.findings = f;
+    a.finding_keys = keys;
     Ok(a)
 }
 
@@ -323,14 +329,18 @@ fn scan_content(
     (hits, scanned)
 }
 
-fn findings(a: &ImageAudit) -> Vec<Finding> {
+/// Every finding with its (subject, key), sorted worst first.
+fn findings(a: &ImageAudit) -> Vec<(Finding, (String, String))> {
     let mut f = Vec::new();
-    let mut add = |severity, rule, detail: String| {
-        f.push(Finding {
-            severity,
-            rule,
-            detail,
-        })
+    let mut add = |severity, rule, detail: String, subject: &str, key: &str| {
+        f.push((
+            Finding {
+                severity,
+                rule,
+                detail,
+            },
+            (subject.to_string(), key.to_string()),
+        ))
     };
     for p in prop_values(a, "ro.debuggable") {
         if p.value == "1" {
@@ -338,6 +348,8 @@ fn findings(a: &ImageAudit) -> Vec<Finding> {
                 Severity::High,
                 "debuggable-build",
                 format!("ro.debuggable=1 in {}: adbd runs as root", p.file),
+                &p.file,
+                "",
             );
         }
     }
@@ -347,6 +359,8 @@ fn findings(a: &ImageAudit) -> Vec<Finding> {
                 Severity::High,
                 "insecure-adb",
                 format!("ro.secure=0 in {}: adbd keeps root", p.file),
+                &p.file,
+                "",
             );
         }
     }
@@ -359,6 +373,8 @@ fn findings(a: &ImageAudit) -> Vec<Finding> {
                     "ro.adb.secure=0 in {}: ADB connections need no authorization",
                     p.file
                 ),
+                &p.file,
+                "",
             );
         }
     }
@@ -368,6 +384,8 @@ fn findings(a: &ImageAudit) -> Vec<Finding> {
                 Severity::High,
                 "adb-root",
                 format!("service.adb.root=1 in {}", p.file),
+                &p.file,
+                "",
             );
         }
     }
@@ -380,6 +398,8 @@ fn findings(a: &ImageAudit) -> Vec<Finding> {
                     "ro.build.tags={} in {}: signed with public test keys",
                     p.value, p.file
                 ),
+                &p.file,
+                "",
             );
         }
     }
@@ -389,6 +409,8 @@ fn findings(a: &ImageAudit) -> Vec<Finding> {
                 Severity::Medium,
                 "debug-build-type",
                 format!("ro.build.type={} in {}", p.value, p.file),
+                &p.file,
+                "",
             );
         }
     }
@@ -401,6 +423,8 @@ fn findings(a: &ImageAudit) -> Vec<Finding> {
                     "persist.sys.usb.config={} in {}: adb enabled by default",
                     p.value, p.file
                 ),
+                &p.file,
+                "persist.sys.usb.config",
             );
         }
     }
@@ -410,6 +434,8 @@ fn findings(a: &ImageAudit) -> Vec<Finding> {
                 Severity::Medium,
                 "adb-by-default",
                 format!("persist.service.adb.enable=1 in {}", p.file),
+                &p.file,
+                "persist.service.adb.enable",
             );
         }
     }
@@ -418,6 +444,8 @@ fn findings(a: &ImageAudit) -> Vec<Finding> {
             Severity::High,
             "su-binary",
             format!("/{path} looks like a su binary"),
+            path,
+            "",
         );
     }
     for s in &a.setuid {
@@ -429,6 +457,8 @@ fn findings(a: &ImageAudit) -> Vec<Finding> {
                     "/{} is setuid/setgid ({:04o}) and writable by group or others",
                     s.path, s.mode
                 ),
+                &s.path,
+                "",
             );
         }
     }
@@ -440,6 +470,8 @@ fn findings(a: &ImageAudit) -> Vec<Finding> {
                 "{} regular files are world-writable",
                 a.world_writable.len()
             ),
+            "",
+            "",
         );
     }
     for s in &a.services {
@@ -474,12 +506,16 @@ fn findings(a: &ImageAudit) -> Vec<Finding> {
                         .map(|l| format!(", seclabel {l}"))
                         .unwrap_or_default()
                 ),
+                &s.file,
+                &s.name,
             );
         } else if su_domain {
             add(
                 Severity::High,
                 "su-service",
                 format!("service {} in {} runs in the su domain", s.name, s.file),
+                &s.file,
+                &s.name,
             );
         } else if shell_domain || shell_binary {
             let why = if shell_domain {
@@ -505,6 +541,8 @@ fn findings(a: &ImageAudit) -> Vec<Finding> {
                         "starts at boot"
                     }
                 ),
+                &s.file,
+                &s.name,
             );
         }
     }
@@ -513,6 +551,8 @@ fn findings(a: &ImageAudit) -> Vec<Finding> {
             Severity::Info,
             "setuid-files",
             format!("{} setuid/setgid files", a.setuid.len()),
+            "",
+            "",
         );
     }
     if !a.capabilities.is_empty() {
@@ -520,6 +560,8 @@ fn findings(a: &ImageAudit) -> Vec<Finding> {
             Severity::Info,
             "file-capabilities",
             format!("{} files carry file capabilities", a.capabilities.len()),
+            "",
+            "",
         );
     }
     if !a.content_findings.is_empty() {
@@ -542,9 +584,11 @@ fn findings(a: &ImageAudit) -> Vec<Finding> {
                 a.content_findings.len(),
                 a.content_bytes_scanned
             ),
+            "",
+            "",
         );
     }
-    f.sort_by_key(|x| x.severity);
+    f.sort_by_key(|x| x.0.severity);
     f
 }
 

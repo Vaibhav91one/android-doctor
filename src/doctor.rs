@@ -113,10 +113,29 @@ const QUALITY_RULE_IDS: &[&str] = &[
 /// (`.transfer.list` + `.new.dat`) but no `.img` files, each quality rule emits an info
 /// finding saying it could not be evaluated.
 pub fn scan(dir: &Path) -> Result<Vec<Finding>> {
+    Ok(scan_scoped(dir)?.into_iter().map(|(f, _)| f).collect())
+}
+
+/// True when `f` says a rule did NOT run, as opposed to a rule that ran and found something.
+/// In this module `info` is either "could not evaluate" or the single all-clear "AVB signature
+/// verified", so a gap is any info finding that is not that one. Scores and baselines use this
+/// to avoid treating an unevaluated rule as a pass.
+pub fn is_gap(f: &Finding) -> bool {
+    f.severity == "info" && !(f.id == "avb_signature" && f.message == AVB_VERIFIED)
+}
+
+const AVB_VERIFIED: &str = "AVB signature verified";
+
+/// Like [`scan`], but each finding also carries the name of the image it was found in (the
+/// file stem, as `audit` names it) when it came from inside an image, `None` for directory-level
+/// rules. The reporting layer needs this to keep same-named paths in two images apart.
+pub fn scan_scoped(dir: &Path) -> Result<Vec<(Finding, Option<String>)>> {
+    let mut scoped: Vec<(Finding, Option<String>)> = Vec::new();
     let mut findings = Vec::new();
     findings.extend(partition_coverage(dir)?);
     findings.extend(unhandled_input(dir)?);
     findings.extend(avb_signature(dir)?);
+    scoped.extend(findings.drain(..).map(|f| (f, None)));
 
     // Collect .img files at the top level of the directory.
     let mut img_paths: Vec<std::path::PathBuf> = Vec::new();
@@ -150,7 +169,8 @@ pub fn scan(dir: &Path) -> Result<Vec<Finding>> {
                 });
             }
         }
-        return Ok(findings);
+        scoped.extend(findings.drain(..).map(|f| (f, None)));
+        return Ok(scoped);
     }
 
     // Audit each .img and run quality rules on the result.
@@ -159,28 +179,34 @@ pub fn scan(dir: &Path) -> Result<Vec<Finding>> {
             Ok(a) => a,
             Err(e) => {
                 for &id in QUALITY_RULE_IDS {
-                    findings.push(Finding {
-                        id: id.into(),
-                        category: "quality".into(),
-                        severity: "info".into(),
-                        subject: img_path
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .into_owned(),
-                        message: format!("cannot evaluate {id}: failed to read image ({e:#})"),
-                        remedy: Some(
-                            "ensure the image is a valid ext2/3/4 or erofs filesystem".into(),
-                        ),
-                    });
+                    scoped.push((
+                        Finding {
+                            id: id.into(),
+                            category: "quality".into(),
+                            severity: "info".into(),
+                            subject: img_path
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .into_owned(),
+                            message: format!("cannot evaluate {id}: failed to read image ({e:#})"),
+                            remedy: Some(
+                                "ensure the image is a valid ext2/3/4 or erofs filesystem".into(),
+                            ),
+                        },
+                        None,
+                    ));
                 }
                 continue;
             }
         };
-        findings.extend(quality_rules(&audit));
+        scoped.extend(
+            quality_rules(&audit)
+                .into_iter()
+                .map(|f| (f, Some(audit.name.clone()))),
+        );
     }
-
-    Ok(findings)
+    Ok(scoped)
 }
 
 /// The partition images expected at the top level of an unpacked block OTA.
@@ -273,11 +299,7 @@ pub fn avb_signature(dir: &Path) -> Result<Vec<Finding>> {
     };
 
     let (severity, message, remedy) = match meta.signature_verified {
-        SignatureStatus::Valid => (
-            "info".to_string(),
-            "AVB signature verified".to_string(),
-            None,
-        ),
+        SignatureStatus::Valid => ("info".to_string(), AVB_VERIFIED.to_string(), None),
         SignatureStatus::Invalid => (
             "error".to_string(),
             "signature does not verify — image may be tampered or corrupted".to_string(),

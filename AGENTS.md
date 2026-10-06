@@ -20,9 +20,11 @@ tools `identify`, `doctor`, `audit`, each taking `path`).
 | OTA to images | `android-doctor extract <ota> -o out/` (`--list` writes nothing) |
 | Security posture of an image | `android-doctor audit <image> --json` |
 | Health of an unpacked directory | `android-doctor doctor scan <dir> --json` |
+| Findings for GitHub code scanning | `android-doctor audit <image> --sarif out.sarif` (also `doctor scan`) |
 | Browse an image | `android-doctor ls <image> [path]`, `android-doctor cat <image> <path>` |
 
-Finding fields: `id`, `category` (security/quality), `severity`, `subject`, `message`, `remedy`.
+Finding fields: `id`, `category` (security/quality), `severity`, `subject`, `message`, `remedy`, `fingerprint`
+(a stable id from rule + image + path, independent of order, message and host paths).
 Severities: `error` (firmware unusable; makes `doctor scan` exit 1), `high`/`medium` (security),
 `warn` (quality), `info` (a rule could not evaluate, or all clear). An `info ... cannot evaluate`
 means the rule did not run on that input; it is not a pass.
@@ -35,6 +37,8 @@ Install the skill for an agent with `android-doctor doctor install --agent <clau
     src/mcp.rs         MCP server (JSON-RPC 2.0 on stdio, pure `handle` function)
     src/skill.rs       agent skill installer; src/skill_body.md is the skill text
     src/doctor.rs      health-scan rules
+    src/findings.rs    shared finding model: severity scale, fingerprint, score, baseline, SARIF, digest
+    src/reporting.rs   the flags and exit status shared by `audit` and `doctor scan`
     tests/e2e.rs       CLI subprocess tests; tests/hostile_sweep.rs corrupted-input sweep
     vendor/            vendored code, see THIRD_PARTY.md
 
