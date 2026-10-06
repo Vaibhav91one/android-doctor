@@ -199,6 +199,27 @@ impl<R: Read> Read for LegacyLz4<R> {
     }
 }
 
+/// What an image holds when it is gzip-wrapped, with `true`; any other input comes back
+/// unchanged with `false`. Some vendors ship `dt.img` gzip-compressed (#114). Bounded, so a
+/// gzip bomb cannot exhaust memory.
+pub(crate) fn unwrap_gzip(data: Vec<u8>) -> Result<(Vec<u8>, bool)> {
+    const CAP: u64 = 256 << 20;
+    if !data.starts_with(&[0x1F, 0x8B, 0x08]) {
+        return Ok((data, false));
+    }
+    let mut out = Vec::new();
+    flate2::read::MultiGzDecoder::new(data.as_slice())
+        .take(CAP + 1)
+        .read_to_end(&mut out)
+        .context("decompressing the gzip-wrapped image")?;
+    ensure!(
+        out.len() as u64 <= CAP,
+        "gzip-wrapped image expands past {} MiB",
+        CAP >> 20
+    );
+    Ok((out, true))
+}
+
 /// Wrap `r` in the decoder for `c`.
 pub(crate) fn decoder<'a, R: Read + 'a>(c: Compression, r: R) -> Result<Box<dyn Read + 'a>> {
     Ok(match c {

@@ -25,13 +25,43 @@ pub(crate) enum Kind {
     TarMd5,
 }
 
-pub(crate) fn kind_of(head: &[u8]) -> Option<Kind> {
-    if head.len() >= TAR_USTAR_OFF + TAR_USTAR_MAGIC.len()
+fn is_tar_head(head: &[u8]) -> bool {
+    head.len() >= TAR_USTAR_OFF + TAR_USTAR_MAGIC.len()
         && &head[TAR_USTAR_OFF..TAR_USTAR_OFF + TAR_USTAR_MAGIC.len()] == TAR_USTAR_MAGIC
-    {
+}
+
+pub(crate) fn kind_of(head: &[u8]) -> Option<Kind> {
+    if is_tar_head(head) {
         return Some(Kind::Tar);
     }
     compression_of(head).map(Kind::Compressed)
+}
+
+/// True when `r`, decompressed with `c`, starts with a tar header.
+///
+/// A compression magic does not make a tar: a gzip `dt.img` is a gzip of an Amlogic container,
+/// and handing that to the tar reader fails with "numeric field was not a number" and stops
+/// the run (#114). Only the first block is decoded, so this is cheap on a large update.
+pub(crate) fn compressed_holds_tar(c: Compression, r: impl Read) -> bool {
+    let Ok(mut d) = decoder(c, BufReader::new(r)) else {
+        return false;
+    };
+    let mut block = [0u8; SNIFF_LEN];
+    let mut got = 0;
+    while got < block.len() {
+        match d.read(&mut block[got..]) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => got += n,
+        }
+    }
+    is_tar_head(&block[..got])
+}
+
+/// True when the file at `path` (whose first bytes are `head`) is a tar, or a compressed tar.
+pub(crate) fn holds_tar(path: &Path, head: &[u8]) -> bool {
+    is_tar_head(head)
+        || compression_of(head)
+            .is_some_and(|c| File::open(path).is_ok_and(|f| compressed_holds_tar(c, f)))
 }
 
 fn first_bytes(path: &Path, n: usize) -> Result<Vec<u8>> {
@@ -84,9 +114,7 @@ fn verify_md5(data: &[u8], expected: &str) -> Result<()> {
 /// `.tar.md5` (whose hash is verified before anything is written).
 pub(crate) fn extract(input: &Path, out_dir: &Path) -> Result<()> {
     let head = first_bytes(input, SNIFF_LEN)?;
-    if head.len() >= TAR_USTAR_OFF + TAR_USTAR_MAGIC.len()
-        && &head[TAR_USTAR_OFF..TAR_USTAR_OFF + TAR_USTAR_MAGIC.len()] == TAR_USTAR_MAGIC
-    {
+    if is_tar_head(&head) {
         if input.extension().and_then(|e| e.to_str()) == Some("md5") {
             return extract_tar_md5(input, out_dir);
         }

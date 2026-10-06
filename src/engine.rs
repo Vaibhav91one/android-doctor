@@ -12,8 +12,10 @@ use std::path::{Path, PathBuf};
 pub trait Handler {
     /// Stable id, used in messages and in the one-line registration.
     fn id(&self) -> &'static str;
-    /// True when this handler recognises the input from its first bytes.
-    fn matches(&self, head: &[u8]) -> bool;
+    /// True when this handler recognises the input from its first bytes, reading further into
+    /// `path` when the head alone cannot tell (a compressed file is only a tar if its
+    /// decompressed content is).
+    fn matches(&self, path: &Path, head: &[u8]) -> bool;
     /// Unpack into `stage`, returning the artifacts found inside.
     fn unpack(&self, input: &Path, stage: &Path) -> Result<Vec<PathBuf>>;
 }
@@ -65,7 +67,7 @@ pub fn run(
             limits.max_depth
         );
         let head = read_head(&item.path, 512)?;
-        let Some(handler) = handlers.iter().find(|h| h.matches(&head)) else {
+        let Some(handler) = handlers.iter().find(|h| h.matches(&item.path, &head)) else {
             done.push(item.path);
             continue;
         };
@@ -115,8 +117,8 @@ impl Handler for TarHandler {
         "tar"
     }
 
-    fn matches(&self, head: &[u8]) -> bool {
-        archive::kind_of(head).is_some() || head.windows(4).any(|w| w == b"ustar")
+    fn matches(&self, path: &Path, head: &[u8]) -> bool {
+        archive::holds_tar(path, head) || head.windows(4).any(|w| w == b"ustar")
     }
 
     fn unpack(&self, input: &Path, stage: &Path) -> Result<Vec<PathBuf>> {
