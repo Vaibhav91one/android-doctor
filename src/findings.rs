@@ -92,6 +92,14 @@ impl Severity {
             Severity::Info => "note",
         }
     }
+
+    fn term(self) -> crate::term::Severity {
+        match self {
+            Severity::Error | Severity::High => crate::term::Severity::Error,
+            Severity::Medium | Severity::Warn => crate::term::Severity::Warn,
+            Severity::Info => crate::term::Severity::Info,
+        }
+    }
 }
 
 /// One finding on the unified model.
@@ -573,6 +581,148 @@ pub fn render_flat(findings: &[Finding]) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Terminal digest
+// ---------------------------------------------------------------------------
+
+const TOP_RULES: usize = 5;
+const TOP_SUBJECTS: usize = 3;
+
+fn plural(n: usize, word: &str) -> String {
+    format!("{n} {word}{}", if n == 1 { "" } else { "s" })
+}
+
+/// The grouped, worst-first view for a person at a terminal. `shown` is what to list (after any
+/// baseline); `score` is for the whole scan. `next` is the exact command lines to run next.
+pub fn render_digest(
+    title: &str,
+    shown: &[Finding],
+    score: &Score,
+    next: &[String],
+    r: crate::term::Renderer,
+) -> String {
+    const CELLS: usize = 20;
+    let filled = (score.value as usize * CELLS + 50) / 100;
+    let tone = match score.label {
+        "good" => "32",
+        "critical" => "31",
+        _ => "33",
+    };
+    let mut label = score.label.to_string();
+    if score.gaps > 0 {
+        label = format!("{label}, {}", plural(score.gaps, "coverage gap"));
+    }
+    let mut out = vec![
+        format!("android-doctor  {title}"),
+        format!("{} / 100  {}", score.value, r.style.colorize(tone, &label)),
+        format!(
+            "{}{}",
+            r.style.colorize(tone, &"█".repeat(filled)),
+            "░".repeat(CELLS - filled)
+        ),
+        String::new(),
+    ];
+    if shown.is_empty() {
+        out.push("No findings".to_string());
+    } else {
+        let mut counts = Vec::new();
+        for sev in [
+            Severity::Error,
+            Severity::High,
+            Severity::Medium,
+            Severity::Warn,
+            Severity::Info,
+        ] {
+            let n = shown.iter().filter(|f| f.severity == sev).count();
+            if n > 0 {
+                counts.push(format!("{n} {}", sev.name()));
+            }
+        }
+        out.push(format!(
+            "{}: {}",
+            plural(shown.len(), "finding"),
+            counts.join(", ")
+        ));
+        // category -> (rule, not-evaluated) -> findings, worst first; a rule that did not run is
+        // its own group so it is never mistaken for a finding of that rule.
+        let mut cats: BTreeMap<&str, BTreeMap<(&str, bool), Vec<&Finding>>> = BTreeMap::new();
+        for f in shown {
+            cats.entry(&f.category)
+                .or_default()
+                .entry((&f.rule, f.gap))
+                .or_default()
+                .push(f);
+        }
+        let worst = |fs: &[&Finding]| {
+            fs.iter()
+                .map(|f| f.severity)
+                .max()
+                .unwrap_or(Severity::Info)
+        };
+        let mut cats: Vec<_> = cats
+            .into_iter()
+            .map(|(c, rules)| {
+                let mut rules: Vec<_> = rules.into_iter().collect();
+                rules.sort_by(|a, b| {
+                    worst(&b.1)
+                        .cmp(&worst(&a.1))
+                        .then(a.0.1.cmp(&b.0.1))
+                        .then(b.1.len().cmp(&a.1.len()))
+                        .then(a.0.cmp(&b.0))
+                });
+                (c, rules)
+            })
+            .collect();
+        cats.sort_by(|a, b| {
+            let wa = a.1.iter().map(|r| worst(&r.1)).max();
+            let wb = b.1.iter().map(|r| worst(&r.1)).max();
+            wb.cmp(&wa).then(a.0.cmp(b.0))
+        });
+        for (cat, rules) in &cats {
+            let total: usize = rules.iter().map(|r| r.1.len()).sum();
+            out.push(String::new());
+            out.push(format!("{cat} ({total})"));
+            for (rule, fs) in rules.iter().take(TOP_RULES) {
+                let sev = worst(fs);
+                let times = if fs.len() > 1 {
+                    format!(" x{}", fs.len())
+                } else {
+                    String::new()
+                };
+                out.push(format!(
+                    "  [{}] {}{times}  {}",
+                    r.severity(sev.term(), sev.name()),
+                    rule.0,
+                    fs[0].message
+                ));
+                let subjects: BTreeSet<&str> = fs
+                    .iter()
+                    .map(|f| f.subject.as_str())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                for s in subjects.iter().take(TOP_SUBJECTS) {
+                    out.push(format!("      {s}"));
+                }
+                if subjects.len() > TOP_SUBJECTS {
+                    out.push(format!(
+                        "      ... and {} more",
+                        subjects.len() - TOP_SUBJECTS
+                    ));
+                }
+            }
+            if rules.len() > TOP_RULES {
+                out.push(format!(
+                    "  ... and {} more (use --json for everything)",
+                    plural(rules.len() - TOP_RULES, "rule")
+                ));
+            }
+        }
+    }
+    out.push(String::new());
+    out.push(format!("Next steps: {}", next.join("  |  ")));
+    out.join("\n")
+}
+
+// ---------------------------------------------------------------------------
 // SARIF 2.1.0
 // ---------------------------------------------------------------------------
 
@@ -708,6 +858,7 @@ const KNOWN_RULES: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::term::{Renderer, Style};
 
     fn f(rule: &str, sev: Severity, scope: &str, subject: &str) -> Finding {
         Finding {
@@ -889,6 +1040,43 @@ mod tests {
             render_flat(&[a]),
             "warn security avb_signature: vbmeta.img: image is unsigned\n    └ sign it"
         );
+    }
+
+    #[test]
+    fn digest_is_grouped_worst_first_with_next_steps() {
+        let mut q = f("debug_leftovers", Severity::Warn, "system", "a.log");
+        q.category = "quality".into();
+        let list = vec![
+            q,
+            f("world-writable", Severity::Medium, "system", ""),
+            f("su-binary", Severity::High, "system", "xbin/su"),
+            f("su-binary", Severity::High, "system", "bin/su"),
+            gap("avb_signature"),
+        ];
+        let s = score(&list);
+        let text = render_digest(
+            "fw",
+            &list,
+            &s,
+            &["android-doctor doctor scan fw --json > baseline.json".into()],
+            Renderer::new(Style::fixed(false)),
+        );
+        let sec = text.find("security (4)").unwrap();
+        let qual = text.find("quality (1)").unwrap();
+        assert!(sec < qual, "{text}");
+        assert!(text.find("su-binary x2").unwrap() < text.find("world-writable").unwrap());
+        assert!(text.contains("1 coverage gap"), "{text}");
+        assert!(text.contains("2 high, 1 medium, 1 warn, 1 info"), "{text}");
+        assert!(text.lines().last().unwrap().starts_with("Next steps: "));
+        assert!(!text.contains('\x1b'));
+        let clean = render_digest(
+            "fw",
+            &[],
+            &score(&[]),
+            &["x".into()],
+            Renderer::new(Style::fixed(false)),
+        );
+        assert!(clean.contains("100 / 100  good") && clean.contains("No findings"));
     }
 
     /// The SARIF 2.1.0 properties this emitter relies on, per the spec's required-property rules.

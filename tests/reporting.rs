@@ -256,6 +256,55 @@ fn sarif_to_an_unwritable_path_is_an_error() {
 // --- --score ---------------------------------------------------------------------------------
 
 #[test]
+fn score_prints_only_the_number() {
+    let d = firmware("score");
+    for o in [
+        run!("doctor", "scan", d.as_path(), "--score"),
+        run!("audit", d.join("system.img"), "--score"),
+    ] {
+        assert_eq!(o.code, 0, "{}", o.stderr);
+        let n: u32 = o
+            .stdout
+            .trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("{:?}", o.stdout));
+        assert!(n < 100, "findings and a coverage gap must not score 100");
+        assert_eq!(o.stdout, format!("{n}\n"), "nothing but the number");
+    }
+}
+
+#[test]
+fn a_scan_with_nothing_evaluated_never_scores_a_clean_hundred() {
+    // an unpacked block OTA: no .img files, so every quality rule emits "cannot evaluate"
+    let d = Scratch::new("score-gaps");
+    for f in [
+        "system.transfer.list",
+        "system.new.dat",
+        "vendor.transfer.list",
+        "boot.img",
+    ] {
+        std::fs::write(d.join(f), b"x").unwrap();
+    }
+    let o = run!("doctor", "scan", d.as_path(), "--score");
+    let n: u32 = o.stdout.trim().parse().unwrap();
+    assert!(n < 90, "six rules did not run, score was {n}");
+}
+
+#[test]
+fn score_conflicts_with_json_and_json_gains_a_score_for_audit() {
+    let d = firmware("score-json");
+    let o = run!("audit", d.join("system.img"), "--score", "--json");
+    assert_eq!(o.code, 2, "clap usage error");
+    let o = run!("audit", d.join("system.img"), "--json");
+    let v = json(&o.stdout);
+    assert!(v["score"]["value"].as_u64().unwrap() <= 100);
+    assert!(v["score"]["label"].is_string());
+    // original keys are all still there
+    assert!(v["adb"].is_string() && v["images"].is_array());
+    assert!(v["findings"][0]["fingerprint"].is_string());
+}
+
+#[test]
 fn piped_doctor_output_is_still_the_flat_list_and_json_rows_keep_their_keys() {
     let d = firmware("flat");
     let o = run!("doctor", "scan", d.as_path());
@@ -341,6 +390,8 @@ fn audit_baseline_reports_only_new_findings_and_exits_3() {
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0]["id"], "su-binary");
     assert_eq!(rows[0]["subject"], "sbin/su");
+    // the score is for the whole scan, not just the new part
+    assert!(v["score"]["value"].as_u64().unwrap() < 90);
     assert!(new.stderr.contains("suppressed as known"), "{}", new.stderr);
 }
 

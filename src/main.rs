@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use reporting::{Emit, ReportArgs, emit};
+use reporting::{Emit, ReportArgs, emit, shell_quote};
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -271,16 +271,27 @@ enum DoctorAction {
 }
 
 /// `doctor scan`: report findings for a directory, as text or JSON.
-fn doctor_scan(input: &std::path::Path, json: bool, report: &ReportArgs) -> anyhow::Result<()> {
+fn doctor_scan(
+    input: &std::path::Path,
+    json: bool,
+    report: &ReportArgs,
+    no_color: bool,
+) -> anyhow::Result<()> {
     let all = findings::from_doctor(doctor::scan_scoped(input)?);
     emit(
         Emit {
+            title: display_name(input),
+            command: format!(
+                "android-doctor doctor scan {}",
+                shell_quote(&input.display().to_string())
+            ),
             json,
             fail_on_error: true,
+            no_color,
         },
         report,
         all,
-        |shown| {
+        |shown, _| {
             // Still an array of rows, as before; each row gains `fingerprint`.
             let rows: Vec<_> = shown.iter().map(findings::Finding::to_json).collect();
             Ok(serde_json::to_string_pretty(&rows)?)
@@ -557,7 +568,7 @@ fn main() -> anyhow::Result<()> {
                 input,
                 json,
                 report,
-            } => doctor_scan(&input, json, &report),
+            } => doctor_scan(&input, json, &report, no_color),
             DoctorAction::Install { agent, print_only } => doctor_install(agent, print_only),
         },
         Command::Mcp { verbose } => mcp::serve(verbose),
@@ -779,19 +790,31 @@ fn audit_command(
         .map(|p| audit::audit_image(p))
         .collect::<anyhow::Result<Vec<_>>>()?;
     let all = findings::from_audit(&audits);
+    let command = format!(
+        "android-doctor audit {}",
+        images
+            .iter()
+            .map(|p| shell_quote(&p.display().to_string()))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
     let baselined = report.baseline.is_some();
     emit(
         Emit {
+            title: images.first().map(|p| display_name(p)).unwrap_or_default(),
+            command,
             json,
             fail_on_error: false,
+            no_color,
         },
         report,
         all,
-        |shown| {
-            // The original object plus `findings`: the unified rows, only the new ones under
-            // --baseline.
+        |shown, score| {
+            // The original object plus `findings` (the unified rows; only the new ones under
+            // --baseline) and `score`.
             let mut v = audit::to_json(&audits);
             v["findings"] = shown.iter().map(findings::Finding::to_json).collect();
+            v["score"] = score.to_json();
             Ok(serde_json::to_string_pretty(&v)?)
         },
         // Without a baseline the familiar per-image report; with one, only what is new.

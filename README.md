@@ -245,6 +245,74 @@ written with `--baseline` lists only the new findings, so record baselines from 
 - The score (and a SARIF `score`) is for the whole scan, whatever the baseline hides from the list.
   With `--sarif`, every result carries `baselineState: "new"`.
 
+### Health score (`--score`) and the terminal digest
+
+`--score` prints only a 0-100 health score on stdout, nothing else, so it drops into a shell
+script (`--score` and `--json` cannot be combined). The model is deterministic and documented:
+
+- Start at 100. Findings are grouped by rule; a group costs the weight of its worst severity
+  (`error` 20, `high` 10, `medium` 5, `warn` 2, `info` 0) for the first finding, plus a quarter of
+  that for each further one, capped at twice the weight, so one noisy rule cannot sink the score.
+- A rule that could not evaluate (a coverage gap: `info ... cannot evaluate`) costs a flat 3,
+  however many images it missed. A scan whose rules did not run therefore never scores a clean 100:
+  `100` means nothing was found and everything was evaluated.
+- The result is floored at 0 and rounded so that any cost reduces the score. Labels: 90 and up
+  `good`, 60 and up `needs work`, below that `critical`; a `good` score with gaps reads
+  `incomplete`.
+
+```sh
+android-doctor audit system.img --score
+android-doctor doctor scan fw/ --score
+```
+
+```
+70
+80
+```
+
+`audit --json` gains a top-level `score` (`value`, `label`, `coverage_gaps`) and the SARIF run
+carries the same object. `doctor scan --json` stays a plain array of findings, so its shape does
+not change; use `--score` or `--sarif` for its score.
+
+On an interactive terminal (stdout is a TTY, and none of `--json`, `--score` or `--sarif` is
+given) both commands print a **doctor digest** instead of the flat list: the score with a bar,
+counts by severity, the findings grouped by category and then by rule, worst first, and a
+`Next steps:` line with the exact commands to run. Colour follows `NO_COLOR` and `--no-color`.
+Piped or redirected output is the flat list, byte for byte as before. `android-doctor doctor scan fw/`
+on a terminal:
+
+```
+android-doctor  fw
+80 / 100  needs work, 8 coverage gaps
+████████████████░░░░
+
+9 findings: 1 warn, 8 info
+
+quality (8)
+  [warn] debug_leftovers  looks like a test or leftover file shipped in the image
+      etc/old.log
+  [info] selinux_label_gaps x3  cannot evaluate selinux_label_gaps: failed to read image (too short to be an ext filesystem)
+      boot.img
+      system
+      vendor
+  [info] debug_leftovers  cannot evaluate debug_leftovers: failed to read image (too short to be an ext filesystem)
+      boot.img
+  [info] duplicate_properties  cannot evaluate duplicate_properties: failed to read image (too short to be an ext filesystem)
+      boot.img
+  [info] init_service_hygiene  cannot evaluate init_service_hygiene: failed to read image (too short to be an ext filesystem)
+      boot.img
+  ... and 1 rule more (use --json for everything)
+
+security (1)
+  [info] avb_signature  no vbmeta.img found; AVB signature not checked
+      vbmeta.img
+
+Next steps: android-doctor doctor scan fw --json > baseline.json  |  android-doctor doctor scan fw --baseline baseline.json
+```
+
+For `audit` the digest replaces the per-image report on a terminal; pipe it (`| cat`) or use
+`--json` for the full inventory (properties, setuid files, APKs, services).
+
 ## Agent integration
 
 Two ways to hand the tool to an AI coding agent.
@@ -283,7 +351,7 @@ Every subcommand takes `--help`. `--no-color` (or `NO_COLOR`) disables colour.
 | `extract <ota.zip\|dir\|payload.bin> [-o out] [--only a,b] [--list] [--force]` | OTA to partition images (add `--files` for file trees, `--base` for incremental OTAs) |
 | `unpack <boot.img\|vendor_boot.img> [-o dir] [--json]` | Header, and with `-o` the kernel, ramdisk and dtb sections |
 | `ramdisk <boot.img\|ramdisk> [-o dir] [--json] [--list]` | Ramdisk contents and ADB properties |
-| `audit <image\|dir>... [--json] [--sarif FILE] [--baseline FILE]` | ADB properties, setuid files, `su` binaries, init services, findings |
+| `audit <image\|dir>... [--json] [--sarif FILE] [--baseline FILE] [--score]` | ADB properties, setuid files, `su` binaries, init services, findings |
 | `vbmeta <vbmeta.img> [--images dir] [--json] [--key key.pem]` | AVB header, key, signature, descriptors, partition hashes |
 | `ls <image> [path]` / `cat <image> <path>` | Browse and read files inside an ext2/3/4 or erofs image |
 | `files <image> [-o dir] [--json]` | List or extract an image's files with SELinux labels |
@@ -294,7 +362,7 @@ Every subcommand takes `--help`. `--no-color` (or `NO_COLOR`) disables colour.
 | `amlogic <file>` | Describe an Amlogic image container |
 | `partitions <dir> [--json] [--sector-size N]` | Qualcomm `rawprogram*.xml` / MediaTek `scatter.txt` flash manifest |
 | `hash-tree <image>` | Regenerate the dm-verity hash tree for a rebuilt partition |
-| `doctor scan <dir> [--json] [--sarif FILE] [--baseline FILE]` | Deterministic health scan |
+| `doctor scan <dir> [--json] [--sarif FILE] [--baseline FILE] [--score]` | Deterministic health scan |
 | `doctor install [--agent <name>] [--print-only]` | Install the agent skill |
 | `mcp [--verbose]` | MCP server on stdio |
 

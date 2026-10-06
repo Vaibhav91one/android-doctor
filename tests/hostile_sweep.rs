@@ -73,6 +73,13 @@ fn invocations(d: &Path) -> Vec<Vec<String>> {
         vec!["audit".into(), img.display().to_string()],
         vec!["doctor".into(), ota.display().to_string()],
         // the reporting flags must survive hostile input too
+        vec!["audit".into(), img.display().to_string(), "--score".into()],
+        vec![
+            "audit".into(),
+            img.display().to_string(),
+            "--sarif".into(),
+            d.join("a.sarif").display().to_string(),
+        ],
         vec![
             "audit".into(),
             img.display().to_string(),
@@ -85,6 +92,12 @@ fn invocations(d: &Path) -> Vec<Vec<String>> {
             d.display().to_string(),
             "--sarif".into(),
             d.join("d.sarif").display().to_string(),
+        ],
+        vec![
+            "doctor".into(),
+            "scan".into(),
+            ota.display().to_string(),
+            "--score".into(),
         ],
         vec!["partitions".into(), ota.display().to_string()],
         vec!["dt".into(), img.display().to_string()],
