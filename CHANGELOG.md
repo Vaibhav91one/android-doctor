@@ -11,8 +11,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
-- APK v2/v3 signers were never found in real APKs: the signing block was looked for before the EOCD instead of before the central directory, the magic constant was wrong, and the signer layout was misread. v2/v3 signers (and their certificate CN) are now parsed from real APKs.
-
+- APK v2/v3 signers were never found in real APKs: the signing block was looked for before the EOCD instead of before the central directory, the magic constant was wrong, and the signer layout was misread. v2/v3 signers (and their certificate CN) are now parsed from real APKs.- `audit` triages native ELF objects (`.so` files and executables) for missing exploit mitigations, checksec style (#144): `elf-no-pie` (high), `elf-exec-stack` (medium), `elf-no-relro` (medium), `elf-partial-relro` (warn), `elf-no-canary` (warn, heuristic) and `elf-no-fortify` (info, heuristic). A clean-room parser written from the public ELF format reads 32 and 64-bit, little and big-endian objects, never runs or loads them, and returns an error rather than panic on a truncated or hostile file. On by default and bounded (20,000 objects, 512 MiB, 64 MiB each); per-object results are under `elf` in `--json`.
 ## [0.2.1] - 2026-10-06
 
 ### Fixed

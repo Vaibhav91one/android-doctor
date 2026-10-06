@@ -115,6 +115,8 @@ pub struct ImageAudit {
     pub content_bytes_scanned: u64,
     /// One entry per APK found in the image, with its package name and signers.
     pub apks: Vec<ApkAudit>,
+    /// Exploit-mitigation triage of native ELF objects.
+    pub elf: crate::elf::ElfAudit,
 }
 
 pub(crate) fn label_of(e: &Entry) -> String {
@@ -287,6 +289,7 @@ fn analyse_with(
     let (hits, scanned) = scan_content(entries, read);
     a.content_findings = hits;
     a.content_bytes_scanned = scanned;
+    a.elf = crate::elf::scan_tree(entries, read);
     let (f, keys) = findings(&a).into_iter().unzip();
     a.findings = f;
     a.finding_keys = keys;
@@ -610,8 +613,7 @@ fn findings(a: &ImageAudit) -> Vec<(Finding, (String, String))> {
                 rule,
             );
         }
-    }
-    f.sort_by_key(|x| x.0.severity);
+    }    f.extend(crate::elf::findings(&a.elf));    f.sort_by_key(|x| x.0.severity);
     f
 }
 
@@ -745,6 +747,7 @@ pub fn to_json(audits: &[ImageAudit]) -> Value {
             })).collect::<Vec<_>>(),
             "content_bytes_scanned": a.content_bytes_scanned,
             "apks": a.apks.iter().map(apk_json).collect::<Vec<Value>>(),
+            "elf": crate::elf::to_json(&a.elf),
         })).collect::<Vec<_>>(),
     })
 }
@@ -803,6 +806,23 @@ pub fn to_text(audits: &[ImageAudit], no_color: bool) -> String {
                     )
                 }
                 None => format!("unreadable: {}", x.error.as_deref().unwrap_or("unknown")),
+            }));
+        }
+        if a.elf.scanned + a.elf.errors.len() > 0 {
+            o.push(format!(
+                "ELF objects: {} judged, {} with missing mitigations, {} unreadable{}",
+                a.elf.scanned,
+                a.elf.objects.len(),
+                a.elf.errors.len(),
+                if a.elf.truncated {
+                    " (scan capped)"
+                } else {
+                    ""
+                }
+            ));
+            o.extend(capped(&a.elf.objects, |(p, i)| {
+                let rules: Vec<_> = crate::elf::issues(i).iter().map(|x| x.1).collect();
+                format!("{p}  {}", rules.join(" "))
             }));
         }
         if !a.props.is_empty() {
