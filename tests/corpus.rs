@@ -163,7 +163,7 @@ fn build_case(case: &str, out: &Path, (mke2fs, erofs): &(PathBuf, PathBuf)) -> b
                 .arg("-d")
                 .arg(e.path())
                 .arg(&img));
-            pin_superblock_times(&img);
+            pin_ext4_times(&img);
         } else {
             run(Command::new(erofs)
                 .env("SOURCE_DATE_EPOCH", "0")
@@ -175,23 +175,65 @@ fn build_case(case: &str, out: &Path, (mke2fs, erofs): &(PathBuf, PathBuf)) -> b
     built
 }
 
-/// mke2fs older than 1.47.1 stamps the superblock with the wall clock whatever the environment
-/// says. Zero mtime, wtime, lastcheck and mkfs_time, then redo the superblock crc32c
-/// (metadata_csum: crc32c over the first 1020 bytes, seed ~0, no final inversion).
-fn pin_superblock_times(img: &Path) {
-    let mut d = fs::read(img).unwrap();
-    let sb = &mut d[1024..2048];
-    for off in [0x2C, 0x30, 0x40, 0x108] {
-        sb[off..off + 4].fill(0);
-    }
-    let mut crc = !0u32;
-    for &b in &sb[..0x3FC] {
+/// crc32c (Castagnoli) as ext4 uses it: caller-chosen seed, no final inversion.
+fn crc32c(mut crc: u32, data: &[u8]) -> u32 {
+    for &b in data {
         crc ^= u32::from(b);
         for _ in 0..8 {
             crc = (crc >> 1) ^ (0x82F6_3B78 & (!(crc & 1)).wrapping_add(1));
         }
     }
-    sb[0x3FC..0x400].copy_from_slice(&crc.to_le_bytes());
+    crc
+}
+
+fn le32(d: &[u8], o: usize) -> usize {
+    u32::from_le_bytes(d[o..o + 4].try_into().unwrap()) as usize
+}
+
+/// mke2fs older than 1.47.1 stamps the superblock and every inode with the wall clock whatever
+/// the environment says. Zero those times and redo the metadata_csum checksums that cover them
+/// (the pinned mke2fs.conf always enables metadata_csum).
+fn pin_ext4_times(img: &Path) {
+    let mut d = fs::read(img).unwrap();
+    let sb = &mut d[1024..2048];
+    for off in [0x2C, 0x30, 0x40, 0x108] {
+        sb[off..off + 4].fill(0);
+    }
+    let sum = crc32c(!0, &sb[..0x3FC]);
+    sb[0x3FC..0x400].copy_from_slice(&sum.to_le_bytes());
+    let sb = d[1024..2048].to_vec();
+    let block = 1024usize << le32(&sb, 0x18);
+    let (blocks, per_group, first) = (le32(&sb, 4), le32(&sb, 0x20), le32(&sb, 0x14));
+    let (ipg, isz) = (
+        le32(&sb, 0x28),
+        usize::from(u16::from_le_bytes([sb[0x58], sb[0x59]])),
+    );
+    let desc = if le32(&sb, 0x60) & 0x80 != 0 { 64 } else { 32 }; // INCOMPAT_64BIT
+    let seed = crc32c(!0, &sb[0x68..0x78]);
+    for g in 0..(blocks - first).div_ceil(per_group) {
+        let gd = (first + 1) * block + g * desc;
+        let table = le32(&d, gd + 8) * block;
+        for i in 0..ipg {
+            let at = table + i * isz;
+            if d[at..at + isz].iter().all(|&b| b == 0) {
+                continue;
+            }
+            let ino = (g * ipg + i + 1) as u32;
+            d[at + 8..at + 20].fill(0); // atime, ctime, mtime
+            d[at + 0x84..at + 0x98].fill(0); // extra time bits, crtime
+            d[at + 0x7C..at + 0x7E].fill(0);
+            // the high half only exists when i_extra_isize reaches it
+            let hi = u16::from_le_bytes([d[at + 0x80], d[at + 0x81]]) >= 4;
+            d[at + 0x82..at + 0x84].fill(0);
+            let mut c = crc32c(seed, &ino.to_le_bytes());
+            c = crc32c(c, &d[at + 0x64..at + 0x68]);
+            c = crc32c(c, &d[at..at + isz]);
+            d[at + 0x7C..at + 0x7E].copy_from_slice(&(c as u16).to_le_bytes());
+            if hi {
+                d[at + 0x82..at + 0x84].copy_from_slice(&((c >> 16) as u16).to_le_bytes());
+            }
+        }
+    }
     fs::write(img, d).unwrap();
 }
 
