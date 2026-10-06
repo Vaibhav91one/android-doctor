@@ -8,10 +8,16 @@
 use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
 
-/// Offset of the primary LP geometry within the image.
+/// Offset of the primary LP geometry within the image (`LP_PARTITION_RESERVED_BYTES`).
 const GEOMETRY_OFFSET: u64 = 4096;
-/// `LpMetadataGeometry` total size in AOSP.
-const GEOMETRY_SIZE: usize = 64;
+/// The block each geometry copy occupies (`LP_METADATA_GEOMETRY_SIZE`); the struct inside it is
+/// only `struct_size` bytes and the rest is zero padding.
+const GEOMETRY_BLOCK: usize = 4096;
+/// `sizeof(LpMetadataGeometry)` in AOSP: magic, struct_size, checksum[32] and three u32 = 52.
+const GEOMETRY_STRUCT_SIZE: usize = 52;
+/// Where slot 0's primary metadata starts: the reserved 4096 bytes, then the primary and backup
+/// geometry blocks (`GetPrimaryMetadataOffset`).
+const METADATA_OFFSET: u64 = GEOMETRY_OFFSET + 2 * GEOMETRY_BLOCK as u64;
 /// `LpMetadataHeader` magic: "Lp0" reversed.
 const LP_HEADER_MAGIC: u32 = 0x414C5030;
 /// `LpMetadataGeometry` magic: "gDla".
@@ -24,9 +30,6 @@ pub const SECTOR_SIZE: u64 = 512;
 const MAX_ENTRIES: usize = 4096;
 /// Maximum total partition image bytes.
 pub const MAX_IMAGE_BYTES: u64 = 1u64 << 40;
-/// Bytes the metadata blob occupies in a super image (header + tables). The AOSP
-/// writer places the primary copy at offset 0 with a 4096-byte alignment.
-const METADATA_ALIGN: u64 = 4096;
 
 fn le16(b: &[u8], at: usize) -> u16 {
     u16::from_le_bytes([b[at], b[at + 1]])
@@ -52,7 +55,7 @@ fn le64(b: &[u8], at: usize) -> u64 {
 /// A parsed SHA-256 digest stored as raw 32 bytes.
 type Sha256Arr = [u8; 32];
 
-/// `LpMetadataGeometry` (AOSP, Apache-2.0), 48 bytes meaningful + 16 bytes padding = 64.
+/// `LpMetadataGeometry` (AOSP, Apache-2.0): a 52-byte packed struct.
 #[allow(dead_code)]
 struct Geometry {
     magic: u32,
@@ -66,8 +69,8 @@ struct Geometry {
 fn parse_geometry(b: &[u8]) -> Result<Geometry> {
     ensure!(!b.is_empty(), "super image is empty");
     ensure!(
-        b.len() >= GEOMETRY_SIZE,
-        "super image is too short for an LP geometry (need {GEOMETRY_SIZE} bytes, got {})",
+        b.len() >= GEOMETRY_STRUCT_SIZE,
+        "super image is too short for an LP geometry (need {GEOMETRY_STRUCT_SIZE} bytes, got {})",
         b.len()
     );
     let g = Geometry {
@@ -84,8 +87,8 @@ fn parse_geometry(b: &[u8]) -> Result<Geometry> {
         g.magic
     );
     ensure!(
-        g.struct_size as usize >= GEOMETRY_SIZE,
-        "LP geometry struct_size {} is too small",
+        (GEOMETRY_STRUCT_SIZE..=GEOMETRY_BLOCK).contains(&(g.struct_size as usize)),
+        "LP geometry struct_size {} is outside {GEOMETRY_STRUCT_SIZE}..={GEOMETRY_BLOCK}",
         g.struct_size
     );
     ensure!(
@@ -96,9 +99,15 @@ fn parse_geometry(b: &[u8]) -> Result<Geometry> {
     Ok(g)
 }
 
-/// Verify the geometry checksum: SHA-256 of the struct with the checksum field zeroed.
+/// Verify the geometry checksum: SHA-256 of the first `struct_size` bytes with the checksum
+/// field zeroed (the zero padding after the struct is not covered).
 fn verify_geometry_checksum(g: &Geometry, b: &[u8]) -> Result<()> {
-    let mut copy = b.to_vec();
+    ensure!(
+        b.len() >= g.struct_size as usize,
+        "LP geometry: struct_size {} runs past the image",
+        g.struct_size
+    );
+    let mut copy = b[..g.struct_size as usize].to_vec();
     let start = 8;
     let end = start + 32;
     for byte in &mut copy[start..end] {
@@ -180,7 +189,7 @@ fn parse_table(b: &[u8], at: usize) -> TableDescriptor {
 
 /// `LpMetadataHeader` (AOSP, Apache-2.0): magic at 0, major u16, minor u16,
 /// header_size u32, header_checksum sha256[32], tables_size u32,
-/// tables_checksum sha256[32], then four table descriptors.
+/// tables_checksum sha256[32], then four 12-byte table descriptors at 80, 92, 104 and 116.
 #[allow(dead_code)]
 struct MetadataHeader {
     magic: u32,
@@ -221,10 +230,10 @@ fn parse_metadata_header(b: &[u8]) -> Result<MetadataHeader> {
         header_checksum: read_sha256(b, 12),
         tables_size: le32(b, 44),
         tables_checksum: read_sha256(b, 48),
-        partitions: parse_table(b, 60),
-        extents: parse_table(b, 72),
-        groups: parse_table(b, 84),
-        block_devices: parse_table(b, 96),
+        partitions: parse_table(b, 80),
+        extents: parse_table(b, 92),
+        groups: parse_table(b, 104),
+        block_devices: parse_table(b, 116),
     };
     ensure!(
         header.header_size as usize >= HEADER_SIZE_MIN,
@@ -273,8 +282,8 @@ fn parse_partition(b: &[u8]) -> Result<Partition> {
 }
 
 /// `LpMetadataExtent` (AOSP, Apache-2.0): num_sectors u64, target_type u32,
-/// target_data u64, target_source u32. Total = 28 bytes.
-const EXTENT_SIZE: usize = 28;
+/// target_data u64, target_source u32. Packed, total = 24 bytes.
+const EXTENT_SIZE: usize = 24;
 
 #[derive(Clone, Copy)]
 pub struct Extent {
@@ -322,9 +331,9 @@ fn parse_group(b: &[u8]) -> Result<Group> {
     })
 }
 
-/// `LpMetadataBlockDevice` (AOSP, Apache-2.0): first_logical_sector u64,
-/// partition_name[36], flags u32, size u64. Total = 56 bytes.
-const BLOCK_DEVICE_SIZE: usize = 56;
+/// `LpMetadataBlockDevice` (AOSP, Apache-2.0): first_logical_sector u64, alignment u32,
+/// alignment_offset u32, size u64, partition_name[36], flags u32. Packed, total = 64 bytes.
+const BLOCK_DEVICE_SIZE: usize = 64;
 
 #[derive(Clone)]
 #[allow(dead_code)]
@@ -340,12 +349,12 @@ fn parse_block_device(b: &[u8]) -> Result<BlockDevice> {
         b.len() >= BLOCK_DEVICE_SIZE,
         "block_device entry is too short"
     );
-    let partition_name = read_name(&b[8..44])?;
+    let partition_name = read_name(&b[24..60])?;
     Ok(BlockDevice {
         first_logical_sector: le64(b, 0),
         partition_name,
-        flags: le32(b, 44),
-        size: le64(b, 48),
+        flags: le32(b, 60),
+        size: le64(b, 16),
     })
 }
 
@@ -376,23 +385,28 @@ fn parse_entries<T>(
     entry_size: usize,
     parse_one: fn(&[u8]) -> Result<T>,
 ) -> Result<Vec<T>> {
-    ensure!(td.entry_size as usize == entry_size, "wrong LP entry size");
-    let total = td.num_entries as usize * entry_size;
-    let start = td.offset as usize;
-    ensure!(tables.len() >= start + total, "LP table truncated");
+    // A newer writer may append fields to an entry: read the ones we know and step by the size
+    // the table declares.
+    let stride = td.entry_size as usize;
+    ensure!(
+        stride >= entry_size,
+        "LP entry size {stride} is smaller than the {entry_size} bytes this table needs"
+    );
     ensure!(
         td.num_entries <= MAX_ENTRIES as u32,
         "LP table claims too many entries: {n}",
         n = td.num_entries
     );
+    let start = td.offset as usize;
+    let end = (td.num_entries as usize)
+        .checked_mul(stride)
+        .and_then(|total| start.checked_add(total))
+        .context("LP table size overflows")?;
+    ensure!(tables.len() >= end, "LP table truncated");
     let mut out = Vec::with_capacity(td.num_entries as usize);
-    let mut i = start;
-    for _ in 0..td.num_entries {
-        let chunk = tables
-            .get(i..i + entry_size)
-            .context("LP table entry is too short")?;
-        out.push(parse_one(chunk)?);
-        i += entry_size;
+    for k in 0..td.num_entries as usize {
+        let at = start + k * stride;
+        out.push(parse_one(&tables[at..at + stride])?);
     }
     Ok(out)
 }
@@ -409,18 +423,13 @@ pub struct ParsedPart {
 pub fn parse_metadata(image: &[u8]) -> Result<Vec<ParsedPart>> {
     ensure!(!image.is_empty(), "super image is empty");
     let gstart = GEOMETRY_OFFSET as usize;
-    let g = parse_geometry(
-        image
-            .get(gstart..gstart + GEOMETRY_SIZE)
-            .context("super image too short for geometry")?,
-    )?;
-    verify_geometry_checksum(
-        &g,
-        image
-            .get(gstart..gstart + GEOMETRY_SIZE)
-            .context("super image too short for geometry")?,
-    )?;
-    let hdr_off = GEOMETRY_OFFSET + METADATA_ALIGN;
+    let block = image
+        .get(gstart..)
+        .context("super image too short for geometry")?;
+    let block = &block[..block.len().min(GEOMETRY_BLOCK)];
+    let g = parse_geometry(block)?;
+    verify_geometry_checksum(&g, block)?;
+    let hdr_off = METADATA_OFFSET;
     let header_bytes = image
         .get(hdr_off as usize..)
         .context("no LP metadata header region")?;
@@ -510,7 +519,7 @@ pub fn is_super(path: &std::path::Path) -> Result<bool> {
     Ok(n == 4 && magic == LP_GEOMETRY_MAGIC_BYTES)
 }
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::testutil::Scratch;
 
@@ -522,6 +531,131 @@ mod tests {
         let p = d.join("super.img");
         std::fs::write(&p, &img).unwrap();
         assert!(is_super(&p).unwrap());
+    }
+
+    fn sha(b: &[u8]) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&Sha256::digest(b));
+        out
+    }
+
+    fn put_name(v: &mut Vec<u8>, name: &str) {
+        let mut field = [0u8; 36];
+        field[..name.len()].copy_from_slice(name.as_bytes());
+        v.extend_from_slice(&field);
+    }
+
+    /// A super image laid out the way AOSP liblp writes it (`metadata_format.h`): 4096 reserved
+    /// bytes, the primary geometry at 4096 and its backup at 8192 (each a 4096-byte block holding
+    /// a 52-byte packed struct), the primary metadata slot at 12288, partition data after that.
+    /// Each partition is `(name, bytes)`, stored back to back from sector 64.
+    pub(crate) fn lp_image(parts: &[(&str, &[u8])]) -> Vec<u8> {
+        const FIRST_DATA_SECTOR: u64 = 64;
+        let n = parts.len();
+        let (mut partitions, mut extents) = (Vec::new(), Vec::new());
+        let mut data = Vec::new();
+        for (i, (name, body)) in parts.iter().enumerate() {
+            put_name(&mut partitions, name);
+            for field in [0u32, i as u32, 1, 0] {
+                partitions.extend_from_slice(&field.to_le_bytes());
+            }
+            let sectors = body.len().div_ceil(512) as u64;
+            extents.extend_from_slice(&sectors.to_le_bytes());
+            extents.extend_from_slice(&0u32.to_le_bytes()); // linear
+            let at = FIRST_DATA_SECTOR + (data.len() / 512) as u64;
+            extents.extend_from_slice(&at.to_le_bytes());
+            extents.extend_from_slice(&0u32.to_le_bytes()); // block device 0
+            data.extend_from_slice(body);
+            data.resize(data.len().div_ceil(512) * 512, 0);
+        }
+        let mut groups = Vec::new();
+        put_name(&mut groups, "default");
+        groups.extend_from_slice(&0u32.to_le_bytes());
+        groups.extend_from_slice(&0u64.to_le_bytes());
+        let mut devices = Vec::new();
+        devices.extend_from_slice(&FIRST_DATA_SECTOR.to_le_bytes()); // first_logical_sector
+        devices.extend_from_slice(&1u32.to_le_bytes()); // alignment
+        devices.extend_from_slice(&0u32.to_le_bytes()); // alignment_offset
+        devices.extend_from_slice(&((data.len() as u64) + 65536).to_le_bytes()); // size
+        put_name(&mut devices, "super");
+        devices.extend_from_slice(&0u32.to_le_bytes()); // flags
+        assert_eq!((partitions.len(), extents.len()), (n * 52, n * 24));
+        assert_eq!((groups.len(), devices.len()), (48, 64));
+
+        let mut tables = Vec::new();
+        let mut descriptors = Vec::new();
+        for (blob, count, size) in [
+            (&partitions, n, 52u32),
+            (&extents, n, 24),
+            (&groups, 1, 48),
+            (&devices, 1, 64),
+        ] {
+            descriptors.extend_from_slice(&(tables.len() as u32).to_le_bytes());
+            descriptors.extend_from_slice(&(count as u32).to_le_bytes());
+            descriptors.extend_from_slice(&size.to_le_bytes());
+            tables.extend_from_slice(blob);
+        }
+        let mut header = Vec::new();
+        header.extend_from_slice(&0x414C_5030u32.to_le_bytes());
+        header.extend_from_slice(&10u16.to_le_bytes());
+        header.extend_from_slice(&0u16.to_le_bytes());
+        header.extend_from_slice(&128u32.to_le_bytes()); // header_size
+        header.extend_from_slice(&[0u8; 32]); // header_checksum, filled below
+        header.extend_from_slice(&(tables.len() as u32).to_le_bytes());
+        header.extend_from_slice(&sha(&tables));
+        header.extend_from_slice(&descriptors);
+        header.resize(128, 0); // flags + reserved
+        let checksum = sha(&header);
+        header[12..44].copy_from_slice(&checksum);
+
+        let mut geometry = Vec::new();
+        geometry.extend_from_slice(&0x616C_4467u32.to_le_bytes());
+        geometry.extend_from_slice(&52u32.to_le_bytes()); // struct_size
+        geometry.extend_from_slice(&[0u8; 32]);
+        geometry.extend_from_slice(&4096u32.to_le_bytes()); // metadata_max_size
+        geometry.extend_from_slice(&1u32.to_le_bytes()); // metadata_slot_count
+        geometry.extend_from_slice(&4096u32.to_le_bytes()); // logical_block_size
+        assert_eq!(geometry.len(), 52);
+        let checksum = sha(&geometry);
+        geometry[8..40].copy_from_slice(&checksum);
+
+        let mut img = vec![0u8; (FIRST_DATA_SECTOR as usize) * 512];
+        for at in [4096usize, 8192] {
+            img[at..at + 52].copy_from_slice(&geometry);
+        }
+        img[12288..12288 + header.len()].copy_from_slice(&header);
+        let t = 12288 + header.len();
+        img[t..t + tables.len()].copy_from_slice(&tables);
+        img.extend_from_slice(&data);
+        img
+    }
+
+    /// Issue #118: every real super image was refused with "LP geometry struct_size 52 is too
+    /// small", because the parser assumed a 64-byte geometry and, past that check, the wrong
+    /// metadata offset, table-descriptor offsets and extent / block-device entry sizes.
+    #[test]
+    fn a_super_image_laid_out_like_aosp_writes_it_is_parsed_and_split() {
+        let system = vec![0xA5u8; 1000];
+        let vendor = (0..2048u32).map(|i| i as u8).collect::<Vec<u8>>();
+        let img = lp_image(&[("system_a", &system), ("vendor_a", &vendor)]);
+        let parts = parse_metadata(&img).unwrap();
+        let names: Vec<_> = parts.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["system_a", "vendor_a"]);
+        let out = split_partitions(&img, &parts, None).unwrap();
+        assert_eq!(&out[0].1[..1000], &system[..]);
+        assert!(
+            out[0].1[1000..].iter().all(|&b| b == 0),
+            "padded to a sector"
+        );
+        assert_eq!(out[1].1, vendor);
+    }
+
+    #[test]
+    fn a_corrupted_geometry_checksum_is_still_refused() {
+        let mut img = lp_image(&[("system_a", &[1u8; 512])]);
+        img[4096 + 40] ^= 1; // metadata_max_size, covered by the checksum
+        let e = parse_metadata(&img).err().expect("refused").to_string();
+        assert!(e.contains("checksum"), "{e}");
     }
 
     #[test]

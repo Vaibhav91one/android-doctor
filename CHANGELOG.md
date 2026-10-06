@@ -8,12 +8,21 @@ All notable changes to this project are documented here. The format follows
 ### Added
 
 - Corpus/precision gate (#109): `tests/corpus.rs` generates deterministic ext4 and erofs fixtures from text source trees, asserts exact `audit` and `doctor scan` findings against committed snapshots, and checks two builds are byte-identical; a required `corpus` CI job and `docs/precision.md`.
+- `fix [--agent claude|codex|cursor] [--print] [--yolo] <dir>`: runs the doctor scan and renders one prompt for a coding agent (findings worst first, firmware text fenced as untrusted, a clause forbidding suppressing findings, and the `doctor scan <dir> --json` re-run command). Launches the agent only if its binary is on PATH, with its approval prompts kept unless `--yolo`; never launches inside an agent (`CLAUDECODE`, `CODEX_THREAD_ID`, `CODEX_SANDBOX`, `CURSOR_SANDBOX`, `ANDROID_DOCTOR_AGENT=1`). A clean scan prints "nothing to fix" and exits 0 (#107).
 - Tag-triggered publishing: the release workflow checks that the tag, `Cargo.toml` and `npm/package.json` agree, then publishes GitHub release binaries, the crate to crates.io (`CARGO_REGISTRY_TOKEN`) and the launcher to npm with provenance (`NPM_TOKEN`); each registry step is skipped with a notice when its secret is unset.
 - `npx android-doctor` downloads and caches the matching release binary on first run (falls back to a binary on `PATH`).
 - Illustrated logo (layered partition stack under a magnifier) and a standalone `docs/assets/mark.svg`.
 - Crate metadata and package excludes so `cargo publish` passes.
 - `doctor install --agent cursor` also writes `.cursor/rules/android-doctor.mdc`, and `--agent codex` / `--agent opencode` add a managed block to `AGENTS.md`; `--agent claude` is accepted for `claude-code`.
 - README rewrite, `AGENTS.md`, logo assets and an npm launcher (`npx android-doctor`).
+
+### Fixed
+
+- `extract` no longer aborts on a gzip-wrapped image that is not a tar (a gzip `dt.img` holding an Amlogic `AML_` container failed with "numeric field was not a number ... cksum for AML_" and left every later image unwritten). A compressed file now counts as a tar only if its decompressed first block is a tar header; otherwise it is copied unchanged. `dt` and `amlogic` read through a gzip wrapper (#114, #118).
+- `extract` unpacks `*.tar.gz`, `*.tgz`, `*.tar.xz`, `*.txz`, `*.tar.bz2`, `*.tbz2`, `*.tar.zst` and `*.tar.lz4` entries instead of rejecting the name as unsafe (#117).
+- Super (LP) images are read: the geometry is 52 bytes (not 64) and its checksum covers `struct_size` bytes, the primary metadata is at 12288, the header's table descriptors are at 80/92/104/116, and extent and block-device entries are 24 and 64 bytes. Every real super image used to fail with "LP geometry struct_size 52 is too small", exit 1, and skip the images after it (#118).
+- `vbmeta` verifies RSA signatures: the AVB public key blob has an 8-byte header (`key_num_bits`, `n0inv`) before the modulus, and the verifier read the modulus from byte 4, so every real signature reported FAILED (#118).
+- `vbmeta` no longer reports `[high]` for an unsigned per-partition footer (now `avb-unsigned-footer`, `[info]`, since a signed top-level vbmeta normally carries the signature) or for rollback index 0 (the default). An unsigned top-level vbmeta, and an unsigned footer on a chained partition, stay `[high]` (#118).
 
 ## [0.1.0]
 

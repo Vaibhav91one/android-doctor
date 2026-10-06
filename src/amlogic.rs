@@ -127,7 +127,7 @@ pub fn describe(data: &[u8]) -> Result<Image> {
 /// Describe a container on disk.
 pub fn describe_file(path: &std::path::Path) -> Result<Image> {
     let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    describe(&data)
+    describe(&crate::ramdisk::unwrap_gzip(data)?.0)
 }
 
 /// A human-readable summary. Says plainly when the payload is encrypted.
@@ -242,6 +242,24 @@ mod tests {
             "entropy was {:.3}",
             img.payload_entropy
         );
+    }
+
+    fn gzip(body: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        e.write_all(body).unwrap();
+        e.finish().unwrap()
+    }
+
+    #[test]
+    fn a_gzip_wrapped_container_is_read_through_the_gzip() {
+        let plain = synth(4096, 4, false);
+        let d = crate::testutil::Scratch::new("aml-gz");
+        let f = d.join("dt.img");
+        std::fs::write(&f, gzip(&plain)).unwrap();
+        let img = describe_file(&f).unwrap();
+        assert_eq!(img.header.version, 4);
+        assert_eq!(img.file_len, plain.len() as u64, "sizes are of the content");
     }
 
     #[test]
