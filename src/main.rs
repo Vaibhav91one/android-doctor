@@ -567,6 +567,10 @@ fn main() -> anyhow::Result<()> {
     // well would make the runtime print it a second time.
     match result {
         Ok(()) => Ok(()),
+        Err(e) if e.downcast_ref::<reporting::NewFindings>().is_some() => {
+            eprintln!("{e}");
+            std::process::exit(reporting::EXIT_NEW_FINDINGS);
+        }
         Err(e) => {
             eprintln!(
                 "{}",
@@ -775,6 +779,7 @@ fn audit_command(
         .map(|p| audit::audit_image(p))
         .collect::<anyhow::Result<Vec<_>>>()?;
     let all = findings::from_audit(&audits);
+    let baselined = report.baseline.is_some();
     emit(
         Emit {
             json,
@@ -782,8 +787,21 @@ fn audit_command(
         },
         report,
         all,
-        |_| Ok(serde_json::to_string_pretty(&audit::to_json(&audits))?),
-        |_| audit::to_text(&audits, no_color),
+        |shown| {
+            // The original object plus `findings`: the unified rows, only the new ones under
+            // --baseline.
+            let mut v = audit::to_json(&audits);
+            v["findings"] = shown.iter().map(findings::Finding::to_json).collect();
+            Ok(serde_json::to_string_pretty(&v)?)
+        },
+        // Without a baseline the familiar per-image report; with one, only what is new.
+        |shown| {
+            if baselined {
+                findings::render_flat(shown)
+            } else {
+                audit::to_text(&audits, no_color)
+            }
+        },
     )
 }
 

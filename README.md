@@ -207,6 +207,44 @@ jq '.runs[0] | {rules: (.tool.driver.rules | length), score: .properties.score,
 }
 ```
 
+### Baselines (`--baseline FILE`)
+
+`--baseline FILE` reports only the findings whose fingerprint is not in FILE, says how many it
+suppressed as known, and exits `3` when something new turned up. FILE is a previous `--json`
+report: record one from a plain run (without `--baseline`) and keep it next to the firmware.
+
+```sh
+android-doctor audit system.img --json > baseline.json     # record what is known today
+android-doctor audit system.img --baseline baseline.json   # later: nothing changed
+```
+
+```
+no new findings
+baseline baseline.json: 3 suppressed as known, 0 new
+```
+
+After a new `/sbin/su` is added to the image:
+
+```
+high security su-binary: sbin/su: /sbin/su looks like a su binary
+    └ Remove the su binary and its SELinux domain
+baseline baseline.json: 3 suppressed as known, 1 new
+1 new finding(s) not in the baseline
+```
+
+That run exits `3`. `--json` with `--baseline` prints the new findings only (for `audit`, in the
+`findings` array; `images[]` keeps the full inventory) and the summary goes to stderr; a report
+written with `--baseline` lists only the new findings, so record baselines from a plain run.
+
+- A baseline that cannot be read, is not JSON, or is not an `audit`/`doctor scan` `--json` report
+  (including one from a version before fingerprints) is an error (exit `1`), never an empty
+  baseline: a mistyped path must not turn the gate off.
+- A coverage gap (`info ... cannot evaluate`) is never suppressed: the baseline cannot vouch for a
+  rule that did not run. Gaps are listed, counted apart, and never cause exit `3`; a new `info`
+  finding is listed but does not either.
+- The score (and a SARIF `score`) is for the whole scan, whatever the baseline hides from the list.
+  With `--sarif`, every result carries `baselineState: "new"`.
+
 ## Agent integration
 
 Two ways to hand the tool to an AI coding agent.
@@ -245,7 +283,7 @@ Every subcommand takes `--help`. `--no-color` (or `NO_COLOR`) disables colour.
 | `extract <ota.zip\|dir\|payload.bin> [-o out] [--only a,b] [--list] [--force]` | OTA to partition images (add `--files` for file trees, `--base` for incremental OTAs) |
 | `unpack <boot.img\|vendor_boot.img> [-o dir] [--json]` | Header, and with `-o` the kernel, ramdisk and dtb sections |
 | `ramdisk <boot.img\|ramdisk> [-o dir] [--json] [--list]` | Ramdisk contents and ADB properties |
-| `audit <image\|dir>... [--json] [--sarif FILE]` | ADB properties, setuid files, `su` binaries, init services, findings |
+| `audit <image\|dir>... [--json] [--sarif FILE] [--baseline FILE]` | ADB properties, setuid files, `su` binaries, init services, findings |
 | `vbmeta <vbmeta.img> [--images dir] [--json] [--key key.pem]` | AVB header, key, signature, descriptors, partition hashes |
 | `ls <image> [path]` / `cat <image> <path>` | Browse and read files inside an ext2/3/4 or erofs image |
 | `files <image> [-o dir] [--json]` | List or extract an image's files with SELinux labels |
@@ -256,7 +294,7 @@ Every subcommand takes `--help`. `--no-color` (or `NO_COLOR`) disables colour.
 | `amlogic <file>` | Describe an Amlogic image container |
 | `partitions <dir> [--json] [--sector-size N]` | Qualcomm `rawprogram*.xml` / MediaTek `scatter.txt` flash manifest |
 | `hash-tree <image>` | Regenerate the dm-verity hash tree for a rebuilt partition |
-| `doctor scan <dir> [--json] [--sarif FILE]` | Deterministic health scan |
+| `doctor scan <dir> [--json] [--sarif FILE] [--baseline FILE]` | Deterministic health scan |
 | `doctor install [--agent <name>] [--print-only]` | Install the agent skill |
 | `mcp [--verbose]` | MCP server on stdio |
 
@@ -337,10 +375,16 @@ Roadmap and issue list: see the milestones on GitHub.
 
 | | |
 | --- | --- |
-| `0` | ran to completion |
-| `1` | `doctor scan` found an `error`-severity finding, or a failure: bad flag, unreadable or hostile input |
+| `0` | ran to completion; with `--baseline`, nothing new above `info` |
+| `1` | a failure (unreadable or hostile input, unreadable `--baseline`, unwritable `--sarif`), or `doctor scan` reports an `error`-severity finding |
+| `2` | a bad flag or argument (reported by the argument parser) |
+| `3` | `--baseline`: findings that are not in the baseline |
 
-`audit` reports its findings in the output; it exits `0` unless it fails to read the input.
+Precedence, first match wins: a failure (`1`), then an `error`-severity finding among the findings
+reported (`1`; `doctor scan` only, as before), then new findings under `--baseline` (`3`), then
+`0`. `--baseline` filters first, so an `error` finding already in the baseline does not fail the
+run, while a new one exits `1`, not `3`. `audit` still exits `0` on findings unless `--baseline`
+is given.
 
 ## Privacy and telemetry
 

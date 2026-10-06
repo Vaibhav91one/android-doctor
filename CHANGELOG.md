@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `--baseline <FILE>` on `audit` and `doctor scan`: report only findings whose fingerprint is not in a previous `--json` report, count what was suppressed, and exit `3` when something new above `info` appeared. Coverage gaps are never suppressed; a missing, unreadable or foreign baseline is an error. `audit --json` gains a top-level `findings` array (#110).
 - `--sarif <FILE>` on `audit` and `doctor scan` writes SARIF 2.1.0 (one rule per rule id with the remedy as help, levels from severity, locations inside the image, `partialFingerprints`, the health score under `runs[0].properties.score`) (#105).
 - A shared findings layer for `audit` and `doctor scan`: one severity scale (`error > high > medium > warn > info`) and a stable fingerprint per finding. `doctor scan --json` rows gain an additive `fingerprint` (and `image` inside an image) field.
 - Tag-triggered publishing: the release workflow checks that the tag, `Cargo.toml` and `npm/package.json` agree, then publishes GitHub release binaries, the crate to crates.io (`CARGO_REGISTRY_TOKEN`) and the launcher to npm with provenance (`NPM_TOKEN`); each registry step is skipped with a notice when its secret is unset.

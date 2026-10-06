@@ -74,6 +74,12 @@ fn invocations(d: &Path) -> Vec<Vec<String>> {
         vec!["doctor".into(), ota.display().to_string()],
         // the reporting flags must survive hostile input too
         vec![
+            "audit".into(),
+            img.display().to_string(),
+            "--baseline".into(),
+            img.display().to_string(),
+        ],
+        vec![
             "doctor".into(),
             "scan".into(),
             d.display().to_string(),

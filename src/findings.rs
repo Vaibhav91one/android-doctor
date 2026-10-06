@@ -28,9 +28,11 @@
 
 use crate::audit::{self, ImageAudit};
 use crate::doctor;
+use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Severity {
@@ -474,6 +476,80 @@ pub fn score(findings: &[Finding]) -> Score {
 }
 
 // ---------------------------------------------------------------------------
+// Baseline
+// ---------------------------------------------------------------------------
+
+/// A previous `--json` report, reduced to its fingerprints.
+pub struct Baseline {
+    pub path: String,
+    known: HashSet<String>,
+}
+
+/// Read a baseline: the output of `doctor scan --json` (an array) or `audit --json` (an object
+/// with a `findings` array). Anything else is an error, never an empty baseline: a mistyped or
+/// wrong file silently disabling the gate would be worse than failing.
+pub fn read_baseline(path: &Path) -> Result<Baseline> {
+    let shown = path.display();
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("cannot read baseline {shown}"))?;
+    let doc: Value = serde_json::from_str(&text)
+        .with_context(|| format!("baseline {shown} is not valid JSON"))?;
+    let rows = match &doc {
+        Value::Array(a) => Some(a),
+        Value::Object(o) => o.get("findings").and_then(Value::as_array),
+        _ => None,
+    };
+    let Some(rows) = rows else {
+        anyhow::bail!(
+            "baseline {shown} is not an android-doctor report: expected the output of \
+             `doctor scan --json` or `audit --json`"
+        );
+    };
+    let mut known = HashSet::new();
+    for (i, row) in rows.iter().enumerate() {
+        let Some(fp) = row.get("fingerprint").and_then(Value::as_str) else {
+            anyhow::bail!(
+                "baseline {shown} is not an android-doctor report: finding {} has no \
+                 fingerprint (was it written by an older version?)",
+                i + 1
+            );
+        };
+        known.insert(fp.to_string());
+    }
+    Ok(Baseline {
+        path: shown.to_string(),
+        known,
+    })
+}
+
+pub struct Diff {
+    pub new: Vec<Finding>,
+    pub suppressed: usize,
+}
+
+impl Baseline {
+    /// Keep the findings the baseline does not know. A coverage gap is never suppressed: the
+    /// baseline cannot vouch for a rule that did not run.
+    pub fn diff(&self, findings: Vec<Finding>) -> Diff {
+        let total = findings.len();
+        let new: Vec<Finding> = findings
+            .into_iter()
+            .filter(|f| f.gap || !self.known.contains(&f.fingerprint))
+            .collect();
+        Diff {
+            suppressed: total - new.len(),
+            new,
+        }
+    }
+}
+
+/// True when `new` should fail a `--baseline` run (exit 3): a new finding above `info`, that is
+/// not a coverage gap. New `info` findings are reported but never gate.
+pub fn gates(new: &[Finding]) -> bool {
+    new.iter().any(|f| !f.gap && f.severity > Severity::Info)
+}
+
+// ---------------------------------------------------------------------------
 // Flat text
 // ---------------------------------------------------------------------------
 
@@ -740,6 +816,67 @@ mod tests {
         let s1 = score(&v);
         v.reverse();
         assert_eq!(s1, score(&v));
+    }
+
+    #[test]
+    fn baseline_suppresses_known_never_suppresses_gaps_and_gates_on_new_above_info() {
+        let dir = crate::testutil::Scratch::new("baseline-unit");
+        let old = [f("su-binary", Severity::High, "system", "xbin/su")];
+        let body =
+            serde_json::to_string(&old.iter().map(Finding::to_json).collect::<Vec<_>>()).unwrap();
+        let p = dir.join("b.json");
+        std::fs::write(&p, body).unwrap();
+        let b = read_baseline(&p).unwrap();
+        let now = vec![
+            f("su-binary", Severity::High, "system", "xbin/su"),
+            f("adb-root", Severity::High, "system", "build.prop"),
+            gap("avb_signature"),
+        ];
+        let d = b.diff(now);
+        assert_eq!(d.suppressed, 1);
+        assert_eq!(d.new.len(), 2);
+        assert!(gates(&d.new));
+        // only a gap and an info are new: reported, but no gate
+        let mut quiet = vec![gap("x"), f("setuid-files", Severity::Info, "system", "")];
+        assert!(!gates(&quiet));
+        quiet.push(f("a", Severity::Warn, "i", "p"));
+        assert!(gates(&quiet));
+    }
+
+    #[test]
+    fn baseline_reader_rejects_what_is_not_a_report() {
+        let dir = crate::testutil::Scratch::new("baseline-bad");
+        let try_read = |name: &str, body: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, body).unwrap();
+            read_baseline(&p).err().map(|e| format!("{e:#}"))
+        };
+        assert!(
+            try_read("a", "not json")
+                .unwrap()
+                .contains("not valid JSON")
+        );
+        assert!(
+            try_read("b", "{}")
+                .unwrap()
+                .contains("not an android-doctor report")
+        );
+        assert!(
+            try_read("c", "42")
+                .unwrap()
+                .contains("not an android-doctor report")
+        );
+        assert!(
+            try_read("d", r#"[{"id":"x"}]"#)
+                .unwrap()
+                .contains("no fingerprint")
+        );
+        assert!(try_read("e", "[1]").unwrap().contains("no fingerprint"));
+        let missing = read_baseline(&dir.join("nope.json")).err().unwrap();
+        assert!(format!("{missing:#}").contains("cannot read baseline"));
+        // an empty report is a valid baseline: nothing was known
+        assert!(try_read("f", "[]").is_none());
+        assert!(try_read("g", r#"{"findings":[]}"#).is_none());
     }
 
     #[test]
