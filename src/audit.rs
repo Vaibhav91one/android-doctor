@@ -1447,13 +1447,31 @@ service plain /system/bin/plain
     }
 
     #[test]
-    fn f2fs_is_detected_and_refused_with_a_clear_message() {
+    fn an_f2fs_image_is_read_and_audited_like_any_other() {
         let d = crate::testutil::Scratch::new("audit-f2fs");
-        let mut f2fs = vec![0u8; 1128];
-        f2fs[0x170..0x170 + 4].copy_from_slice(&0xF2F52011u32.to_le_bytes());
-        std::fs::write(d.join("system.img"), &f2fs).unwrap();
-        let e = audit_image(&d.join("system.img")).unwrap_err();
-        let msg = format!("{e:#}");
-        assert!(msg.contains("f2fs is not supported"), "{msg}");
+        std::fs::write(
+            d.join("system.img"),
+            crate::f2fsfs::tests::debug_system_image(),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::detect::filesystem_of_file(&d.join("system.img")),
+            Some(crate::detect::Filesystem::F2fs)
+        );
+        let a = audit_image(&d.join("system.img")).unwrap();
+        let rules: Vec<String> = a.findings.iter().map(|f| f.rule.to_string()).collect();
+        for want in [
+            "debuggable-build",
+            "insecure-adb",
+            "su-binary",
+            "setuid-files",
+        ] {
+            assert!(
+                rules.iter().any(|r| *r == want),
+                "{want} missing from {rules:?}"
+            );
+        }
+        assert_eq!(a.setuid[0].label, "u:object_r:system_file:s0");
+        assert_eq!(a.entries.len(), 4);
     }
 }

@@ -1,4 +1,4 @@
-//! What every file-system reader (ext2/3/4, erofs) shares: the entry record, the manifest, and the
+//! What every file-system reader (ext2/3/4, erofs, f2fs) shares: the entry record, the manifest, and the
 //! all-or-nothing extraction of a tree into a directory.
 use crate::treeout::{Collisions, Sink, host_collisions, prepare_staging, publish, short};
 use anyhow::{Context, Result};
@@ -116,6 +116,7 @@ pub(crate) fn check_cat(entry: &Entry) -> Result<()> {
 pub(crate) enum Tree {
     Ext(crate::ext4fs::Fs),
     Erofs(Box<crate::erofsfs::Fs>),
+    F2fs(Box<crate::f2fsfs::Fs>),
 }
 
 impl Tree {
@@ -123,9 +124,7 @@ impl Tree {
         let fs = crate::detect::filesystem_of_file(path);
         match fs {
             Some(crate::detect::Filesystem::F2fs) => {
-                anyhow::bail!(
-                    "f2fs is not supported: the Linux kernel f2fs driver is GPL-licensed and no permissive Rust reader exists"
-                );
+                Ok(Tree::F2fs(Box::new(crate::f2fsfs::Fs::open(path)?)))
             }
             Some(crate::detect::Filesystem::Erofs) => {
                 Ok(Tree::Erofs(Box::new(crate::erofsfs::Fs::open(path)?)))
@@ -138,6 +137,7 @@ impl Tree {
         match self {
             Tree::Ext(f) => f.extract(out, collisions),
             Tree::Erofs(f) => f.extract(out, collisions),
+            Tree::F2fs(f) => f.extract(out, collisions),
         }
     }
 
@@ -151,6 +151,10 @@ impl Tree {
                 .into_iter()
                 .map(|(e, _)| e)
                 .collect(),
+            Tree::F2fs(f) => TreeSource::entries(f.as_ref())?
+                .into_iter()
+                .map(|(e, _)| e)
+                .collect(),
         })
     }
 
@@ -158,6 +162,7 @@ impl Tree {
         match self {
             Tree::Ext(f) => TreeSource::list_dir(f, path),
             Tree::Erofs(f) => TreeSource::list_dir(f.as_ref(), path),
+            Tree::F2fs(f) => TreeSource::list_dir(f.as_ref(), path),
         }
     }
 
@@ -165,6 +170,7 @@ impl Tree {
         match self {
             Tree::Ext(f) => TreeSource::cat_path(f, path, out),
             Tree::Erofs(f) => TreeSource::cat_path(f.as_ref(), path, out),
+            Tree::F2fs(f) => TreeSource::cat_path(f.as_ref(), path, out),
         }
     }
 }

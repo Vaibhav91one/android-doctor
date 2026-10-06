@@ -6,17 +6,17 @@ use std::io::Read;
 use std::path::Path;
 
 /// Bytes needed from the start of an image to recognise the supported filesystems
-/// (the F2FS magic is at 0x170, the ext superblock feature flags end at offset 1128).
+/// (the F2FS and erofs magics are at 1024, the ext superblock feature flags end at offset 1128).
 pub const HEAD_LEN: usize = 1128;
 
 const EXT_MAGIC: u16 = 0xEF53;
 const EROFS_MAGIC: u32 = 0xE0F5_E1E2;
-// F2FS superblock magic at offset 0x170 (see the kernel's f2fs_fs.h). Stored little-endian
-// on disk, so the bytes are 0x11 0x20 0xF5 0xF2. F2FS itself is not implemented here (the kernel
-// driver is GPL and no permissive reader exists), but the magic is recognised so callers can give
-// a clear "not supported" error instead of "unknown format".
-const F2FS_MAGIC: u32 = 0xF2F5_2011;
-const F2FS_MAGIC_OFFSET: usize = 0x170;
+// F2FS superblock magic: the first field of the superblock, which starts 1024 bytes into the
+// image. Stored little-endian on disk, so the bytes are 0x10 0x20 0xF5 0xF2 (checked against
+// images made by mkfs.f2fs). 0xF2F52011 is the magic of the extended attribute area, not of the
+// superblock.
+const F2FS_MAGIC: u32 = 0xF2F5_2010;
+const F2FS_MAGIC_OFFSET: usize = 1024;
 /// `s_feature_compat`: has_journal.
 const COMPAT_HAS_JOURNAL: u32 = 0x4;
 /// `s_feature_incompat` bits that only ext4 knows: extents, 64bit, mmp, flex_bg, ea_inode,
@@ -33,7 +33,7 @@ pub enum Filesystem {
     Ext3,
     Ext4,
     Erofs,
-    /// F2FS: recognised by magic but not readable (kernel driver is GPL, no permissive reader).
+    /// F2FS: readable by the clean-room reader in `f2fsfs`.
     F2fs,
 }
 
@@ -433,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn f2fs_is_recognised_by_its_magic_at_0x170() {
+    fn f2fs_is_recognised_by_its_magic_in_the_superblock() {
         let mut b = vec![0u8; HEAD_LEN];
         b[F2FS_MAGIC_OFFSET..F2FS_MAGIC_OFFSET + 4].copy_from_slice(&F2FS_MAGIC.to_le_bytes());
         assert_eq!(filesystem(&b), Some(Filesystem::F2fs));
@@ -444,7 +444,7 @@ mod tests {
         );
         assert_eq!(
             &b[F2FS_MAGIC_OFFSET..F2FS_MAGIC_OFFSET + 4],
-            [0x11, 0x20, 0xF5, 0xF2],
+            [0x10, 0x20, 0xF5, 0xF2],
             "byte order as seen in a real image"
         );
     }
@@ -457,10 +457,14 @@ mod tests {
         near[F2FS_MAGIC_OFFSET..F2FS_MAGIC_OFFSET + 3]
             .copy_from_slice(&F2FS_MAGIC.to_le_bytes()[..3]);
         assert_eq!(filesystem(&near), None, "three bytes is not enough");
-        // magic at the wrong offset (e.g. where erofs expects it) does not match
+        // the magic where an old guess put it (0x170), or the extended-attribute magic in the
+        // right place, is not an f2fs superblock
         let mut wrong = vec![0u8; HEAD_LEN];
-        wrong[1024..1028].copy_from_slice(&F2FS_MAGIC.to_le_bytes());
+        wrong[0x170..0x174].copy_from_slice(&F2FS_MAGIC.to_le_bytes());
         assert_eq!(filesystem(&wrong), None);
+        let mut xattr = vec![0u8; HEAD_LEN];
+        xattr[1024..1028].copy_from_slice(&0xF2F5_2011u32.to_le_bytes());
+        assert_eq!(filesystem(&xattr), None);
     }
 
     #[test]
@@ -542,7 +546,7 @@ mod tests {
             (0, &[0x04, 0x22, 0x4D, 0x18], "lz4"),
             (0, &[0x28, 0xB5, 0x2F, 0xFD], "zstd"),
             (257, b"ustar", "tar"),
-            (F2FS_MAGIC_OFFSET, &[0x11, 0x20, 0xF5, 0xF2], "f2fs"),
+            (F2FS_MAGIC_OFFSET, &[0x10, 0x20, 0xF5, 0xF2], "f2fs"),
             (4096, b"gDla", "lp-super"),
         ];
         for (at, magic, id) in table {

@@ -38,14 +38,14 @@ const INODE_INLINE_DATA: u32 = 0x1000_0000;
 const INODE_ENCRYPT: u32 = 0x800;
 
 /// Where the image bytes come from.
-enum Source {
+pub(crate) enum Source {
     File(File),
     #[cfg(test)]
     Mem(Vec<u8>),
 }
 
 impl Source {
-    fn len(&self) -> Result<u64> {
+    pub(crate) fn len(&self) -> Result<u64> {
         Ok(match self {
             Source::File(f) => f.metadata()?.len(),
             #[cfg(test)]
@@ -53,7 +53,7 @@ impl Source {
         })
     }
 
-    fn read_at(&self, off: u64, buf: &mut [u8]) -> std::io::Result<()> {
+    pub(crate) fn read_at(&self, off: u64, buf: &mut [u8]) -> std::io::Result<()> {
         match self {
             #[cfg(test)]
             Source::Mem(v) => {
@@ -86,11 +86,11 @@ impl Source {
     }
 }
 
-fn le16(b: &[u8], at: usize) -> u16 {
+pub(crate) fn le16(b: &[u8], at: usize) -> u16 {
     u16::from_le_bytes([b[at], b[at + 1]])
 }
 
-fn le32(b: &[u8], at: usize) -> u32 {
+pub(crate) fn le32(b: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
 }
 
