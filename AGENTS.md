@@ -36,6 +36,7 @@ Install the skill for an agent with `android-doctor doctor install --agent <clau
     src/skill.rs       agent skill installer; src/skill_body.md is the skill text
     src/doctor.rs      health-scan rules
     tests/e2e.rs       CLI subprocess tests; tests/hostile_sweep.rs corrupted-input sweep
+    tests/corpus.rs    precision gate: generated fixtures vs snapshots, see docs/precision.md
     vendor/            vendored code, see THIRD_PARTY.md
 
 ## Discipline
@@ -50,6 +51,8 @@ Install the skill for an agent with `android-doctor doctor install --agent <clau
 6. No new crate for what a few lines of std can do.
 7. A new format or rule needs a row in the README Format support table with an honest status
    (`verified` only if checked against an independent reference tool on real data).
+8. A new or changed rule needs a firing case in `tests/corpus/` and an updated snapshot
+   (`UPDATE_CORPUS=1 cargo test --test corpus`); see `docs/precision.md`.
 
 ## Commands
 

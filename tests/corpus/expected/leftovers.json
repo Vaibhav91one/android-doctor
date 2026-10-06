@@ -1,0 +1,50 @@
+{
+  "audit": [],
+  "doctor": [
+    {
+      "id": "avb_signature",
+      "severity": "info",
+      "subject": "vbmeta.img"
+    },
+    {
+      "id": "debug_leftovers",
+      "severity": "warn",
+      "subject": "system/app/old.bak"
+    },
+    {
+      "id": "debug_leftovers",
+      "severity": "warn",
+      "subject": "system/etc/debug.log"
+    },
+    {
+      "id": "debug_leftovers",
+      "severity": "warn",
+      "subject": "system/test/foo.txt"
+    },
+    {
+      "id": "duplicate_properties",
+      "severity": "warn",
+      "subject": "ro.secure"
+    },
+    {
+      "id": "partition_coverage",
+      "severity": "warn",
+      "subject": "boot.img"
+    },
+    {
+      "id": "partition_coverage",
+      "severity": "warn",
+      "subject": "vendor.img"
+    },
+    {
+      "id": "selinux_label_gaps",
+      "severity": "info",
+      "subject": "system"
+    },
+    {
+      "id": "unhandled_input",
+      "severity": "warn",
+      "subject": "notes.txt"
+    }
+  ]
+}

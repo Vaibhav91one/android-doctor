@@ -5,3 +5,5 @@
 *.br
 *.new.dat*
 .scratch/
+# corpus source trees are committed as plain text; the images are generated
+!/tests/corpus/**

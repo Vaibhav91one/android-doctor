@@ -1,0 +1,1 @@
+755 system.ext4/system/bin/tool
