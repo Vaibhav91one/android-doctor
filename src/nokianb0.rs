@@ -41,7 +41,8 @@ pub(crate) fn parse(f: &mut File, file_len: u64) -> Result<Vec<Item>> {
     let mut table = vec![0u8; (count * ENTRY) as usize];
     read_at(f, 4, &mut table)?;
     let mut items = Vec::with_capacity(count as usize);
-    for e in table.chunks_exact(ENTRY as usize) {
+    for i in 0..count as usize {
+        let e = &table[i * ENTRY as usize..][..ENTRY as usize];
         let (offset, len) = (le32(e, 0) as u64, le32(e, 4) as u64);
         let mut name = clean_name(&e[16..48])?;
         if offset < table_end {
