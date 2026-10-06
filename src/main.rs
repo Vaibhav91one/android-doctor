@@ -39,6 +39,7 @@ mod report;
 mod reporting;
 mod sdat;
 mod skill;
+mod sonysin;
 mod sparse;
 mod term;
 #[cfg(test)]

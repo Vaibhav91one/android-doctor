@@ -188,7 +188,7 @@ fn parse(kind: Kind, path: &Path) -> Result<Vec<Item>> {
         Kind::HuaweiApp => crate::huawei::parse(&mut f, len)?,
         Kind::LgKdz => crate::lgkdz::parse_kdz(&mut f, len)?,
         Kind::LgDz => crate::lgkdz::parse_dz(&mut f, 0, len)?,
-        Kind::SonySin => bail!("{}: not implemented yet", kind.id()),
+        Kind::SonySin => crate::sonysin::parse(&mut f, len, path)?,
         Kind::CoolpadCpb => {
             return Err(unsupported(
                 kind,
@@ -252,6 +252,17 @@ pub fn extract(
 ) -> Result<Vec<PathBuf>> {
     let items = selected(kind, input, opts)?;
     std::fs::create_dir_all(out_dir)?;
+    if kind == Kind::SonySin
+        && !opts.quiet
+        && let Some(Item {
+            src: Src::Range { offset, .. },
+            ..
+        }) = items.first()
+    {
+        eprintln!(
+            "note: sony-sin: skipped {offset} bytes of header (hash table and signature blocks); they are not verified, so the image is not proven authentic"
+        );
+    }
     if !opts.force {
         for it in &items {
             if out_dir.join(&it.name).symlink_metadata().is_ok() {
@@ -373,6 +384,7 @@ pub(crate) mod tests {
         let raw = [("boot", expected("boot")), ("system", expected("system"))];
         crate::lgkdz::build_kdz_for_test(&dir.join("fw.kdz"), &raw);
         crate::lgkdz::build_dz_for_test(&dir.join("fw.dz"), &raw);
+        crate::sonysin::build_for_test(&dir.join("system_X-FLASH-ALL-1234.sin"), &parts[1].1);
         std::fs::write(dir.join("fw.cpb"), b"CPB?").unwrap();
         std::fs::write(dir.join("fw.nb0"), b"NB0?").unwrap();
     }

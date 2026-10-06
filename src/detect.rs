@@ -171,6 +171,8 @@ pub fn sniff(head: &[u8]) -> Option<Identified> {
         Some(Kind::LgKdz)
     } else if at0(&crate::lgkdz::DZ_MAGIC) {
         Some(Kind::LgDz)
+    } else if at0(&crate::sonysin::MAGIC) {
+        Some(Kind::SonySin)
     } else {
         None
     };
