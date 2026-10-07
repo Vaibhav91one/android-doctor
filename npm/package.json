@@ -1,6 +1,6 @@
 {
   "name": "android-doctor",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Extract and audit Android OTA and firmware images without running them. Launcher for the android-doctor native binary.",
   "license": "MIT",
   "repository": {
