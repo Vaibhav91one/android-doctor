@@ -15,6 +15,15 @@ All notable changes to this project are documented here. The format follows
   0 parse errors, and `has_intent_filter`/`main_action` checked to stay consistent with the new
   per-filter data on every one of them.
 
+### Fixed
+
+- `AndroidManifest.xml` parsing silently produced an empty manifest (no package name, no
+  components, no error) for any APK whose binary XML string pool has `UTF8_FLAG` set (aapt2's
+  modern default on many builds): every string was read as UTF-16LE regardless of the flag, so
+  every tag and attribute name came out garbled and matched nothing. Found auditing a real OEM
+  firmware image: `Netflix.apk` in that corpus parsed to 0 components before this fix, 45 after.
+  All 87 APKs in that corpus now parse to non-empty manifests.
+
 ## [0.3.0] - 2026-10-06
 
 ### Added
