@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-07
+
 ### Added
 
 - `audit --json` now extracts each `<intent-filter>`'s full contents, not just whether one is
