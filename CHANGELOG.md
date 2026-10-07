@@ -5,6 +5,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `audit --json` now extracts each `<intent-filter>`'s full contents, not just whether one is
+  present: `manifest.components[].intent_filters` gives the actions, categories and `<data>`
+  (scheme/host/port/path/mimeType) per filter, kept separate per filter rather than merged onto
+  the component (a data spec only applies to the actions it was declared alongside). Validated
+  against a real-world corpus of 87 OEM firmware APKs: 393 intent-filters / 528 actions extracted,
+  0 parse errors, and `has_intent_filter`/`main_action` checked to stay consistent with the new
+  per-filter data on every one of them.
+
 ## [0.3.0] - 2026-10-06
 
 ### Added
