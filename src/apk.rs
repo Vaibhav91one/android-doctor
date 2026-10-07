@@ -263,6 +263,12 @@ fn parse_string_pool(data: &[u8]) -> Result<(Vec<String>, usize)> {
     let chunk_size = le32(data, 4)? as usize;
     ensure!(chunk_size <= data.len(), "string pool: chunk too large");
     let str_count = le32(data, 8)? as usize;
+    // ResStringPool_header.flags: bit 0x100 (UTF8_FLAG) means every entry is encoded as UTF-8
+    // (aapt2's default since API 21-ish builds), not the UTF-16LE this format defaults to
+    // otherwise. Reading UTF-8 bytes as UTF-16 code units silently garbles every string: no
+    // bounds are violated, so nothing errors, but every tag/attribute name then fails to match
+    // anything and the whole manifest parses to empty (seen on a real APK: Netflix.apk).
+    let is_utf8 = le32(data, 16)? & 0x100 != 0;
     let strings_start = le32(data, 20)? as usize;
     ensure!(
         strings_start <= chunk_size,
@@ -281,10 +287,41 @@ fn parse_string_pool(data: &[u8]) -> Result<(Vec<String>, usize)> {
     }
     let mut strings = Vec::with_capacity(str_count);
     for off in offsets {
-        let (s, _) = read_utf16(data, strings_start + off)?;
+        let (s, _) = if is_utf8 {
+            read_utf8_pool_entry(data, strings_start + off)?
+        } else {
+            read_utf16(data, strings_start + off)?
+        };
         strings.push(s);
     }
     Ok((strings, strings_start))
+}
+
+/// Decode one ResStringPool UTF-8 length prefix: 1 byte, or 2 when the high bit of the first
+/// is set (the low 7 bits of the first byte become the high bits of a 15-bit length). Used
+/// twice per entry (AOSP ResourceTypes.cpp `decodeLength`, Apache-2.0): once for the UTF-16
+/// character count (unused here, strings are kept as UTF-8 throughout), once for the byte count.
+fn decode_utf8_pool_length(data: &[u8], pos: usize) -> Result<(usize, usize)> {
+    ensure!(pos < data.len(), "utf8 pool: length byte missing");
+    let b0 = data[pos] as usize;
+    if b0 & 0x80 == 0 {
+        return Ok((b0, 1));
+    }
+    ensure!(pos + 1 < data.len(), "utf8 pool: length byte missing");
+    Ok((((b0 & 0x7f) << 8) | data[pos + 1] as usize, 2))
+}
+
+/// Read one UTF-8-pool string: a UTF-16 char-count prefix (skipped), a byte-count prefix, then
+/// that many UTF-8 bytes. Invalid UTF-8 (a hostile or merely odd manifest) is replaced, not
+/// rejected, same as `read_utf16` already tolerates truncation rather than failing the pool.
+fn read_utf8_pool_entry(data: &[u8], start: usize) -> Result<(String, usize)> {
+    let (_char_len, n1) = decode_utf8_pool_length(data, start)?;
+    let (byte_len, n2) = decode_utf8_pool_length(data, start + n1)?;
+    let bytes_start = start + n1 + n2;
+    ensure!(bytes_start <= data.len(), "utf8 pool: entry past chunk");
+    let end = (bytes_start + byte_len).min(data.len());
+    let s = String::from_utf8_lossy(&data[bytes_start..end]).into_owned();
+    Ok((s, end - start))
 }
 
 /// Read a UTF-16LE string from data at offset start.
@@ -1389,6 +1426,71 @@ mod tests {
         out
     }
 
+    /// Same as `axml`, but with a UTF8_FLAG string pool (aapt2's modern default), to prove the
+    /// parser reads that encoding rather than silently misreading it as UTF-16 (issue: a real
+    /// UTF-8-pool APK, Netflix.apk, parsed to an empty manifest with no error).
+    fn axml_utf8(root: &El, resmap: bool) -> Vec<u8> {
+        fn encode_len(out: &mut Vec<u8>, n: usize) {
+            if n < 0x80 {
+                out.push(n as u8);
+            } else {
+                out.push(0x80 | ((n >> 8) as u8 & 0x7f));
+                out.push((n & 0xff) as u8);
+            }
+        }
+        let mut pool = Vec::new();
+        let ns = intern(&mut pool, ANDROID_NS);
+        let mut elems = Vec::new();
+        encode_el(root, &mut pool, &mut elems, ns);
+        let mut sp = Vec::new();
+        let mut offs = Vec::new();
+        for s in &pool {
+            offs.push(sp.len() as u32);
+            let utf8 = s.as_bytes();
+            encode_len(&mut sp, s.encode_utf16().count()); // UTF-16 char count (unused on read)
+            encode_len(&mut sp, utf8.len());
+            sp.extend_from_slice(utf8);
+            sp.push(0);
+        }
+        while sp.len() % 4 != 0 {
+            sp.push(0);
+        }
+        let hdr = 28 + 4 * pool.len();
+        let mut pc = Vec::new();
+        u16le(&mut pc, 0x0001);
+        u16le(&mut pc, 28);
+        u32le(&mut pc, (hdr + sp.len()) as u32);
+        u32le(&mut pc, pool.len() as u32);
+        u32le(&mut pc, 0);
+        u32le(&mut pc, 0x0100); // UTF8_FLAG
+        u32le(&mut pc, hdr as u32);
+        u32le(&mut pc, 0);
+        for o in offs {
+            u32le(&mut pc, o);
+        }
+        pc.extend(sp);
+        let mut body = pc;
+        if resmap {
+            u16le(&mut body, 0x0180);
+            u16le(&mut body, 8);
+            u32le(&mut body, 8 + 4 * pool.len() as u32);
+            for s in &pool {
+                let id = ANDROID_ATTRS
+                    .iter()
+                    .find(|(_, n)| n == s)
+                    .map_or(0, |(i, _)| *i);
+                u32le(&mut body, id);
+            }
+        }
+        body.extend(elems);
+        let mut out = Vec::new();
+        u16le(&mut out, 0x0003);
+        u16le(&mut out, 8);
+        u32le(&mut out, 8 + body.len() as u32);
+        out.extend(body);
+        out
+    }
+
     fn apk_with(manifest: &[u8]) -> Vec<u8> {
         let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
         w.start_file(
@@ -1438,6 +1540,38 @@ mod tests {
             vec![],
             vec![el("action", vec![a("name", V::Str(action))], vec![])],
         )
+    }
+
+    #[test]
+    fn utf8_flagged_string_pool_is_read_correctly() {
+        // A real APK (Netflix.apk, encountered auditing a firmware image) ships a manifest
+        // whose string pool has UTF8_FLAG set. Reading it as UTF-16 silently garbles every tag
+        // and attribute name: no bounds are violated, so parsing "succeeds" with an empty
+        // package name and zero components, no error anywhere.
+        let m = manifest(
+            vec![],
+            33,
+            vec![],
+            vec![comp(
+                "activity",
+                vec![a("exported", t())],
+                vec![filter("android.intent.action.MAIN")],
+            )],
+        );
+        let utf16_bytes = axml(&m, true);
+        let utf8_bytes = axml_utf8(&m, true);
+        for (label, bytes) in [("utf16", utf16_bytes), ("utf8", utf8_bytes)] {
+            let r = audit_apk_bytes(Path::new("/x.apk"), &apk_with(&bytes));
+            let info = r.info.unwrap_or_else(|| panic!("{label}: {:?}", r.error));
+            assert_eq!(info.package_name, "com.example.fx", "{label}");
+            assert_eq!(info.manifest.components.len(), 1, "{label}");
+            assert_eq!(info.manifest.components[0].kind, "activity", "{label}");
+            assert_eq!(
+                info.manifest.components[0].intent_filters[0].actions,
+                ["android.intent.action.MAIN"],
+                "{label}"
+            );
+        }
     }
 
     #[test]
