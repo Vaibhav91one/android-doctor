@@ -187,6 +187,28 @@ pub struct Component {
     pub has_intent_filter: bool,
     /// An intent filter handles `android.intent.action.MAIN` (a launcher entry point).
     pub main_action: bool,
+    /// Every `<intent-filter>` under this component, with its actions, categories and data.
+    pub intent_filters: Vec<IntentFilter>,
+}
+
+/// One `<intent-filter>`: the actions, categories and data (scheme/host/path/mimeType) it
+/// declares. A component can have several; each is kept separate rather than merged, since a
+/// data spec only applies to the actions declared alongside it, not to the component as a whole.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct IntentFilter {
+    pub actions: Vec<String>,
+    pub categories: Vec<String>,
+    pub data: Vec<IntentData>,
+}
+
+/// One `<data>` element inside an intent filter (a deep-link surface).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct IntentData {
+    pub scheme: Option<String>,
+    pub host: Option<String>,
+    pub port: Option<String>,
+    pub path: Option<String>,
+    pub mime_type: Option<String>,
 }
 
 /// One manifest finding: the rule, its severity and what was seen.
@@ -459,6 +481,11 @@ const ANDROID_ATTRS: &[(u32, &str)] = &[
     (0x0101_0280, "allowBackup"),
     (0x0101_04ec, "usesCleartextTraffic"),
     (0x0101_0527, "networkSecurityConfig"),
+    (0x0101_0026, "mimeType"),
+    (0x0101_0027, "scheme"),
+    (0x0101_0028, "host"),
+    (0x0101_0029, "port"),
+    (0x0101_002c, "path"),
 ];
 
 /// The `android:` local name of an attribute, or None when it is not a framework attribute.
@@ -541,15 +568,55 @@ fn read_tag(
         && let Some((_, Some(i))) = parent
     {
         out.components[*i].has_intent_filter = true;
-    } else if tag == "action"
-        && let [.., (_, Some(i)), (f, _)] = stack
+        out.components[*i]
+            .intent_filters
+            .push(IntentFilter::default());
+    } else if let [.., (_, Some(i)), (f, _)] = stack
         && f == "intent-filter"
-        && attrs.iter().any(|a| {
-            android_attr(a, pool, res_ids) == Some("name")
-                && a.value == "android.intent.action.MAIN"
-        })
     {
-        out.components[*i].main_action = true;
+        // `name` on action/category is the android namespace attribute shared with every
+        // other tag; find() over all matches (not just the first) in case of a stray duplicate.
+        let name_attr = || {
+            attrs
+                .iter()
+                .find(|a| android_attr(a, pool, res_ids) == Some("name"))
+                .map(|a| a.value.clone())
+        };
+        if tag == "action" && name_attr().as_deref() == Some("android.intent.action.MAIN") {
+            out.components[*i].main_action = true;
+        }
+        let Some(filter) = out.components[*i].intent_filters.last_mut() else {
+            return;
+        };
+        match tag {
+            "action" => {
+                if let Some(v) = name_attr() {
+                    filter.actions.push(v);
+                }
+            }
+            "category" => {
+                if let Some(v) = name_attr() {
+                    filter.categories.push(v);
+                }
+            }
+            "data" => {
+                let get = |n: &str| {
+                    attrs
+                        .iter()
+                        .find(|a| android_attr(a, pool, res_ids) == Some(n))
+                        .map(|a| a.value.clone())
+                        .filter(|v| !v.is_empty())
+                };
+                filter.data.push(IntentData {
+                    scheme: get("scheme"),
+                    host: get("host"),
+                    port: get("port"),
+                    path: get("path"),
+                    mime_type: get("mimeType"),
+                });
+            }
+            _ => {}
+        }
     }
 }
 
@@ -1371,6 +1438,71 @@ mod tests {
             vec![],
             vec![el("action", vec![a("name", V::Str(action))], vec![])],
         )
+    }
+
+    #[test]
+    fn intent_filter_actions_categories_and_data_are_extracted() {
+        let custom_filter = el(
+            "intent-filter",
+            vec![],
+            vec![
+                el(
+                    "action",
+                    vec![a("name", V::Str("com.example.CUSTOM"))],
+                    vec![],
+                ),
+                el(
+                    "category",
+                    vec![a("name", V::Str("android.intent.category.DEFAULT"))],
+                    vec![],
+                ),
+                el(
+                    "data",
+                    vec![
+                        a("scheme", V::Str("myapp")),
+                        a("host", V::Str("open")),
+                        a("path", V::Str("/x")),
+                    ],
+                    vec![],
+                ),
+            ],
+        );
+        // Two intent-filters on the same component must stay separate: a data spec on the
+        // second filter must never leak onto the first's actions.
+        let m = manifest(
+            vec![],
+            33,
+            vec![],
+            vec![comp(
+                "activity",
+                vec![],
+                vec![filter("android.intent.action.MAIN"), custom_filter],
+            )],
+        );
+        for resmap in [true, false] {
+            let r = audit_apk_bytes(Path::new("/x.apk"), &apk_with(&axml(&m, resmap)));
+            let info = r.info.unwrap();
+            let c = &info.manifest.components[0];
+            assert!(c.main_action, "resmap={resmap}");
+            assert_eq!(c.intent_filters.len(), 2, "resmap={resmap}");
+            assert_eq!(c.intent_filters[0].actions, ["android.intent.action.MAIN"]);
+            assert_eq!(c.intent_filters[0].data, [], "MAIN filter has no data");
+            assert_eq!(c.intent_filters[1].actions, ["com.example.CUSTOM"]);
+            assert_eq!(
+                c.intent_filters[1].categories,
+                ["android.intent.category.DEFAULT"]
+            );
+            assert_eq!(
+                c.intent_filters[1].data,
+                [IntentData {
+                    scheme: Some("myapp".to_string()),
+                    host: Some("open".to_string()),
+                    port: None,
+                    path: Some("/x".to_string()),
+                    mime_type: None,
+                }]
+            );
+        }
     }
 
     #[test]

@@ -736,6 +736,13 @@ fn apk_json(a: &ApkAudit) -> Value {
             "components": m.components.iter().map(|c| json!({
                 "kind": c.kind, "name": c.name, "exported": c.exported,
                 "guarded": c.guarded, "intent_filter": c.has_intent_filter,
+                "intent_filters": c.intent_filters.iter().map(|f| json!({
+                    "actions": f.actions, "categories": f.categories,
+                    "data": f.data.iter().map(|d| json!({
+                        "scheme": d.scheme, "host": d.host, "port": d.port,
+                        "path": d.path, "mime_type": d.mime_type,
+                    })).collect::<Vec<Value>>(),
+                })).collect::<Vec<Value>>(),
             })).collect::<Vec<Value>>(),
         },
         "issues": info.issues().iter().map(|i| json!({
