@@ -81,7 +81,7 @@ impl Severity {
         }
     }
 
-    fn from_audit(s: audit::Severity) -> Self {
+    pub(crate) fn from_audit(s: audit::Severity) -> Self {
         match s {
             audit::Severity::High => Severity::High,
             audit::Severity::Medium => Severity::Medium,
@@ -166,7 +166,7 @@ fn fingerprint(rule: &str, scope: &str, subject: &str, key: &str) -> String {
 
 impl Finding {
     /// Fill in the derived fields. `located` says the subject is a file path.
-    fn seal(mut self, located: bool) -> Self {
+    pub(crate) fn seal(mut self, located: bool) -> Self {
         self.fingerprint = fingerprint(&self.rule, &self.scope, &self.subject, &self.key);
         let subject = norm_subject(&self.subject);
         self.uri = (located && !subject.is_empty()).then(|| {
@@ -1041,6 +1041,11 @@ const KNOWN_RULES: &[&str] = &[
     "mode_anomalies",
     "init_service_hygiene",
     "debug_leftovers",
+    "diff-new-setuid",
+    "diff-new-capability",
+    "diff-root-service",
+    "diff-sepolicy-changed",
+    "diff-prop-changed",
 ];
 
 #[cfg(test)]

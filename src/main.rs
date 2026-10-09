@@ -23,6 +23,7 @@ mod extract;
 mod f2fsfs;
 mod findings;
 mod fix;
+mod fwdiff;
 mod hashtree;
 mod huawei;
 mod info;
@@ -169,6 +170,21 @@ enum Command {
         /// Print JSON instead of text
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        report: ReportArgs,
+    },
+    /// Compare two firmware builds file by file: added, removed and modified files (by SHA-256), mode, owner, capability and SELinux-label changes, property and init-service changes; what got worse becomes findings
+    Diff {
+        /// The old image, or a directory of images (such as an `extract` output)
+        old: PathBuf,
+        /// The new image, or a directory of images
+        new: PathBuf,
+        /// Print JSON instead of text
+        #[arg(long)]
+        json: bool,
+        /// List only these file changes (comma-separated: added, removed, modified, metadata); findings are unaffected
+        #[arg(long, value_delimiter = ',', value_name = "STATUS")]
+        only: Vec<String>,
         #[command(flatten)]
         report: ReportArgs,
     },
@@ -599,6 +615,13 @@ fn main() -> anyhow::Result<()> {
             json,
             report,
         } => audit_command(&images, json, &report, no_color),
+        Command::Diff {
+            old,
+            new,
+            json,
+            only,
+            report,
+        } => diff_command(&old, &new, json, &only, &report, no_color),
         Command::Vbmeta {
             image,
             images,
@@ -925,6 +948,51 @@ fn audit_command(
             } else {
                 audit::to_text(&audits, no_color)
             }
+        },
+    )
+}
+
+fn diff_command(
+    old: &std::path::Path,
+    new: &std::path::Path,
+    json: bool,
+    only: &[String],
+    report: &ReportArgs,
+    no_color: bool,
+) -> anyhow::Result<()> {
+    if let Some(bad) = only
+        .iter()
+        .find(|o| !fwdiff::STATUSES.contains(&o.as_str()))
+    {
+        anyhow::bail!(
+            "unknown --only status {bad:?}: use {}",
+            fwdiff::STATUSES.join(", ")
+        );
+    }
+    let r = fwdiff::run(old, new)?;
+    let command = format!(
+        "android-doctor diff {} {}",
+        shell_quote(&old.display().to_string()),
+        shell_quote(&new.display().to_string())
+    );
+    emit(
+        Emit {
+            title: display_name(new),
+            command,
+            json,
+            // A diff lists only what the new build introduced, so gating on high is safe.
+            fail_default: Some(findings::Severity::High),
+            no_color,
+        },
+        report,
+        r.findings,
+        || fwdiff::to_json(&r.images, only),
+        |shown| {
+            format!(
+                "{}\n{}",
+                fwdiff::to_text(&r.images, only),
+                findings::render_flat(shown)
+            )
         },
     )
 }

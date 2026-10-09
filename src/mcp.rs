@@ -30,6 +30,8 @@ pub fn tool_list() -> Value {
               &schema(one, r#""path""#, true)),
         tool("audit", "audit --json: the doctor/1 envelope for partition images",
               &schema(&format!("{one},{many}"), "", true)),
+        tool("diff", "diff --json: the doctor/1 envelope comparing two firmware builds file by file; findings are what the new build made worse",
+              &schema(r#""old":{"type":"string","description":"Old image or directory of images"},"new":{"type":"string","description":"New image or directory of images"},"only":{"type":"array","items":{"type":"string","enum":["added","removed","modified","metadata"]},"description":"List only these file changes under data"}"#, r#""old","new""#, true)),
     ] })
 }
 
@@ -93,6 +95,7 @@ fn cli_args(name: &str, args: &Value) -> Result<Vec<String>> {
         "identify" => vec!["identify".into()],
         "doctor" => vec!["doctor".into(), "scan".into()],
         "audit" => vec!["audit".into()],
+        "diff" => vec!["diff".into()],
         other => anyhow::bail!("unknown tool {other}"),
     };
     argv.push("--json".into());
@@ -107,6 +110,17 @@ fn cli_args(name: &str, args: &Value) -> Result<Vec<String>> {
             }
             argv.push(format!("--{flag}={v}"));
         }
+    }
+    if name == "diff" {
+        let (Some(old), Some(new)) = (text("old"), text("new")) else {
+            anyhow::bail!("missing required arguments \"old\" and \"new\"");
+        };
+        if let Some(a) = args.get("only").and_then(Value::as_array) {
+            let v: Vec<&str> = a.iter().filter_map(Value::as_str).collect();
+            argv.push(format!("--only={}", v.join(",")));
+        }
+        argv.extend(["--".into(), old.into(), new.into()]);
+        return Ok(argv);
     }
     let mut paths: Vec<String> = text("path").map(String::from).into_iter().collect();
     if let Some(a) = args.get("paths").and_then(Value::as_array) {
