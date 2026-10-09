@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 /// Where the workflow goes, relative to the project root.
 const WORKFLOW: [&str; 3] = [".github", "workflows", "android-doctor.yml"];
 
-/// The `--fail-on` levels the action accepts.
-pub const FAIL_ON: [&str; 5] = ["error", "high", "medium", "warn", "none"];
+/// The `--fail-on` levels the action accepts (`error` and `warn` are the pre-0.4 names).
+pub const FAIL_ON: [&str; 7] = ["critical", "high", "medium", "low", "none", "error", "warn"];
 
 /// The workflow for `path` and `fail_on`, pinned to `version`.
 pub fn workflow(version: &str, path: &str, fail_on: &str) -> Result<String> {
@@ -142,14 +142,14 @@ jobs:
     #[test]
     fn a_quote_in_the_path_is_escaped_and_hostile_values_are_refused() {
         assert!(
-            workflow(V, "it's", "error")
+            workflow(V, "it's", "critical")
                 .unwrap()
                 .contains("path: 'it''s'")
         );
         for bad in ["", "  ", "a\nb", "a\rb", "${{ secrets.X }}"] {
-            assert!(workflow(V, bad, "error").is_err(), "{bad:?}");
+            assert!(workflow(V, bad, "critical").is_err(), "{bad:?}");
         }
-        assert!(workflow(V, "fw", "critical").is_err());
+        assert!(workflow(V, "fw", "bogus").is_err());
     }
 
     #[test]

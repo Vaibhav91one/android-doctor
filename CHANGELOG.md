@@ -5,6 +5,36 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0]
+
+### Changed (breaking)
+
+- `audit --json` and `doctor scan --json` now print the shared **doctor/1** envelope
+  (`schema`, `tool`, `version`, `exit_code`, `score`, `findings`, `data`; see
+  `docs/doctor-contract.md`). `doctor scan --json` was a bare array; `audit --json`'s old keys
+  (`adb`, `images`, ...) moved under `data`. Findings gain `location` and lose nothing (`subject`
+  and `image` stay as extra keys). No legacy flag.
+- Severities are `critical|high|medium|low|info` in output: `error` is now `critical`, `warn` is
+  now `low`. Scoring weights are unchanged. `--fail-on` accepts the new names; `error` and `warn`
+  still parse as aliases, as do the action's `fail-on` values.
+- Exit codes: failures (unreadable input, bad `--baseline`, unwritable `--sarif`) now exit `2`
+  (was `1`); `1` now means a finding at or above `--fail-on`. New `--fail-on` on `audit` and
+  `doctor scan` (default: `critical` for `doctor scan`, none for `audit`, `low` with `--baseline`).
+- `--baseline` accepts a doctor/1 envelope (older shapes still read). `--json` under a baseline
+  now lists all findings with `baseline_state` and a top-level `baseline` count, not only the new
+  ones.
+- SARIF: `partialFingerprints` key is `doctorFinding/v1` (was `androidDoctorFinding/v1`); `low`
+  maps to `note` (the old `warn` was `warning`).
+- `score` gains `model: "android/1"`.
+- The MCP `doctor` and `audit` tools run the CLI with `--json` and return the envelope unchanged;
+  they accept `baseline`, `fail_on`, `sarif` (and `paths` for `audit`).
+- The action's `fail-on` default is `critical`.
+
+### Security
+
+- Every human renderer (flat list, digest, `audit` text) strips control characters, bidi and
+  zero-width characters from firmware-derived text, through one helper shared with `fix`.
+
 ## [0.3.1] - 2026-10-07
 
 ### Added

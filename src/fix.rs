@@ -69,17 +69,9 @@ fn rank(severity: &str) -> u8 {
 /// Firmware text is attacker-controlled: no control, line-break or bidi/invisible characters,
 /// no backticks (so it cannot close the fence), capped length.
 fn clean(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            '`' => '\'',
-            c if c.is_control()
-                || matches!(c, '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}'
-                    | '\u{2060}'..='\u{2069}' | '\u{feff}') =>
-            {
-                ' '
-            }
-            c => c,
-        })
+    crate::term::sanitize(s)
+        .replace('`', "'")
+        .chars()
         .take(MAX_FIELD)
         .collect()
 }

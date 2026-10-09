@@ -4,7 +4,7 @@
 #
 # Local run: AD_BINARY=target/release/android-doctor AD_PATH=fw AD_OUT=/tmp/ad scripts/android-doctor-action.sh
 # Env: AD_PATH (required; words, space separated), AD_COMMAND ("doctor scan" | "audit"),
-#      AD_FAIL_ON (error|high|medium|warn|none, default error), AD_BASELINE (a committed --json report),
+#      AD_FAIL_ON (critical|high|medium|low|none, default critical; error and warn are accepted aliases), AD_BASELINE (a committed --json report),
 #      AD_ARGS (extra flags, space separated), AD_VERSION / ACTION_REF (see resolve_version),
 #      AD_BINARY (an already-built binary: skips the download), AD_OUT (default: $RUNNER_TEMP or .).
 # Exit: 0 clean; 1 findings at or above fail-on; 3 the same under a baseline (only new findings
@@ -62,23 +62,23 @@ install_release() {
 
 # severity name -> rank; "none" -> 99 so nothing reaches it.
 rank() {
-  case $1 in info) echo 0 ;; warn) echo 1 ;; medium) echo 2 ;; high) echo 3 ;; error) echo 4 ;; none) echo 99 ;; *) return 1 ;; esac
+  case $1 in info) echo 0 ;; low | warn) echo 1 ;; medium) echo 2 ;; high) echo 3 ;; critical | error) echo 4 ;; none) echo 99 ;; *) return 1 ;; esac
 }
 
 # gate_status RC FINDINGS_JSON FAIL_ON BASELINE -> prints the status the job should exit with.
 # No parsable report means the tool itself failed: its status passes through. Otherwise any
-# finding at or above FAIL_ON gates (the report holds only new findings under a baseline, so 3
-# there, else 1).
+# finding at or above FAIL_ON gates (only findings with baseline_state "new" under a baseline,
+# so 3 there, else 1).
 gate_status() {
   local rc=$1 json=$2 fail_on=$3 baseline=$4 min hits
-  min=$(rank "$fail_on") || die "fail-on must be one of error, high, medium, warn, none (got '$fail_on')"
+  min=$(rank "$fail_on") || die "fail-on must be one of critical, high, medium, low, none (got '$fail_on')"
   if ! jq -e . "$json" >/dev/null 2>&1; then
     if [ "$rc" -ne 0 ]; then echo "$rc"; else echo 1; fi
     return
   fi
   hits=$(jq --argjson min "$min" '
-    def rank: {"info":0,"warn":1,"medium":2,"high":3,"error":4}[.] // 0;
-    [(if type == "array" then . else .findings end)[] | select(.severity | rank >= $min)] | length' "$json")
+    def rank: {"info":0,"low":1,"medium":2,"high":3,"critical":4}[.] // 0;
+    [.findings[] | select((.baseline_state // "new") == "new" and (.severity | rank >= $min))] | length' "$json")
   if [ "$hits" -eq 0 ]; then echo 0; elif [ -n "$baseline" ]; then echo 3; else echo 1; fi
 }
 
@@ -94,8 +94,8 @@ summary() {
     echo "| severity | findings |"
     echo "|---|---|"
     jq -r '
-      (if type == "array" then . else .findings end) as $f
-      | ["error","high","medium","warn","info"][] as $s
+      [.findings[] | select((.baseline_state // "new") == "new")] as $f
+      | ["critical","high","medium","low","info"][] as $s
       | "| \($s) | \([$f[] | select(.severity == $s)] | length) |"' "$json"
     echo
     if [ -n "$note" ]; then
@@ -105,11 +105,11 @@ summary() {
     echo "Top findings:"
     echo
     jq -r '
-      def rank: {"info":0,"warn":1,"medium":2,"high":3,"error":4}[.] // 0;
-      (if type == "array" then . else .findings end)
+      def rank: {"info":0,"low":1,"medium":2,"high":3,"critical":4}[.] // 0;
+      [.findings[] | select((.baseline_state // "new") == "new")]
       | sort_by(-(.severity | rank)) | .[:10][]
-      | "- **\(.severity)** `\(.id)` \(.subject): \(.message | gsub("[\\r\\n]+"; " ") | .[:160])"' "$json"
-    jq -e '(if type == "array" then . else .findings end) | length == 0' "$json" >/dev/null && echo "- none"
+      | "- **\(.severity)** `\(.id)` \(.location.ref): \(.message | gsub("[\\r\\n]+"; " ") | .[:160])"' "$json"
+    jq -e '[.findings[] | select((.baseline_state // "new") == "new")] | length == 0' "$json" >/dev/null && echo "- none"
   else
     echo "The scan produced no report (exit $status); see the step log."
   fi
@@ -125,9 +125,9 @@ main() {
   [ -n "${AD_PATH:-}" ] || die "the 'path' input is required"
   command -v jq >/dev/null || die "jq is required (preinstalled on GitHub-hosted runners)"
   local out=${AD_OUT:-${RUNNER_TEMP:-.}/android-doctor-action} bin command=${AD_COMMAND:-doctor scan}
-  local fail_on=${AD_FAIL_ON:-error} baseline=${AD_BASELINE:-}
+  local fail_on=${AD_FAIL_ON:-critical} baseline=${AD_BASELINE:-}
   mkdir -p "$out"
-  rank "$fail_on" >/dev/null || die "fail-on must be one of error, high, medium, warn, none (got '$fail_on')"
+  rank "$fail_on" >/dev/null || die "fail-on must be one of critical, high, medium, low, none (got '$fail_on')"
   case $command in "doctor scan" | audit) ;; *) die "command must be 'doctor scan' or 'audit' (got '$command')" ;; esac
 
   if [ -n "${AD_BINARY:-}" ]; then

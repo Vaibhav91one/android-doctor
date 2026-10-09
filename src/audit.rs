@@ -796,7 +796,7 @@ fn capped<T>(items: &[T], show: impl Fn(&T) -> String) -> Vec<String> {
     let mut v: Vec<String> = items
         .iter()
         .take(TEXT_LIST_CAP)
-        .map(|i| format!("  {}", show(i)))
+        .map(|i| format!("  {}", crate::term::sanitize(&show(i))))
         .collect();
     if items.len() > TEXT_LIST_CAP {
         v.push(format!(
@@ -812,10 +812,18 @@ pub fn to_text(audits: &[ImageAudit], no_color: bool) -> String {
     let mut o = vec![adb_summary(audits)];
     for a in audits {
         o.push(String::new());
-        o.push(format!("== {} ({} entries)", a.name, a.entries.len()));
+        o.push(format!(
+            "== {} ({} entries)",
+            crate::term::sanitize(&a.name),
+            a.entries.len()
+        ));
         for f in &a.findings {
             let label = r.severity(f.severity.to_term(), f.severity.name());
-            o.push(format!("[{label}] {}: {}", f.rule, f.detail));
+            o.push(format!(
+                "[{label}] {}: {}",
+                f.rule,
+                crate::term::sanitize(&f.detail)
+            ));
         }
         if a.findings.is_empty() {
             o.push("no findings".to_string());

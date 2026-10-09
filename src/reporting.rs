@@ -1,7 +1,7 @@
 //! The reporting tail shared by `audit` and `doctor scan`: health score, `--baseline`, `--sarif`,
 //! the output views and the exit status. The finding model itself lives in `findings.rs`.
 
-use crate::findings::{self, Finding, Score, Severity};
+use crate::findings::{self, Finding, Severity};
 use crate::term;
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -9,17 +9,21 @@ use std::path::PathBuf;
 /// Exit status when `--baseline` finds something new.
 pub const EXIT_NEW_FINDINGS: i32 = 3;
 
-/// Returned when a `--baseline` run found something new; `main` turns it into exit code 3.
+/// A run that completed but whose gate failed. `main` prints the message and exits with `code`:
+/// 1 for a finding at or above `--fail-on`, 3 for a new one under `--baseline`.
 #[derive(Debug)]
-pub struct NewFindings(pub usize);
+pub struct Gate {
+    pub code: i32,
+    pub message: String,
+}
 
-impl std::fmt::Display for NewFindings {
+impl std::fmt::Display for Gate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} new finding(s) not in the baseline", self.0)
+        f.write_str(&self.message)
     }
 }
 
-impl std::error::Error for NewFindings {}
+impl std::error::Error for Gate {}
 
 /// Reporting flags shared by `audit` and `doctor scan`.
 #[derive(clap::Args, Clone, Default)]
@@ -34,6 +38,11 @@ pub struct ReportArgs {
     /// are new ones
     #[arg(long, value_name = "FILE")]
     pub baseline: Option<PathBuf>,
+    /// Exit 1 when a finding is at or above this severity (critical, high, medium, low, info);
+    /// with --baseline, exit 3 when a new one is. Default: critical for `doctor scan`, never for
+    /// `audit`; with --baseline, low for both
+    #[arg(long, value_name = "SEVERITY", value_parser = Severity::parse)]
+    pub fail_on: Option<Severity>,
 }
 
 /// What differs between `audit` and `doctor scan`.
@@ -42,8 +51,8 @@ pub struct Emit {
     /// The command line to repeat, without flags (for "Next steps").
     pub command: String,
     pub json: bool,
-    /// Findings of severity `error` make the command fail (doctor), not just report (audit).
-    pub fail_on_error: bool,
+    /// The `--fail-on` threshold when none is given and there is no baseline (None = never fail).
+    pub fail_default: Option<Severity>,
     pub no_color: bool,
 }
 
@@ -72,17 +81,18 @@ pub fn next_steps(command: &str, baselined: bool) -> Vec<String> {
     }
 }
 
-/// Score, filter against the baseline, write SARIF, print the chosen view, and decide the exit.
+/// Score, mark findings against the baseline, write SARIF, print the chosen view, and decide
+/// the exit.
 ///
-/// Exit status, first match wins: a hard error (unreadable input, baseline or SARIF target) is 1;
-/// a reported finding of severity `error` is 1 (doctor only, as before); a new finding above
-/// `info` under `--baseline` is 3; otherwise 0. `--baseline` filters before the `error` check, so
-/// a known error does not fail the run.
+/// Exit status (doctor/1): a hard error (unreadable input, baseline or SARIF target) is 2 and
+/// prints no report. Otherwise, without `--baseline`, 1 if a finding is at or above the
+/// `--fail-on` threshold; with it, 3 if a *new* finding is, else 0. `--json` prints every
+/// finding (with `baseline_state` under a baseline); the text views list only the new ones.
 pub fn emit(
     e: Emit,
     args: &ReportArgs,
     all: Vec<Finding>,
-    json_text: impl FnOnce(&[Finding], &Score) -> anyhow::Result<String>,
+    data: impl FnOnce() -> serde_json::Value,
     flat_text: impl FnOnce(&[Finding]) -> String,
 ) -> anyhow::Result<()> {
     // The score is the health of the whole scan, whatever a baseline hides from the listing.
@@ -92,12 +102,30 @@ pub fn emit(
         .as_deref()
         .map(findings::read_baseline)
         .transpose()?;
-    let (shown, suppressed) = match &baseline {
-        Some(b) => {
-            let d = b.diff(all);
-            (d.new, d.suppressed)
-        }
-        None => (all, 0),
+    let diff = baseline.as_ref().map(|b| b.diff(all.clone()));
+    let (shown, suppressed) = match &diff {
+        Some(d) => (
+            d.all
+                .iter()
+                .filter(|f| f.baseline_state == Some("new"))
+                .cloned()
+                .collect(),
+            d.unchanged,
+        ),
+        None => (all.clone(), 0),
+    };
+    let (min, gated) = if diff.is_some() {
+        let min = args.fail_on.unwrap_or(Severity::Warn);
+        (Some(min), findings::gates(&shown, min, true))
+    } else {
+        let min = args.fail_on.or(e.fail_default);
+        (min, min.is_some_and(|m| findings::gates(&shown, m, false)))
+    };
+    let new = shown.iter().filter(|f| !f.gap).count();
+    let exit = match (gated, diff.is_some()) {
+        (false, _) => 0,
+        (true, true) => EXIT_NEW_FINDINGS,
+        (true, false) => 1,
     };
     if let Some(path) = &args.sarif {
         let doc = findings::to_sarif(&shown, &score, baseline.is_some());
@@ -107,7 +135,6 @@ pub fn emit(
     // Coverage gaps are always listed (a baseline cannot vouch for a rule that did not run), so
     // they are counted apart from the new findings.
     let gaps = shown.iter().filter(|f| f.gap).count();
-    let new = shown.len() - gaps;
     let note = baseline.as_ref().map(|b| {
         let listed = match gaps {
             0 => String::new(),
@@ -121,7 +148,14 @@ pub fn emit(
     if args.score {
         crate::print_out(&score.value.to_string())?;
     } else if e.json {
-        crate::print_out(&json_text(&shown, &score)?)?;
+        let v = findings::envelope(
+            exit,
+            &score,
+            diff.as_ref().map_or(&all, |d| &d.all),
+            diff.as_ref(),
+            data(),
+        );
+        crate::print_out(&serde_json::to_string_pretty(&v)?)?;
     } else if std::io::stdout().is_terminal() && args.sarif.is_none() {
         let next = next_steps(&e.command, baseline.is_some());
         let r = term::Renderer::new(term::Style::detect(e.no_color));
@@ -146,13 +180,25 @@ pub fn emit(
     {
         eprintln!("{n}");
     }
-    if e.fail_on_error && shown.iter().any(|f| f.severity == Severity::Error) {
-        anyhow::bail!("one or more findings have severity error");
+    match (exit, min) {
+        (0, _) => Ok(()),
+        (c, Some(m)) if c == EXIT_NEW_FINDINGS => Err(Gate {
+            code: c,
+            message: format!(
+                "{new} new finding(s) at or above {} not in the baseline",
+                m.name()
+            ),
+        }
+        .into()),
+        (c, m) => Err(Gate {
+            code: c,
+            message: format!(
+                "one or more findings are at or above {}",
+                m.map_or("the threshold", Severity::name)
+            ),
+        }
+        .into()),
     }
-    if baseline.is_some() && findings::gates(&shown) {
-        return Err(NewFindings(new).into());
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -177,10 +223,11 @@ mod tests {
     }
 
     #[test]
-    fn new_findings_displays_a_count() {
-        assert_eq!(
-            NewFindings(2).to_string(),
-            "2 new finding(s) not in the baseline"
-        );
+    fn a_gate_displays_its_message() {
+        let g = Gate {
+            code: 3,
+            message: "x".into(),
+        };
+        assert_eq!(g.to_string(), "x");
     }
 }

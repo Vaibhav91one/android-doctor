@@ -17,12 +17,12 @@ android-doctor unpacks and audits Android OTA and firmware images **without runn
 
 ## Findings
 
-Each finding has: id, category (security/quality), severity (error/warn/info/high/medium), subject, message, and remedy.
+`audit --json` and `doctor scan --json` print the doctor/1 envelope (`schema`, `tool`, `version`, `exit_code`, `score`, `findings`, `data`). Each finding has: id, fingerprint, severity (critical/high/medium/low/info), category (security/quality), message, location, and remedy. Exit codes: 0 ok, 1 finding at or above `--fail-on`, 2 could not run, 3 new finding under `--baseline`.
 
 ## Severities
 
-- error: firmware is unusable
+- critical: firmware is unusable
 - high: security finding (debuggable, su, root ADB)
 - medium: lower-severity security issue
-- warn: quality concern (world-writable, unsigned)
+- low: quality concern (world-writable, unsigned)
 - info: rule could not evaluate or all clear

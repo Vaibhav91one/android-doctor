@@ -168,17 +168,17 @@ A statically linked binary has no dynamic section, so it is not judged for the l
 `doctor scan` runs the deterministic rule set over an unpacked firmware
 directory: security rules plus quality rules (missing partitions, duplicate
 properties, SELinux label gaps, mode anomalies, service hygiene, debug
-leftovers). Add `--json` for one object per finding with `id`, `category`,
-`severity`, `subject`, `message` and `remedy`:
+leftovers). Add `--json` for the [doctor/1 envelope](docs/doctor-contract.md) (see
+[Machine output](#reports-for-ci-sarif-baseline-score)):
 
 ```sh
 android-doctor doctor scan fw/
 ```
 
 ```
-warn quality partition_coverage: system.img: expected partition image system is missing
+low quality partition_coverage: system.img: expected partition image system is missing
     └ ensure system.img is present; the device may not boot without it
-warn quality partition_coverage: vendor.img: expected partition image vendor is missing
+low quality partition_coverage: vendor.img: expected partition image vendor is missing
     └ ensure vendor.img is present; the device may not boot without it
 info security avb_signature: vbmeta.img: no vbmeta.img found; AVB signature not checked
     └ point doctor at a directory containing vbmeta.img
@@ -290,25 +290,54 @@ read.
 shape: a stable rule id, a severity on one scale, a subject (the path inside the image where
 there is one), a message, a remedy and a **fingerprint**.
 
-| Unified severity | Comes from |
+### Machine output (`--json`): the doctor/1 envelope
+
+`audit --json` and `doctor scan --json` print one object that follows the shared
+[doctor/1 contract](docs/doctor-contract.md) (the same in every doctor tool). Since 0.4.0 this
+replaces the old bare array (`doctor scan`) and the old `audit` object.
+
+```json
+{
+  "schema": "doctor/1", "tool": "android-doctor", "version": "0.4.0", "exit_code": 0,
+  "score": { "value": 77, "label": "needs work", "model": "android/1", "coverage_gaps": 8 },
+  "findings": [ {
+    "id": "su-binary", "fingerprint": "a84ef8a8cf375112", "severity": "high", "category": "security",
+    "message": "/xbin/su looks like a su binary",
+    "location": { "kind": "file", "ref": "system/xbin/su" },
+    "remedy": "Remove the su binary and its SELinux domain",
+    "subject": "xbin/su", "image": "system"
+  } ],
+  "data": { }
+}
+```
+
+`findings` is sorted worst first, then by id and fingerprint. `location.kind` is `file` when the
+finding names a path inside an image, `image` for an image or file in the scanned directory, `none`
+otherwise. `subject` and `image` are extra keys kept from the old rows. For `audit`, the old
+object (`adb`, `images[]` with properties, setuid files, services, APKs, ELF...) is under `data`;
+`doctor scan` has an empty `data`. With `--baseline`, every finding carries `baseline_state`
+(`new` or `unchanged`) and the envelope gains `"baseline": {"new", "unchanged", "fixed"}`.
+`exit_code` is the exit code of that very run.
+
+| Severity | Comes from |
 | --- | --- |
-| `error` | `doctor` `error`: the firmware is unusable or tampered with |
+| `critical` | `doctor` `error`: the firmware is unusable or tampered with (was `error`) |
 | `high` | `audit` `High`, hardcoded credentials |
 | `medium` | `audit` `Medium`, debug endpoints |
-| `warn` | `audit` `Warn`, `doctor` `warn` |
+| `low` | `audit` `Warn`, `doctor` `warn` (was `warn`) |
 | `info` | `audit` `Info`, `doctor` `info` (a rule that could not evaluate, or an all-clear) |
 
 The fingerprint is `sha256(rule, image, subject, key)`, shortened to 16 hex digits. It is built
 from the rule id and the path inside the image (an init service name or a property key where a
 file holds several), never from the message, the order, a timestamp or a host path, so the same
-firmware scanned from another directory gives the same fingerprints. `--json` rows carry it as
-`fingerprint` (an additive field; every existing key is unchanged).
+firmware scanned from another directory gives the same fingerprints. Findings carry it as
+`fingerprint`, and SARIF results as `partialFingerprints["doctorFinding/v1"]`.
 
 ### SARIF (`--sarif FILE`)
 
 `--sarif FILE` writes SARIF 2.1.0 in addition to the normal output, for GitHub code scanning and
 IDEs. There is one rule per rule id, with the remedy as its help text; each result has a `level`
-(`error`/`high` map to `error`, `medium`/`warn` to `warning`, `info` to `note`), the fingerprint
+(`critical`/`high` map to `error`, `medium` to `warning`, `low`/`info` to `note`), the fingerprint
 under `partialFingerprints`, and a location when the finding names a file. A location is the path
 inside the image prefixed with the image name (`system/build.prop`), or the file name relative to
 the scanned directory for `doctor scan`. The health score is in
@@ -341,8 +370,9 @@ jq '.runs[0] | {rules: (.tool.driver.rules | length), score: .properties.score,
 ### Baselines (`--baseline FILE`)
 
 `--baseline FILE` reports only the findings whose fingerprint is not in FILE, says how many it
-suppressed as known, and exits `3` when something new turned up. FILE is a previous `--json`
-report: record one from a plain run (without `--baseline`) and keep it next to the firmware.
+suppressed as known, and exits `3` when something new at or above `--fail-on` turned up. FILE is a
+previous `--json` envelope (the pre-0.4 shapes are still read): record one from a plain run and
+keep it next to the firmware. Matching is by `fingerprint` only.
 
 ```sh
 android-doctor audit system.img --json > baseline.json     # record what is known today
@@ -363,26 +393,27 @@ baseline baseline.json: 3 suppressed as known, 1 new
 1 new finding(s) not in the baseline
 ```
 
-That run exits `3`. `--json` with `--baseline` prints the new findings only (for `audit`, in the
-`findings` array; `images[]` keeps the full inventory) and the summary goes to stderr; a report
-written with `--baseline` lists only the new findings, so record baselines from a plain run.
+That run exits `3`. The text output lists only the new findings. `--json` with `--baseline` prints
+**all** findings, each with `baseline_state`, plus the top-level `baseline` counts; the summary
+goes to stderr. A SARIF file written with `--baseline` lists only the new findings.
 
 - A baseline that cannot be read, is not JSON, or is not an `audit`/`doctor scan` `--json` report
-  (including one from a version before fingerprints) is an error (exit `1`), never an empty
+  (including one from a version before fingerprints) is an error (exit `2`), never an empty
   baseline: a mistyped path must not turn the gate off.
 - A coverage gap (`info ... cannot evaluate`) is never suppressed: the baseline cannot vouch for a
-  rule that did not run. Gaps are listed, counted apart, and never cause exit `3`; a new `info`
-  finding is listed but does not either.
-- The score (and a SARIF `score`) is for the whole scan, whatever the baseline hides from the list.
+  rule that did not run. Gaps are listed, counted apart, and never cause exit `3`; a new finding
+  below `--fail-on` (by default, a new `info`) is listed but does not either.
+- The score (and the SARIF `properties.score`) is for the whole scan, whatever the baseline hides from the list.
   With `--sarif`, every result carries `baselineState: "new"`.
 
 ### Health score (`--score`) and the terminal digest
 
 `--score` prints only a 0-100 health score on stdout, nothing else, so it drops into a shell
-script (`--score` and `--json` cannot be combined). The model is deterministic and documented:
+script (`--score` and `--json` cannot be combined). The model is deterministic and documented, and
+named `android/1` in `score.model`:
 
 - Start at 100. Findings are grouped by rule; a group costs the weight of its worst severity
-  (`error` 20, `high` 10, `medium` 5, `warn` 2, `info` 0) for the first finding, plus a quarter of
+  (`critical` 20, `high` 10, `medium` 5, `low` 2, `info` 0) for the first finding, plus a quarter of
   that for each further one, capped at twice the weight, so one noisy rule cannot sink the score.
 - A rule that could not evaluate (a coverage gap: `info ... cannot evaluate`) costs a flat 3,
   however many images it missed. A scan whose rules did not run therefore never scores a clean 100:
@@ -401,9 +432,8 @@ android-doctor doctor scan fw/ --score
 80
 ```
 
-`audit --json` gains a top-level `score` (`value`, `label`, `coverage_gaps`) and the SARIF run
-carries the same object. `doctor scan --json` stays a plain array of findings, so its shape does
-not change; use `--score` or `--sarif` for its score.
+Both `--json` envelopes carry it as `score` (`value`, `label`, `model`, `coverage_gaps`), and the
+SARIF run carries the same object in `properties.score`.
 
 On an interactive terminal (stdout is a TTY, and none of `--json`, `--score` or `--sarif` is
 given) both commands print a **doctor digest** instead of the flat list: the score with a bar,
@@ -480,7 +510,7 @@ jobs:
 | `path` | required | Firmware directory, or for `audit` image files, space separated |
 | `version` | the action's own version | The release to install. `@vX.Y.Z` installs `X.Y.Z`; a branch or sha ref has no version, so set this. `latest` is never assumed |
 | `command` | `doctor scan` | `doctor scan` or `audit` |
-| `fail-on` | `error` | Minimum severity that fails the job: `error`, `high`, `medium`, `warn`, `none`. Judged from the `--json` findings |
+| `fail-on` | `critical` | Minimum severity that fails the job: `critical`, `high`, `medium`, `low`, `none` (`error` and `warn` are accepted aliases). Judged from the `--json` findings |
 | `baseline` | none | Committed `--json` report; only findings not in it count, and a failure exits `3` |
 | `upload-sarif` | `true` | Upload to code scanning. Needs `security-events: write`; skipped with a notice (never a failure) on fork pull requests or when the token lacks it |
 | `args` | none | Extra flags, space separated |
@@ -489,8 +519,8 @@ jobs:
 Outputs: `score` (0-100), `status` (the gating exit code: `0`, `1` findings at or above `fail-on`,
 `3` the same against a baseline, any other value means the tool itself failed) and `sarif` (the
 report's path). The job exits with `status`. `audit` never fails on its own (see
-[Exit codes](#exit-codes)), so `fail-on` is what gates it; with `fail-on: error` an `audit` run
-cannot fail because `audit` has no `error` severity, use `high` there.
+[Exit codes](#exit-codes)), so `fail-on` is what gates it; with `fail-on: critical` an `audit` run
+cannot fail because `audit` has no `critical` severity, use `high` there.
 
 The release assets carry no `.sha256` file yet, so the download is fetched over HTTPS from the
 release without a checksum check (the action says so in the log); if a `.sha256` is published
@@ -541,7 +571,7 @@ jobs:
 ```
 
 Flags: `--dir DIR` (project root, default `.`), `--print` (show it, write nothing), `--force`
-(replace an existing file; without it the command exits `1`), `--path FIRMWARE_DIR` (default
+(replace an existing file; without it the command exits `2`), `--path FIRMWARE_DIR` (default
 `firmware`, so a repository without that directory fails loudly rather than passing on nothing)
 and `--fail-on LEVEL` (default `error`). It creates `.github/workflows/`, and never writes through
 a symlink. The workflow it writes names the version of the binary that wrote it; as above, that
@@ -552,9 +582,12 @@ ref resolves once a release containing the action is tagged.
 Two ways to hand the tool to an AI coding agent.
 
 **MCP server.** `android-doctor mcp` speaks the Model Context Protocol over
-stdio and exposes three tools, `identify`, `doctor` and `audit`, each taking a
-`path`. Findings arrive as structured data instead of scraped stdout. Register
-it in your agent's MCP config:
+stdio and exposes three tools, `identify`, `doctor` and `audit`. `doctor` and `audit`
+run the CLI itself with `--json` and return its stdout unchanged: the doctor/1 envelope, byte for
+byte what the CLI prints for the same arguments. Arguments: `path` (`audit` also `paths`), and the
+flags `baseline`, `fail_on` and `sarif`. Excluded over MCP: `--json` (always on), `--score`,
+`--no-color`, help and version. A finding at or above `fail_on` is a result (read `exit_code`),
+not an MCP error; an exit of `2` is. Register it in your agent's MCP config:
 
 ```json
 { "mcpServers": { "android-doctor": { "command": "android-doctor", "args": ["mcp"] } } }
@@ -585,7 +618,7 @@ Every subcommand takes `--help`. `--no-color` (or `NO_COLOR`) disables colour.
 | `extract <ota.zip\|dir\|payload.bin> [-o out] [--only a,b] [--list] [--force]` | OTA to partition images (add `--files` for file trees, `--base` for incremental OTAs) |
 | `unpack <boot.img\|vendor_boot.img> [-o dir] [--json]` | Header, and with `-o` the kernel, ramdisk and dtb sections |
 | `ramdisk <boot.img\|ramdisk> [-o dir] [--json] [--list]` | Ramdisk contents and ADB properties |
-| `audit <image\|dir>... [--json] [--sarif FILE] [--baseline FILE] [--score]` | ADB properties, setuid files, `su` binaries, init services, findings |
+| `audit <image\|dir>... [--json] [--sarif FILE] [--baseline FILE] [--fail-on SEVERITY] [--score]` | ADB properties, setuid files, `su` binaries, init services, findings |
 | `vbmeta <vbmeta.img> [--images dir] [--json] [--key key.pem] [--vbmeta TOP_LEVEL]` | AVB header, key, signature, descriptors, partition hashes. With `--vbmeta`, checks a partition's footer against the signed top-level vbmeta: `avb-footer-covered` (info) only when that signature verifies and the descriptor's digest matches these bytes; a mismatch, an unsigned top level or no covering descriptor is `avb-footer-not-covered` (high). Hashtree descriptors are reported, not recomputed |
 | `ls <image> [path]` / `cat <image> <path>` | Browse and read files inside an ext2/3/4, erofs or f2fs image |
 | `files <image> [-o dir] [--json]` | List or extract an image's files with SELinux labels |
@@ -596,7 +629,7 @@ Every subcommand takes `--help`. `--no-color` (or `NO_COLOR`) disables colour.
 | `amlogic <file>` | Describe an Amlogic image container |
 | `partitions <dir> [--json] [--sector-size N]` | Qualcomm `rawprogram*.xml` / MediaTek `scatter.txt` flash manifest |
 | `hash-tree <image>` | Regenerate the dm-verity hash tree for a rebuilt partition |
-| `doctor scan <dir> [--json] [--sarif FILE] [--baseline FILE] [--score]` | Deterministic health scan |
+| `doctor scan <dir> [--json] [--sarif FILE] [--baseline FILE] [--fail-on SEVERITY] [--score]` | Deterministic health scan |
 | `doctor install [--agent <name>] [--print-only]` | Install the agent skill |
 | `ci install [--dir DIR] [--print] [--force] [--path FIRMWARE_DIR] [--fail-on LEVEL]` | Write the pinned GitHub Actions workflow |
 | `mcp [--verbose]` | MCP server on stdio |
@@ -704,16 +737,17 @@ Roadmap and issue list: see the milestones on GitHub.
 
 | | |
 | --- | --- |
-| `0` | ran to completion; with `--baseline`, nothing new above `info` |
-| `1` | a failure (unreadable or hostile input, unreadable `--baseline`, unwritable `--sarif`), or `doctor scan` reports an `error`-severity finding |
-| `2` | a bad flag or argument (reported by the argument parser) |
-| `3` | `--baseline`: findings that are not in the baseline |
+| `0` | ran to completion; no finding at or above `--fail-on` (with `--baseline`, no *new* one) |
+| `1` | `audit` / `doctor scan`: a finding at or above `--fail-on`; `vbmeta` / `partitions`: a verification or manifest mismatch |
+| `2` | a bad flag or argument, or the tool could not run (unreadable or hostile input, unreadable `--baseline`, unwritable `--sarif`). No report is printed |
+| `3` | `--baseline`: at least one **new** finding at or above `--fail-on` (takes precedence over `1`) |
+| `130` | interrupted (SIGINT) |
 
-Precedence, first match wins: a failure (`1`), then an `error`-severity finding among the findings
-reported (`1`; `doctor scan` only, as before), then new findings under `--baseline` (`3`), then
-`0`. `--baseline` filters first, so an `error` finding already in the baseline does not fail the
-run, while a new one exits `1`, not `3`. `audit` still exits `0` on findings unless `--baseline`
-is given.
+`--fail-on {critical,high,medium,low,info}` (the pre-0.4 names `error` and `warn` still parse).
+Defaults: `doctor scan` fails on `critical`; `audit` never fails without `--fail-on`; with
+`--baseline` the default is `low`, so any new finding above `info` gates. Under `--baseline` only
+new findings count and coverage gaps do not gate. Behaviour change in 0.4.0: failures used to exit
+`1`; they exit `2` now, and `1` means findings.
 
 ## Privacy and telemetry
 

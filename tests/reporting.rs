@@ -143,7 +143,7 @@ fn assert_valid_sarif(doc: &serde_json::Value) -> &Vec<serde_json::Value> {
             rules[idx]["id"], r["ruleId"],
             "ruleId resolves in driver.rules"
         );
-        assert!(r["partialFingerprints"]["androidDoctorFinding/v1"].is_string());
+        assert!(r["partialFingerprints"]["doctorFinding/v1"].is_string());
         for l in r["locations"].as_array().into_iter().flatten() {
             let uri = l["physicalLocation"]["artifactLocation"]["uri"]
                 .as_str()
@@ -211,14 +211,18 @@ fn doctor_scan_writes_sarif_with_a_score_and_relative_locations() {
         .iter()
         .find(|r| r["ruleId"] == "unhandled_input")
         .unwrap();
-    assert_eq!(m["level"], "warning");
+    assert_eq!(m["level"], "note");
     assert_eq!(
         m["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
         "mystery.bin"
     );
     let log = results
         .iter()
-        .find(|r| r["ruleId"] == "debug_leftovers" && r["level"] == "warning")
+        .find(|r| {
+            r["ruleId"] == "debug_leftovers"
+                && r["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+                    == "system/etc/old.log"
+        })
         .unwrap();
     assert_eq!(
         log["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
@@ -249,7 +253,7 @@ fn sarif_to_an_unwritable_path_is_an_error() {
         "--sarif",
         d.join("no/such/dir/x.sarif")
     );
-    assert_eq!(o.code, 1);
+    assert_eq!(o.code, 2);
     assert!(o.stderr.contains("cannot write SARIF"), "{}", o.stderr);
 }
 
@@ -300,7 +304,8 @@ fn score_conflicts_with_json_and_json_gains_a_score_for_audit() {
     assert!(v["score"]["value"].as_u64().unwrap() <= 100);
     assert!(v["score"]["label"].is_string());
     // original keys are all still there
-    assert!(v["adb"].is_string() && v["images"].is_array());
+    assert!(v["data"]["adb"].is_string() && v["data"]["images"].is_array());
+    assert_eq!(v["score"]["model"], "android/1");
     assert!(v["findings"][0]["fingerprint"].is_string());
 }
 
@@ -311,15 +316,17 @@ fn piped_doctor_output_is_still_the_flat_list_and_json_rows_keep_their_keys() {
     assert_eq!(o.code, 0);
     assert!(
         o.stdout
-            .contains("warn security unhandled_input: mystery.bin: no handler for this file"),
+            .contains("low security unhandled_input: mystery.bin: no handler for this file"),
         "{}",
         o.stdout
     );
     assert!(!o.stdout.contains("Next steps"), "no digest when piped");
     let o = run!("doctor", "scan", d.as_path(), "--json");
     let rows = json(&o.stdout);
-    let row = &rows.as_array().unwrap()[0];
-    for k in ["id", "category", "severity", "subject", "message", "remedy"] {
+    let row = &rows["findings"].as_array().unwrap()[0];
+    for k in [
+        "id", "category", "severity", "location", "message", "remedy", "subject",
+    ] {
         assert!(row.get(k).is_some(), "{k} kept");
     }
     assert!(row["fingerprint"].is_string());
@@ -386,7 +393,16 @@ fn audit_baseline_reports_only_new_findings_and_exits_3() {
     let new = run!("audit", sys, "--baseline", base, "--json");
     assert_eq!(new.code, 3, "{}{}", new.stdout, new.stderr);
     let v = json(&new.stdout);
-    let rows = v["findings"].as_array().unwrap();
+    assert_eq!(
+        v["baseline"],
+        serde_json::json!({"new": 1, "unchanged": 3, "fixed": 0})
+    );
+    let rows: Vec<_> = v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["baseline_state"] == "new")
+        .collect();
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0]["id"], "su-binary");
     assert_eq!(rows[0]["subject"], "sbin/su");
@@ -416,7 +432,7 @@ fn a_bad_baseline_is_a_clear_error_not_a_silent_pass() {
             run!("audit", sys, "--baseline", file),
             run!("doctor", "scan", d.as_path(), "--baseline", file),
         ] {
-            assert_eq!(o.code, 1, "{}", o.stderr);
+            assert_eq!(o.code, 2, "{}", o.stderr);
             assert!(o.stderr.contains(want), "want {want:?} in {}", o.stderr);
             assert!(
                 o.stdout.is_empty(),
@@ -428,38 +444,202 @@ fn a_bad_baseline_is_a_clear_error_not_a_silent_pass() {
 }
 
 #[test]
-fn exit_code_precedence_error_severity_beats_new_findings_and_known_errors_do_not_fail() {
-    // no images at all: partition_coverage is an error finding (exit 1, as before)
+fn exit_codes_follow_fail_on_and_baseline() {
+    // no images at all: partition_coverage is a critical finding, doctor scan fails on it
     let d = Scratch::new("exit-codes");
     std::fs::write(d.join("readme.txt"), b"hello").unwrap();
     let plain = run!("doctor", "scan", d.as_path());
     assert_eq!(plain.code, 1, "{}", plain.stderr);
-    assert!(plain.stderr.contains("severity error"));
+    assert!(plain.stderr.contains("critical"), "{}", plain.stderr);
+    // the envelope carries the real exit code
+    let rec = run!("doctor", "scan", d.as_path(), "--json");
+    assert_eq!(rec.code, 1, "--json still fails on a critical finding");
+    assert_eq!(json(&rec.stdout)["exit_code"], 1);
+    // raising the bar is a pass (the critical one is below nothing), lowering never hides it
+    assert_eq!(
+        run!("doctor", "scan", d.as_path(), "--fail-on", "info").code,
+        1
+    );
 
-    // record it, then re-run against it: the error is known, so exit 0
+    // record it, then re-run against it: known, so exit 0
     let meta = Scratch::new("meta-c");
     let base = meta.join("baseline.json");
-    let rec = run!("doctor", "scan", d.as_path(), "--json");
-    assert_eq!(rec.code, 1, "--json still fails on an error finding");
     std::fs::write(&base, &rec.stdout).unwrap();
-    std::fs::remove_file(d.join("readme.txt")).unwrap();
-    std::fs::write(d.join("readme.txt"), b"hello").unwrap();
     let known = run!("doctor", "scan", d.as_path(), "--baseline", base);
     assert_eq!(known.code, 0, "{}{}", known.stdout, known.stderr);
 
-    // a baseline that does not have the error: it is new AND an error, so 1 wins over 3
+    // an empty baseline: the critical finding is new, which is 3 (3 beats 1)
     let empty = meta.join("empty.json");
     std::fs::write(&empty, b"[]").unwrap();
     let both = run!("doctor", "scan", d.as_path(), "--baseline", empty);
-    assert_eq!(both.code, 1, "{}{}", both.stdout, both.stderr);
+    assert_eq!(both.code, 3, "{}{}", both.stdout, both.stderr);
 
-    // a new non-error finding is 3
+    // a new low finding gates at the default baseline level, but not above --fail-on high
     let w = firmware("exit-codes-warn");
-    let o = run!("doctor", "scan", w.as_path(), "--baseline", empty);
-    assert_eq!(o.code, 3, "{}{}", o.stdout, o.stderr);
-
-    // a usage error is clap's 2
+    assert_eq!(
+        run!("doctor", "scan", w.as_path(), "--baseline", empty).code,
+        3
+    );
+    let o = run!(
+        "doctor",
+        "scan",
+        w.as_path(),
+        "--baseline",
+        empty,
+        "--fail-on",
+        "high"
+    );
+    assert_eq!(o.code, 0, "{}{}", o.stdout, o.stderr);
+    // audit never fails without --fail-on, and does with it
+    assert_eq!(run!("audit", w.join("system.img")).code, 0);
+    assert_eq!(
+        run!("audit", w.join("system.img"), "--fail-on", "high").code,
+        1
+    );
+    assert_eq!(
+        run!("audit", w.join("system.img"), "--fail-on", "critical").code,
+        0
+    );
+    // old names still parse; a bad one and a missing file are 2
+    assert_eq!(
+        run!("audit", w.join("system.img"), "--fail-on", "warn").code,
+        1
+    );
+    assert_eq!(
+        run!("audit", w.join("system.img"), "--fail-on", "bogus").code,
+        2
+    );
+    assert_eq!(run!("audit", w.join("nope.img")).code, 2);
     assert_eq!(run!("doctor", "scan", w.as_path(), "--baseline").code, 2);
+}
+
+/// doctor/1 section 9.
+#[test]
+fn json_conforms_to_the_doctor_1_envelope() {
+    let d = firmware("conformance");
+    let sys = d.join("system.img");
+    for args in [
+        vec![
+            "doctor".as_ref(),
+            "scan".as_ref(),
+            d.as_os_str(),
+            "--json".as_ref(),
+        ],
+        vec!["audit".as_ref(), sys.as_os_str(), "--json".as_ref()],
+    ] {
+        let a = run_os(&args);
+        let v = json(&a.stdout);
+        for k in [
+            "schema",
+            "tool",
+            "version",
+            "exit_code",
+            "score",
+            "findings",
+            "data",
+        ] {
+            assert!(v.get(k).is_some(), "{k}");
+        }
+        assert_eq!(v["schema"], "doctor/1");
+        assert_eq!(v["tool"], "android-doctor");
+        assert_eq!(v["exit_code"], a.code);
+        assert!(
+            v["score"]["model"]
+                .as_str()
+                .unwrap()
+                .starts_with("android/")
+        );
+        let rows = v["findings"].as_array().unwrap();
+        assert!(!rows.is_empty());
+        for f in rows {
+            for k in [
+                "id",
+                "fingerprint",
+                "severity",
+                "category",
+                "message",
+                "location",
+                "remedy",
+            ] {
+                assert!(f.get(k).is_some(), "{k} in {f}");
+            }
+            assert!(
+                ["critical", "high", "medium", "low", "info"]
+                    .contains(&f["severity"].as_str().unwrap())
+            );
+            assert!(
+                [
+                    "file",
+                    "flow",
+                    "frame",
+                    "image",
+                    "card-path",
+                    "device",
+                    "service",
+                    "none"
+                ]
+                .contains(&f["location"]["kind"].as_str().unwrap())
+            );
+            let fp = f["fingerprint"].as_str().unwrap();
+            assert!(
+                fp.len() == 16
+                    && fp
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            );
+            assert!(f.get("baseline_state").is_none());
+        }
+        let b = run_os(&args);
+        let w = json(&b.stdout);
+        assert_eq!(v["findings"], w["findings"]);
+        assert_eq!(v["score"], w["score"]);
+    }
+}
+
+/// doctor/1 section 7: the MCP reply is the CLI's stdout, byte for byte.
+#[test]
+fn mcp_returns_the_cli_envelope_unchanged() {
+    use std::io::{Read, Write};
+    let d = firmware("mcp");
+    let base = d.join("b.json");
+    std::fs::write(&base, b"[]").unwrap();
+    let cli = run!(
+        "doctor",
+        "scan",
+        d.as_path(),
+        "--baseline",
+        base,
+        "--fail-on",
+        "low",
+        "--json"
+    );
+    let call = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+        "name":"doctor","arguments":{"path":d.to_str().unwrap(),"baseline":base.to_str().unwrap(),"fail_on":"low"}}});
+    let mut child = Command::new(env!("CARGO_BIN_EXE_android-doctor"))
+        .arg("mcp")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    writeln!(child.stdin.take().unwrap(), "{call}").unwrap();
+    let mut out = String::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut out)
+        .unwrap();
+    child.wait().unwrap();
+    let r = json(&out);
+    assert_eq!(r["result"]["isError"], false, "{out}");
+    assert_eq!(
+        r["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .trim_end(),
+        cli.stdout.trim_end()
+    );
+    assert_eq!(json(&cli.stdout)["exit_code"], 3);
 }
 
 #[test]

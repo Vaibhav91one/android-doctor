@@ -52,7 +52,7 @@ jobs:
         with:
           path: ${{ runner.temp }}/fw-clean
           binary: target/release/android-doctor
-          fail-on: error
+          fail-on: critical
           upload-sarif: "false"
       - name: Clean case assertions
         run: |
