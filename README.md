@@ -163,6 +163,37 @@ One finding per rule names a few objects; `--json` lists every object under `elf
 | `elf-no-fortify` | info | no `__*_chk` imports (heuristic) |
 
 A statically linked binary has no dynamic section, so it is not judged for the last three.
+### 3b. Diff two builds
+
+`diff` compares an old and a new build file by file, with the same file-system readers as `audit`
+(ext2/3/4, erofs, f2fs). Give two images, or two directories of images (an `extract` output),
+which are paired by file name; an image present on one side only is compared with an empty tree.
+
+```sh
+android-doctor diff old/system.img new/system.img
+android-doctor diff old/ new/ --only added,modified     # list only these file changes
+android-doctor diff old/ new/ --json > diff.json        # doctor/1 envelope
+android-doctor diff old/ new/ --baseline diff.json      # gate: exit 3 on a NEW regression
+```
+
+Per image it reports files `added`, `removed`, `modified` (different SHA-256, symlink target or
+file type) and `metadata` (same content, different mode, owner, SELinux label or file capability),
+plus changed build/ADB properties and init services. Under `--json` the raw list is in `data`
+(each file with old and new size, SHA-256, mode, uid/gid, label); `--only` filters that list and
+the text report, never the findings.
+
+What the new build made worse becomes findings, all `diff-*`: every `audit` finding about a path
+the old build did not have (`diff-debuggable-build`, `diff-su-binary`, `diff-insecure-adb`, ...),
+`diff-new-setuid` (high), `diff-new-capability` (medium), `diff-root-service` (a new init service
+that runs as root, medium), `diff-sepolicy-changed` (medium) and `diff-prop-changed` (info). Scoring
+is `android/1`. `--fail-on` defaults to `high` (a diff lists only what is new, so the gate is safe);
+`--baseline`, `--sarif` and `--score` work as for `audit`. In a terminal the grouped digest is
+shown; pipe the output, or use `--json`, for the file list.
+
+Not covered: OTA/payload input (run `extract` first), plain host directories of extracted files
+(the images carry the owners, modes and labels), and format-aware diffing of binaries or boot
+images.
+
 ### 4. Health-scan a directory
 
 `doctor scan` runs the deterministic rule set over an unpacked firmware
@@ -582,9 +613,9 @@ ref resolves once a release containing the action is tagged.
 Two ways to hand the tool to an AI coding agent.
 
 **MCP server.** `android-doctor mcp` speaks the Model Context Protocol over
-stdio and exposes three tools, `identify`, `doctor` and `audit`. `doctor` and `audit`
+stdio and exposes four tools, `identify`, `doctor`, `audit` and `diff`. `doctor`, `audit` and `diff`
 run the CLI itself with `--json` and return its stdout unchanged: the doctor/1 envelope, byte for
-byte what the CLI prints for the same arguments. Arguments: `path` (`audit` also `paths`), and the
+byte what the CLI prints for the same arguments. Arguments: `path` (`audit` also `paths`; `diff` takes `old`, `new` and `only`), and the
 flags `baseline`, `fail_on` and `sarif`. Excluded over MCP: `--json` (always on), `--score`,
 `--no-color`, help and version. A finding at or above `fail_on` is a result (read `exit_code`),
 not an MCP error; an exit of `2` is. Register it in your agent's MCP config:
@@ -619,6 +650,7 @@ Every subcommand takes `--help`. `--no-color` (or `NO_COLOR`) disables colour.
 | `unpack <boot.img\|vendor_boot.img> [-o dir] [--json]` | Header, and with `-o` the kernel, ramdisk and dtb sections |
 | `ramdisk <boot.img\|ramdisk> [-o dir] [--json] [--list]` | Ramdisk contents and ADB properties |
 | `audit <image\|dir>... [--json] [--sarif FILE] [--baseline FILE] [--fail-on SEVERITY] [--score]` | ADB properties, setuid files, `su` binaries, init services, findings |
+| `diff <old> <new> [--json] [--only STATUS,...] [--sarif FILE] [--baseline FILE] [--fail-on SEVERITY] [--score]` | File-level diff of two images or directories of images; regressions become findings |
 | `vbmeta <vbmeta.img> [--images dir] [--json] [--key key.pem] [--vbmeta TOP_LEVEL]` | AVB header, key, signature, descriptors, partition hashes. With `--vbmeta`, checks a partition's footer against the signed top-level vbmeta: `avb-footer-covered` (info) only when that signature verifies and the descriptor's digest matches these bytes; a mismatch, an unsigned top level or no covering descriptor is `avb-footer-not-covered` (high). Hashtree descriptors are reported, not recomputed |
 | `ls <image> [path]` / `cat <image> <path>` | Browse and read files inside an ext2/3/4, erofs or f2fs image |
 | `files <image> [-o dir] [--json]` | List or extract an image's files with SELinux labels |
@@ -738,13 +770,13 @@ Roadmap and issue list: see the milestones on GitHub.
 | | |
 | --- | --- |
 | `0` | ran to completion; no finding at or above `--fail-on` (with `--baseline`, no *new* one) |
-| `1` | `audit` / `doctor scan`: a finding at or above `--fail-on`; `vbmeta` / `partitions`: a verification or manifest mismatch |
+| `1` | `audit` / `doctor scan` / `diff`: a finding at or above `--fail-on`; `vbmeta` / `partitions`: a verification or manifest mismatch |
 | `2` | a bad flag or argument, or the tool could not run (unreadable or hostile input, unreadable `--baseline`, unwritable `--sarif`). No report is printed |
 | `3` | `--baseline`: at least one **new** finding at or above `--fail-on` (takes precedence over `1`) |
 | `130` | interrupted (SIGINT) |
 
 `--fail-on {critical,high,medium,low,info}` (the pre-0.4 names `error` and `warn` still parse).
-Defaults: `doctor scan` fails on `critical`; `audit` never fails without `--fail-on`; with
+Defaults: `doctor scan` fails on `critical`; `audit` never fails without `--fail-on`; `diff` fails on `high`; with
 `--baseline` the default is `low`, so any new finding above `info` gates. Under `--baseline` only
 new findings count and coverage gaps do not gate. Behaviour change in 0.4.0: failures used to exit
 `1`; they exit `2` now, and `1` means findings.

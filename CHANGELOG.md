@@ -5,6 +5,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `diff <old> <new>`: file-level comparison of two firmware builds (images or directories of
+  images; ext2/3/4, erofs, f2fs). Reports added, removed, modified (SHA-256) and metadata-only
+  (mode, owner, SELinux label, capability) file changes, plus property and init-service changes,
+  under `data`; regressions (new setuid file, su binary, root init service, SELinux policy change,
+  weakened ADB/debug properties) are `diff-*` findings in the doctor/1 envelope. `--only`,
+  `--json`, `--sarif`, `--baseline`, `--fail-on` (default `high`), `--score`, and an MCP `diff`
+  tool. Refs #162; OTA input, plain-directory input and format-aware binary diffing are not done.
+
 ## [0.4.0]
 
 ### Changed (breaking)
