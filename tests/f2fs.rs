@@ -426,7 +426,7 @@ fn audit_produces_the_same_findings_as_on_the_other_file_systems() {
         let text = String::from_utf8(ad_ok(&["audit", p(&img)])).unwrap();
         println!("--- {name}: audit\n{text}");
         let v: Value = serde_json::from_slice(&ad_ok(&["audit", "--json", p(&img)])).unwrap();
-        let image = &v["images"][0];
+        let image = &v["data"]["images"][0];
         let mut got: Vec<String> = image["findings"]
             .as_array()
             .unwrap()
@@ -489,7 +489,10 @@ fn an_empty_volume_from_the_formatter_lists_as_empty() {
     assert!(!o.status.success());
     assert!(String::from_utf8_lossy(&o.stderr).contains("not found"));
     let v: Value = serde_json::from_slice(&ad_ok(&["audit", "--json", p(&img)])).unwrap();
-    assert_eq!(v["images"][0]["findings"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        v["data"]["images"][0]["findings"].as_array().unwrap().len(),
+        0
+    );
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -498,13 +501,13 @@ fn a_multi_device_volume_is_refused_with_a_clear_error() {
     let Some(b) = images() else { return };
     let img = b.image("multi");
     let o = ad(&["files", p(&img)]);
-    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(o.status.code(), Some(2));
     let err = String::from_utf8_lossy(&o.stderr);
     assert!(
         err.contains("multi-device f2fs volumes are not supported"),
         "{err}"
     );
-    assert_eq!(ad(&["audit", p(&img)]).status.code(), Some(1));
+    assert_eq!(ad(&["audit", p(&img)]).status.code(), Some(2));
 }
 
 #[test]
@@ -532,14 +535,14 @@ fn damaged_real_images_are_refused_never_crashed_on() {
             f.write_all(&[v]).unwrap();
             f.flush().unwrap();
             let o = ad(&["files", p(&work)]);
-            // a clean exit (0) or a clean refusal (1): a panic is 101 and a signal has no code
+            // a clean exit (0) or a clean refusal (2): a panic is 101 and a signal has no code
             assert!(
-                matches!(o.status.code(), Some(0) | Some(1)),
+                matches!(o.status.code(), Some(0) | Some(2)),
                 "byte {at} set to {v:#x}: {:?} {}",
                 o.status,
                 String::from_utf8_lossy(&o.stderr)
             );
-            if o.status.code() == Some(1) {
+            if o.status.code() == Some(2) {
                 refused += 1;
             }
         }
@@ -556,7 +559,7 @@ fn damaged_real_images_are_refused_never_crashed_on() {
         fs::write(&work, &full[..len]).unwrap();
         let o = ad(&["files", p(&work)]);
         assert!(
-            matches!(o.status.code(), Some(0) | Some(1)),
+            matches!(o.status.code(), Some(0) | Some(2)),
             "len {len}: {:?}",
             o.status
         );

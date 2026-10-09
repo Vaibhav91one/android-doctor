@@ -34,6 +34,8 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
+use crate::term::sanitize as clean;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Severity {
     Info,
@@ -47,20 +49,34 @@ impl Severity {
     pub fn name(self) -> &'static str {
         match self {
             Severity::Info => "info",
-            Severity::Warn => "warn",
+            Severity::Warn => "low",
             Severity::Medium => "medium",
             Severity::High => "high",
-            Severity::Error => "error",
+            Severity::Error => "critical",
+        }
+    }
+
+    /// Parse a `--fail-on` value: the doctor/1 names, plus the old `error` and `warn` as aliases.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "critical" | "error" => Ok(Severity::Error),
+            "high" => Ok(Severity::High),
+            "medium" => Ok(Severity::Medium),
+            "low" | "warn" => Ok(Severity::Warn),
+            "info" => Ok(Severity::Info),
+            _ => Err(format!(
+                "expected one of critical, high, medium, low, info (got {s:?})"
+            )),
         }
     }
 
     /// Doctor and content-hit severities are strings. Unknown text is the lowest severity.
     fn from_name(s: &str) -> Self {
         match s {
-            "error" => Severity::Error,
+            "error" | "critical" => Severity::Error,
             "high" => Severity::High,
             "medium" => Severity::Medium,
-            "warn" => Severity::Warn,
+            "warn" | "low" => Severity::Warn,
             _ => Severity::Info,
         }
     }
@@ -88,8 +104,8 @@ impl Severity {
     fn sarif_level(self) -> &'static str {
         match self {
             Severity::Error | Severity::High => "error",
-            Severity::Medium | Severity::Warn => "warning",
-            Severity::Info => "note",
+            Severity::Medium => "warning",
+            Severity::Warn | Severity::Info => "note",
         }
     }
 
@@ -123,6 +139,8 @@ pub struct Finding {
     /// `scope/subject` when the finding names a file a SARIF consumer could open.
     pub uri: Option<String>,
     pub fingerprint: String,
+    /// `new` or `unchanged`; set only when a `--baseline` was given.
+    pub baseline_state: Option<&'static str>,
 }
 
 fn norm_subject(s: &str) -> String {
@@ -161,19 +179,36 @@ impl Finding {
         self
     }
 
-    /// One row of the `--json` output. Superset of the original `doctor scan --json` row.
+    /// One doctor/1 finding. `subject` and `image` are extra keys kept from the old rows.
     pub fn to_json(&self) -> Value {
+        let loc = if let Some(uri) = &self.uri {
+            json!({"kind": "file", "ref": uri})
+        } else if !self.scope.is_empty() || !self.subject.is_empty() {
+            let r = [self.scope.as_str(), self.subject.as_str()]
+                .iter()
+                .filter(|p| !p.is_empty())
+                .copied()
+                .collect::<Vec<_>>()
+                .join("/");
+            json!({"kind": "image", "ref": r})
+        } else {
+            json!({"kind": "none", "ref": ""})
+        };
         let mut v = json!({
             "id": self.rule,
-            "category": self.category,
-            "severity": self.severity.name(),
-            "subject": self.subject,
-            "message": self.message,
-            "remedy": self.remedy,
             "fingerprint": self.fingerprint,
+            "severity": self.severity.name(),
+            "category": self.category,
+            "message": self.message,
+            "location": loc,
+            "remedy": self.remedy,
+            "subject": self.subject,
         });
         if !self.scope.is_empty() {
             v["image"] = json!(self.scope);
+        }
+        if let Some(st) = self.baseline_state {
+            v["baseline_state"] = json!(st);
         }
         v
     }
@@ -209,6 +244,7 @@ pub fn from_audit(audits: &[ImageAudit]) -> Vec<Finding> {
                     gap: false,
                     uri: None,
                     fingerprint: String::new(),
+                    baseline_state: None,
                 }
                 .seal(!subject.is_empty()),
             );
@@ -227,6 +263,7 @@ pub fn from_audit(audits: &[ImageAudit]) -> Vec<Finding> {
                     gap: false,
                     uri: None,
                     fingerprint: String::new(),
+                    baseline_state: None,
                 }
                 .seal(true),
             );
@@ -262,6 +299,7 @@ pub fn from_doctor(scoped: Vec<(doctor::Finding, Option<String>)>) -> Vec<Findin
                 gap,
                 uri: None,
                 fingerprint: String::new(),
+                baseline_state: None,
             }
             .seal(located)
         })
@@ -528,11 +566,11 @@ pub struct Score {
 
 impl Score {
     pub fn to_json(&self) -> Value {
-        json!({"value": self.value, "label": self.label, "coverage_gaps": self.gaps})
+        json!({"value": self.value, "label": self.label, "model": "android/1", "coverage_gaps": self.gaps})
     }
 }
 
-/// The 0-100 health score, a pure function of the findings.
+/// The 0-100 health score (model `android/1`), a pure function of the findings.
 ///
 /// `100 - penalty`, floored at 0, where findings are grouped by rule and each group costs its
 /// worst severity's weight (error 20, high 10, medium 5, warn 2, info 0) for the first finding
@@ -578,9 +616,10 @@ pub struct Baseline {
     known: HashSet<String>,
 }
 
-/// Read a baseline: the output of `doctor scan --json` (an array) or `audit --json` (an object
-/// with a `findings` array). Anything else is an error, never an empty baseline: a mistyped or
-/// wrong file silently disabling the gate would be worse than failing.
+/// Read a baseline: a doctor/1 envelope (an object with a `findings` array). The pre-0.4 shapes
+/// (a bare array from `doctor scan --json`) are still accepted. Anything else is an error, never
+/// an empty baseline: a mistyped or wrong file silently disabling the gate would be worse than
+/// failing.
 pub fn read_baseline(path: &Path) -> Result<Baseline> {
     let shown = path.display();
     let text =
@@ -616,30 +655,77 @@ pub fn read_baseline(path: &Path) -> Result<Baseline> {
 }
 
 pub struct Diff {
-    pub new: Vec<Finding>,
-    pub suppressed: usize,
+    /// Every finding, with `baseline_state` set.
+    pub all: Vec<Finding>,
+    pub new: usize,
+    pub unchanged: usize,
+    /// Fingerprints in the baseline that no longer occur.
+    pub fixed: usize,
 }
 
 impl Baseline {
-    /// Keep the findings the baseline does not know. A coverage gap is never suppressed: the
-    /// baseline cannot vouch for a rule that did not run.
-    pub fn diff(&self, findings: Vec<Finding>) -> Diff {
-        let total = findings.len();
-        let new: Vec<Finding> = findings
-            .into_iter()
-            .filter(|f| f.gap || !self.known.contains(&f.fingerprint))
-            .collect();
+    /// Mark each finding `new` or `unchanged`. A coverage gap is never `unchanged`: the baseline
+    /// cannot vouch for a rule that did not run.
+    pub fn diff(&self, mut findings: Vec<Finding>) -> Diff {
+        let now: HashSet<&str> = findings.iter().map(|f| f.fingerprint.as_str()).collect();
+        let fixed = self
+            .known
+            .iter()
+            .filter(|k| !now.contains(k.as_str()))
+            .count();
+        for f in &mut findings {
+            let known = !f.gap && self.known.contains(&f.fingerprint);
+            f.baseline_state = Some(if known { "unchanged" } else { "new" });
+        }
+        let unchanged = findings
+            .iter()
+            .filter(|f| f.baseline_state == Some("unchanged"))
+            .count();
         Diff {
-            suppressed: total - new.len(),
-            new,
+            new: findings.len() - unchanged,
+            unchanged,
+            fixed,
+            all: findings,
         }
     }
 }
 
-/// True when `new` should fail a `--baseline` run (exit 3): a new finding above `info`, that is
-/// not a coverage gap. New `info` findings are reported but never gate.
-pub fn gates(new: &[Finding]) -> bool {
-    new.iter().any(|f| !f.gap && f.severity > Severity::Info)
+/// The doctor/1 envelope. `findings` are sorted worst first, then by id and fingerprint.
+pub fn envelope(
+    exit_code: i32,
+    score: &Score,
+    findings: &[Finding],
+    baseline: Option<&Diff>,
+    data: Value,
+) -> Value {
+    let mut sorted: Vec<&Finding> = findings.iter().collect();
+    sorted.sort_by(|a, b| {
+        b.severity
+            .cmp(&a.severity)
+            .then_with(|| a.rule.cmp(&b.rule))
+            .then_with(|| a.fingerprint.cmp(&b.fingerprint))
+    });
+    let mut v = json!({
+        "schema": "doctor/1",
+        "tool": "android-doctor",
+        "version": env!("CARGO_PKG_VERSION"),
+        "exit_code": exit_code,
+        "score": score.to_json(),
+        "findings": sorted.iter().map(|f| f.to_json()).collect::<Vec<_>>(),
+        "data": data,
+    });
+    if let Some(d) = baseline {
+        v["baseline"] = json!({"new": d.new, "unchanged": d.unchanged, "fixed": d.fixed});
+    }
+    v
+}
+
+/// True when `shown` has a finding at or above `min`. Under `--baseline`, `shown` is the new
+/// findings and coverage gaps do not gate (a gap is "not evaluated", not a finding).
+pub fn gates(shown: &[Finding], min: Severity, skip_gaps: bool) -> bool {
+    shown
+        .iter()
+        .any(|f| !(skip_gaps && f.gap) && f.severity >= min)
 }
 
 // ---------------------------------------------------------------------------
@@ -653,13 +739,13 @@ pub fn render_flat(findings: &[Finding]) -> String {
         lines.push(format!(
             "{} {} {}: {}: {}",
             f.severity.name(),
-            f.category,
-            f.rule,
-            f.subject,
-            f.message
+            clean(&f.category),
+            clean(&f.rule),
+            clean(&f.subject),
+            clean(&f.message)
         ));
         if let Some(r) = &f.remedy {
-            lines.push(format!("    └ {r}"));
+            lines.push(format!("    └ {}", clean(r)));
         }
     }
     lines.join("\n")
@@ -697,7 +783,7 @@ pub fn render_digest(
         label = format!("{label}, {}", plural(score.gaps, "coverage gap"));
     }
     let mut out = vec![
-        format!("android-doctor  {title}"),
+        format!("android-doctor  {}", clean(title)),
         format!("{} / 100  {}", score.value, r.style.colorize(tone, &label)),
         format!(
             "{}{}",
@@ -765,7 +851,7 @@ pub fn render_digest(
         for (cat, rules) in &cats {
             let total: usize = rules.iter().map(|r| r.1.len()).sum();
             out.push(String::new());
-            out.push(format!("{cat} ({total})"));
+            out.push(format!("{} ({total})", clean(cat)));
             for (rule, fs) in rules.iter().take(TOP_RULES) {
                 let sev = worst(fs);
                 let times = if fs.len() > 1 {
@@ -776,8 +862,8 @@ pub fn render_digest(
                 out.push(format!(
                     "  [{}] {}{times}  {}",
                     r.severity(sev.term(), sev.name()),
-                    rule.0,
-                    fs[0].message
+                    clean(rule.0),
+                    clean(&fs[0].message)
                 ));
                 let subjects: BTreeSet<&str> = fs
                     .iter()
@@ -785,7 +871,7 @@ pub fn render_digest(
                     .filter(|s| !s.is_empty())
                     .collect();
                 for s in subjects.iter().take(TOP_SUBJECTS) {
-                    out.push(format!("      {s}"));
+                    out.push(format!("      {}", clean(s)));
                 }
                 if subjects.len() > TOP_SUBJECTS {
                     out.push(format!(
@@ -875,7 +961,7 @@ pub fn to_sarif(findings: &[Finding], score: &Score, baselined: bool) -> Value {
                 "ruleIndex": index[f.rule.as_str()],
                 "level": f.severity.sarif_level(),
                 "message": {"text": if f.message.is_empty() { &f.rule } else { &f.message }},
-                "partialFingerprints": {"androidDoctorFinding/v1": f.fingerprint},
+                "partialFingerprints": {"doctorFinding/v1": f.fingerprint},
                 "properties": {
                     "severity": f.severity.name(),
                     "category": f.category,
@@ -975,6 +1061,7 @@ mod tests {
             gap: false,
             uri: None,
             fingerprint: String::new(),
+            baseline_state: None,
         }
         .seal(!subject.is_empty())
     }
@@ -991,12 +1078,18 @@ mod tests {
         assert!(Severity::Error > Severity::High && Severity::High > Severity::Medium);
         assert!(Severity::Medium > Severity::Warn && Severity::Warn > Severity::Info);
         assert_eq!(Severity::from_name("error"), Severity::Error);
+        assert_eq!(Severity::from_name("critical"), Severity::Error);
         assert_eq!(Severity::from_name("nonsense"), Severity::Info);
         assert_eq!(Severity::from_audit(audit::Severity::High), Severity::High);
         assert_eq!(Severity::Error.sarif_level(), "error");
         assert_eq!(Severity::High.sarif_level(), "error");
         assert_eq!(Severity::Medium.sarif_level(), "warning");
-        assert_eq!(Severity::Warn.sarif_level(), "warning");
+        assert_eq!(Severity::Warn.sarif_level(), "note");
+        assert_eq!(Severity::Error.name(), "critical");
+        assert_eq!(Severity::Warn.name(), "low");
+        assert_eq!(Severity::parse("warn"), Ok(Severity::Warn));
+        assert_eq!(Severity::parse("critical"), Ok(Severity::Error));
+        assert!(Severity::parse("none").is_err());
         assert_eq!(Severity::Info.sarif_level(), "note");
     }
 
@@ -1086,14 +1179,19 @@ mod tests {
             gap("avb_signature"),
         ];
         let d = b.diff(now);
-        assert_eq!(d.suppressed, 1);
-        assert_eq!(d.new.len(), 2);
-        assert!(gates(&d.new));
+        assert_eq!((d.unchanged, d.new, d.fixed), (1, 2, 0));
+        let new: Vec<_> = d
+            .all
+            .iter()
+            .filter(|f| f.baseline_state == Some("new"))
+            .cloned()
+            .collect();
+        assert!(gates(&new, Severity::Warn, true));
         // only a gap and an info are new: reported, but no gate
         let mut quiet = vec![gap("x"), f("setuid-files", Severity::Info, "system", "")];
-        assert!(!gates(&quiet));
+        assert!(!gates(&quiet, Severity::Warn, true));
         quiet.push(f("a", Severity::Warn, "i", "p"));
-        assert!(gates(&quiet));
+        assert!(gates(&quiet, Severity::Warn, true));
     }
 
     #[test]
@@ -1140,8 +1238,34 @@ mod tests {
         a.remedy = Some("sign it".into());
         assert_eq!(
             render_flat(&[a]),
-            "warn security avb_signature: vbmeta.img: image is unsigned\n    └ sign it"
+            "low security avb_signature: vbmeta.img: image is unsigned\n    └ sign it"
         );
+    }
+
+    #[test]
+    fn target_text_never_reaches_a_terminal_with_an_escape() {
+        let mut a = f("avb_signature", Severity::Warn, "", "evil\x1b[31m.img");
+        a.message = "\x1b]0;pwned\x07 \u{202e}rtl \u{200b}zw".into();
+        a.remedy = Some("\x1b[2Jfix".into());
+        for text in [
+            render_flat(std::slice::from_ref(&a)),
+            render_digest(
+                "t\x1b[1m",
+                &[a],
+                &score(&[]),
+                &[],
+                Renderer::new(Style::fixed(false)),
+            ),
+        ] {
+            assert!(
+                !text.chars().any(|c| c.is_control() && c != '\n'),
+                "{text:?}"
+            );
+            assert!(
+                !text.contains('\u{202e}') && !text.contains('\u{200b}'),
+                "{text:?}"
+            );
+        }
     }
 
     #[test]
@@ -1168,7 +1292,7 @@ mod tests {
         assert!(sec < qual, "{text}");
         assert!(text.find("su-binary x2").unwrap() < text.find("world-writable").unwrap());
         assert!(text.contains("1 coverage gap"), "{text}");
-        assert!(text.contains("2 high, 1 medium, 1 warn, 1 info"), "{text}");
+        assert!(text.contains("2 high, 1 medium, 1 low, 1 info"), "{text}");
         assert!(text.lines().last().unwrap().starts_with("Next steps: "));
         assert!(!text.contains('\x1b'));
         let clean = render_digest(
@@ -1231,7 +1355,7 @@ mod tests {
             let idx = r["ruleIndex"].as_u64().unwrap() as usize;
             assert_eq!(rules[idx]["id"], r["ruleId"]);
             assert_eq!(r["baselineState"], "new");
-            assert!(r["partialFingerprints"]["androidDoctorFinding/v1"].is_string());
+            assert!(r["partialFingerprints"]["doctorFinding/v1"].is_string());
         }
         assert_eq!(results[0]["level"], "error");
         assert_eq!(results[1]["level"], "note");

@@ -6,17 +6,30 @@
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+
+/// Flags the findings tools accept besides the target path(s). Excluded over MCP: `--json`
+/// (always on), `--score`, `--no-color` (never any colour in JSON), `help` and `version`.
+const FLAGS: &str = r#""baseline":{"type":"string","description":"Previous --json envelope; marks findings new/unchanged and exits 3 on a new one"},"fail_on":{"type":"string","enum":["critical","high","medium","low","info"],"description":"Exit 1 (3 under baseline) at or above this severity"},"sarif":{"type":"string","description":"Also write SARIF 2.1.0 to this file""#;
 
 /// The tools this server exposes, in MCP `tools/list` shape.
 pub fn tool_list() -> Value {
+    let one = r#""path":{"type":"string"}"#;
+    let many = r#""paths":{"type":"array","items":{"type":"string"},"description":"Image files or directories"}"#;
+    let schema = |p: &str, req: &str, flags: bool| {
+        let f = if flags {
+            format!(",{FLAGS}}}")
+        } else {
+            String::new()
+        };
+        format!(r#"{{"type":"object","properties":{{{p}{f}}},"required":[{req}]}}"#)
+    };
     json!({ "tools": [
-        tool("identify", "Identify the format of a firmware file",
-              r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#),
-        tool("doctor", "Report security and quality findings for a directory",
-              r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#),
-        tool("audit", "Security findings for a partition image",
-              r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#),
+        tool("identify", "Identify the format of a firmware file (identify --json)",
+              &schema(one, r#""path""#, false)),
+        tool("doctor", "doctor scan --json: the doctor/1 envelope for a firmware directory",
+              &schema(one, r#""path""#, true)),
+        tool("audit", "audit --json: the doctor/1 envelope for partition images",
+              &schema(&format!("{one},{many}"), "", true)),
     ] })
 }
 
@@ -73,55 +86,55 @@ fn error(id: Option<Value>, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
-/// Run one tool and return its output as text.
-fn call_tool(name: &str, args: &Value) -> Result<String> {
-    let path = args
-        .get("path")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("missing required argument \"path\""))?;
-    let p = PathBuf::from(path);
-    let out = match name {
-        "identify" => {
-            let id = crate::detect::identify_path(&p)?;
-            format!("{}: {}", id.id, id.description)
-        }
-        "doctor" => {
-            // Finding is not Serialize, so build the JSON explicitly - the same shape the
-            // CLI already emits for --json.
-            let findings = crate::doctor::scan(&p)?;
-            let rows: Vec<Value> = findings
-                .iter()
-                .map(|f| {
-                    json!({
-                        "id": f.id,
-                        "category": f.category,
-                        "severity": f.severity,
-                        "subject": f.subject,
-                        "message": f.message,
-                        "remedy": f.remedy,
-                    })
-                })
-                .collect();
-            serde_json::to_string_pretty(&rows)?
-        }
-        "audit" => {
-            let audit = crate::audit::audit_image(&p)?;
-            let rows: Vec<Value> = audit
-                .findings
-                .iter()
-                .map(|f| {
-                    json!({
-                        "severity": format!("{:?}", f.severity),
-                        "rule": f.rule,
-                        "detail": f.detail,
-                    })
-                })
-                .collect();
-            serde_json::to_string_pretty(&rows)?
-        }
+/// The CLI arguments for a tool call (everything after the binary name).
+fn cli_args(name: &str, args: &Value) -> Result<Vec<String>> {
+    let text = |k: &str| args.get(k).and_then(Value::as_str);
+    let mut argv: Vec<String> = match name {
+        "identify" => vec!["identify".into()],
+        "doctor" => vec!["doctor".into(), "scan".into()],
+        "audit" => vec!["audit".into()],
         other => anyhow::bail!("unknown tool {other}"),
     };
-    Ok(out)
+    argv.push("--json".into());
+    for (key, flag) in [
+        ("baseline", "baseline"),
+        ("fail_on", "fail-on"),
+        ("sarif", "sarif"),
+    ] {
+        if let Some(v) = text(key) {
+            if name == "identify" {
+                anyhow::bail!("identify takes only \"path\"");
+            }
+            argv.push(format!("--{flag}={v}"));
+        }
+    }
+    let mut paths: Vec<String> = text("path").map(String::from).into_iter().collect();
+    if let Some(a) = args.get("paths").and_then(Value::as_array) {
+        paths.extend(a.iter().filter_map(Value::as_str).map(String::from));
+    }
+    if paths.is_empty() || (name != "audit" && paths.len() > 1) {
+        anyhow::bail!("missing required argument \"path\"");
+    }
+    argv.push("--".into());
+    argv.extend(paths);
+    Ok(argv)
+}
+
+/// Run one tool: the CLI itself with `--json`, so the reply is byte-identical to the CLI's
+/// stdout. Exit 0, 1 and 3 are results (the envelope says which); anything else is an error.
+fn call_tool(name: &str, args: &Value) -> Result<String> {
+    let out = std::process::Command::new(std::env::current_exe()?)
+        .arg("--no-color")
+        .args(cli_args(name, args)?)
+        .output()?;
+    if matches!(out.status.code(), Some(0 | 1 | 3)) {
+        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+    }
+    anyhow::bail!(
+        "{} (exit {})",
+        String::from_utf8_lossy(&out.stderr).trim(),
+        out.status.code().map_or("signal".into(), |c| c.to_string())
+    )
 }
 
 /// Serve JSON-RPC over stdin/stdout until EOF.

@@ -19,8 +19,8 @@ inputs:
     description: The scan to run, `doctor scan` or `audit`.
     default: doctor scan
   fail-on:
-    description: Minimum severity that fails the job (error, high, medium, warn, none). With a baseline only new findings count.
-    default: error
+    description: Minimum severity that fails the job (critical, high, medium, low, none; the old error and warn still work). With a baseline only new findings count.
+    default: critical
   baseline:
     description: Optional path to a committed `--json` report. When set, only findings that are not in it gate (exit 3).
     default: ""

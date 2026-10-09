@@ -298,7 +298,7 @@ enum CiAction {
         #[arg(long, value_name = "FIRMWARE_DIR", default_value = "firmware")]
         path: String,
         /// Minimum severity that fails the job
-        #[arg(long, value_name = "LEVEL", default_value = "error", value_parser = ci::FAIL_ON)]
+        #[arg(long, value_name = "LEVEL", default_value = "critical", value_parser = ci::FAIL_ON)]
         fail_on: String,
     },
 }
@@ -359,16 +359,12 @@ fn doctor_scan(
                 shell_quote(&input.display().to_string())
             ),
             json,
-            fail_on_error: true,
+            fail_default: Some(findings::Severity::Error),
             no_color,
         },
         report,
         all,
-        |shown, _| {
-            // Still an array of rows, as before; each row gains `fingerprint`.
-            let rows: Vec<_> = shown.iter().map(findings::Finding::to_json).collect();
-            Ok(serde_json::to_string_pretty(&rows)?)
-        },
+        || serde_json::json!({}),
         findings::render_flat,
     )
 }
@@ -674,16 +670,17 @@ fn main() -> anyhow::Result<()> {
     // well would make the runtime print it a second time.
     match result {
         Ok(()) => Ok(()),
-        Err(e) if e.downcast_ref::<reporting::NewFindings>().is_some() => {
+        Err(e) if e.downcast_ref::<reporting::Gate>().is_some() => {
             eprintln!("{e}");
-            std::process::exit(reporting::EXIT_NEW_FINDINGS);
+            std::process::exit(e.downcast_ref::<reporting::Gate>().map_or(1, |g| g.code));
         }
         Err(e) => {
             eprintln!(
                 "{}",
                 term::Renderer::new(term::Style::detect(no_color)).error(&e)
             );
-            std::process::exit(1);
+            // doctor/1: the tool could not run (bad input, unreadable file) is 2.
+            std::process::exit(2);
         }
     }
 }
@@ -699,11 +696,15 @@ fn partitions_command(input: &std::path::Path, sector_size: u64, json: bool) -> 
     print_out(&text)?;
     // A manifest that references a missing image is not a usable firmware set.
     if !m.missing_images.is_empty() {
-        anyhow::bail!(
-            "{} manifest image(s) are missing from {}",
-            m.missing_images.len(),
-            input.display()
-        );
+        return Err(reporting::Gate {
+            code: 1,
+            message: format!(
+                "{} manifest image(s) are missing from {}",
+                m.missing_images.len(),
+                input.display()
+            ),
+        }
+        .into());
     }
     Ok(())
 }
@@ -818,10 +819,13 @@ fn vbmeta_command(
         t
     };
     print_out(&text)?;
-    anyhow::ensure!(
-        !meta.any_failure(&checks),
-        "the digest, signature, or a partition hash does not match"
-    );
+    if meta.any_failure(&checks) {
+        return Err(reporting::Gate {
+            code: 1,
+            message: "the digest, signature, or a partition hash does not match".into(),
+        }
+        .into());
+    }
     Ok(())
 }
 
@@ -907,19 +911,13 @@ fn audit_command(
             title: images.first().map(|p| display_name(p)).unwrap_or_default(),
             command,
             json,
-            fail_on_error: false,
+            fail_default: None,
             no_color,
         },
         report,
         all,
-        |shown, score| {
-            // The original object plus `findings` (the unified rows; only the new ones under
-            // --baseline) and `score`.
-            let mut v = audit::to_json(&audits);
-            v["findings"] = shown.iter().map(findings::Finding::to_json).collect();
-            v["score"] = score.to_json();
-            Ok(serde_json::to_string_pretty(&v)?)
-        },
+        // The per-image detail (adb summary, properties, services, APKs, ELF...) lives under `data`.
+        || audit::to_json(&audits),
         // Without a baseline the familiar per-image report; with one, only what is new.
         |shown| {
             if baselined {

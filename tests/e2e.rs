@@ -130,7 +130,7 @@ fn fix_print_renders_prompt_for_fixture() {
     assert!(last.starts_with("android-doctor doctor scan ") && last.ends_with(" --json"));
 }
 
-/// A path that is not a scannable directory fails with exit 1, not a panic or a launch.
+/// A path that is not a scannable directory fails with exit 2, not a panic or a launch.
 #[test]
 fn fix_on_missing_path_fails() {
     let exe = env!("CARGO_BIN_EXE_android-doctor");
@@ -138,7 +138,7 @@ fn fix_on_missing_path_fails() {
         .args(["fix", "--print", "/nonexistent/ad-fix"])
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(2));
 }
 
 fn ci_install(args: &[&str]) -> std::process::Output {
@@ -175,7 +175,7 @@ fn ci_install_writes_a_pinned_workflow_refuses_overwrite_and_honours_force() {
     // a second run refuses and leaves the file alone
     std::fs::write(&dest, "mine\n").unwrap();
     let out = ci_install(&["--dir", d]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(2));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
         err.contains("already exists") && err.contains("--force"),
@@ -191,7 +191,7 @@ fn ci_install_writes_a_pinned_workflow_refuses_overwrite_and_honours_force() {
         String::from_utf8_lossy(&out.stderr)
     );
     let text = std::fs::read_to_string(&dest).unwrap();
-    assert!(text.contains("path: 'firmware'\n") && text.contains("fail-on: error\n"));
+    assert!(text.contains("path: 'firmware'\n") && text.contains("fail-on: critical\n"));
 }
 
 /// `--print` shows the workflow and writes nothing; a bad level is a usage error.
@@ -203,6 +203,6 @@ fn ci_install_print_writes_nothing_and_bad_flags_fail() {
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).contains("name: android-doctor\n"));
     assert!(!dir.join(".github").exists());
-    let out = ci_install(&["--dir", d, "--fail-on", "critical"]);
+    let out = ci_install(&["--dir", d, "--fail-on", "bogus"]);
     assert_eq!(out.status.code(), Some(2));
 }

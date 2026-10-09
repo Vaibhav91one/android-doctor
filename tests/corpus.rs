@@ -243,7 +243,7 @@ fn bin_json(args: &[&str], dir: &Path) -> Value {
         .arg(dir)
         .output()
         .unwrap();
-    // `doctor scan` exits non-zero when a finding has severity error; stdout is still JSON.
+    // `doctor scan` exits non-zero when a finding is critical; stdout is still JSON.
     serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
         panic!(
             "{args:?} did not print JSON ({e}): {}{}",
@@ -263,7 +263,7 @@ fn observed(out: &Path, built: bool) -> (Vec<String>, Vec<String>) {
     let mut audit = Vec::new();
     if built {
         let v = bin_json(&["audit", "--json"], out);
-        for img in v["images"].as_array().unwrap() {
+        for img in v["data"]["images"].as_array().unwrap() {
             let name = Path::new(img["name"].as_str().unwrap())
                 .file_name()
                 .unwrap()
@@ -279,14 +279,20 @@ fn observed(out: &Path, built: bool) -> (Vec<String>, Vec<String>) {
         }
     }
     let v = bin_json(&["doctor", "scan", "--json"], out);
-    let doctor = v
+    // The snapshots keep the pre-0.4 severity words (`warn`, `error`) for both commands.
+    let old = |s: &str| match s {
+        "low" => "warn".to_string(),
+        "critical" => "error".to_string(),
+        s => s.to_string(),
+    };
+    let doctor = v["findings"]
         .as_array()
         .unwrap()
         .iter()
         .map(|f| {
             row(
                 f["id"].as_str().unwrap(),
-                f["severity"].as_str().unwrap(),
+                &old(f["severity"].as_str().unwrap()),
                 f["subject"].as_str().unwrap(),
             )
         })

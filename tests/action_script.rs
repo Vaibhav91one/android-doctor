@@ -129,14 +129,21 @@ fn run_action(tag: &str, json: &str, rc: i32, env: &[(&str, &str)]) -> Run {
     r
 }
 
-const ROWS: &str = r#"[{"id":"debuggable-build","severity":"high","subject":"system","message":"ro.debuggable=1"},{"id":"x","severity":"warn","subject":"boot","message":"m"},{"id":"y","severity":"info","subject":"vendor","message":"m"}]"#;
+const ROWS: &str = r#"{"schema":"doctor/1","findings":[{"id":"debuggable-build","severity":"high","location":{"kind":"image","ref":"system"},"message":"ro.debuggable=1"},{"id":"x","severity":"low","location":{"kind":"image","ref":"boot"},"message":"m"},{"id":"y","severity":"info","location":{"kind":"image","ref":"vendor"},"message":"m"}]}"#;
 
 #[test]
 fn fail_on_gates_on_the_reported_severities() {
     if !tools() {
         return;
     }
-    for (fail_on, want) in [("error", 0), ("high", 1), ("warn", 1), ("none", 0)] {
+    for (fail_on, want) in [
+        ("critical", 0),
+        ("error", 0),
+        ("high", 1),
+        ("low", 1),
+        ("warn", 1),
+        ("none", 0),
+    ] {
         let r = run_action("failon", ROWS, 0, &[("AD_FAIL_ON", fail_on)]);
         assert_eq!(r.status, want, "fail-on {fail_on}");
         assert!(r.outputs.contains(&format!("status={want}")));
@@ -151,7 +158,7 @@ fn outputs_and_summary_carry_the_score_counts_and_top_findings() {
     let r = run_action("summary", ROWS, 0, &[("AD_FAIL_ON", "high")]);
     assert!(r.outputs.contains("score=77\n") && r.outputs.contains("sarif="));
     assert!(r.summary.contains("**77/100 (needs work)**"));
-    assert!(r.summary.contains("| high | 1 |") && r.summary.contains("| warn | 1 |"));
+    assert!(r.summary.contains("| high | 1 |") && r.summary.contains("| low | 1 |"));
     assert!(
         r.summary
             .contains("- **high** `debuggable-build` system: ro.debuggable=1")
@@ -172,7 +179,12 @@ fn a_baseline_gates_with_exit_3_and_reports_the_split() {
     );
     assert_eq!(r.status, 3);
     assert!(r.summary.contains("2 suppressed as known, 1 new"));
-    let r = run_action("baseline-clean", "[]", 0, &[("AD_BASELINE", "b.json")]);
+    let r = run_action(
+        "baseline-clean",
+        r#"{"findings":[]}"#,
+        0,
+        &[("AD_BASELINE", "b.json")],
+    );
     assert_eq!(r.status, 0);
     assert!(r.summary.contains("- none"));
 }
@@ -195,7 +207,7 @@ fn bad_inputs_are_refused_before_anything_runs() {
         return;
     }
     for env in [
-        [("AD_FAIL_ON", "critical")],
+        [("AD_FAIL_ON", "bogus")],
         [("AD_COMMAND", "extract")],
         [("AD_BINARY", "/nonexistent/android-doctor")],
     ] {
