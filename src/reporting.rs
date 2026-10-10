@@ -136,6 +136,7 @@ pub fn emit(
             no_color: e.no_color,
         }),
         new_findings: Default::default(),
+        subject: None,
     };
     if e.json {
         env.data = data();

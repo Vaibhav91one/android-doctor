@@ -3,15 +3,21 @@
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [0.5.0]
+
+### Fixed (contract)
+
+- A command that cannot run now exits 2 with the one-line error (doctor/1). `unpack`, `amlogic` and `report` used to leave through the runtime with exit 1 and a different error layout.
+- The MCP server answers `ping`, and a request that has an `id` but no `method` (or a non-integer, non-string `id`, or is not an object) gets a -32600 invalid-request error instead of silence or a result.
 
 ### Changed
 
-- Point URLs at the doctor-labs org (the repository moved from Vaibhav91one).
-- Use the shared `doctor-core` crate for the doctor/1 severity, exit codes, envelope, score shape, sanitizer and fingerprint instead of local copies. Output is byte-identical. The one visible difference: the sanitizer now also blanks soft hyphens and a few other invisible code points.
+- Human output now uses doctor-kit faces; machine output is unchanged. `audit`, `doctor scan` and `diff` print the kit's `plain` face when piped and `rich` on a terminal; choose with the new `--face plain|rich|compact` and `--theme mono|clinical|contrast`. `audit` keeps its per-image report when piped without `--face`; `diff` keeps its file-change list ahead of the face; the baseline summary line stays. `--json`, `--sarif`, `--score`, fingerprints, exit codes (0/1/3), baseline parsing and its messages, `ci install` overwrite rules, the AGENTS.md block, MCP tools and their error text, install file bodies and `--help` command names are byte-identical to 0.4.0 (pinned by `tests/golden.rs`; the new goldens were also replayed against the 0.4.0 binary).
+- The baseline gate, report pipeline, MCP loop, agent launch for `fix` and symlink-safe writes now come from doctor-kit 0.2.1. Known edges: `--sarif` names the baseline file is refused (exit 2) instead of overwriting it, and a failed `--sarif` write still prints the report before exiting 2.
 
 ### Added
 
+- `shell <dir|image>` (interactive REPL, `-c "ls; scan"`, `--json` for agents) and `explore <dir|image>` (full-screen explorer) over the findings, from doctor-kit. Both are on by default; build with `--no-default-features` to leave them (and their dependencies) out. Besides the findings, `images` opens each image, its directories and files lazily (`ls`, `cd`, `cat`, `info`).
 - `diff <old> <new>`: file-level comparison of two firmware builds (images or directories of
   images; ext2/3/4, erofs, f2fs). Reports added, removed, modified (SHA-256) and metadata-only
   (mode, owner, SELinux label, capability) file changes, plus property and init-service changes,

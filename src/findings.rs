@@ -502,11 +502,29 @@ const GAP_WEIGHT: u32 = 3;
 /// many images it missed, so a scan whose rules could not run never reaches 100. Labels: 90+ `good`, 60+ `needs work`, else `critical`; a `good`
 /// score with gaps is `incomplete`.
 pub fn score(findings: &[Finding]) -> Score {
+    score_of(
+        findings
+            .iter()
+            .map(|f| (f.rule.as_str(), f.severity, f.gap)),
+    )
+}
+
+/// [`score`] over doctor/1 findings (`gap` says which could not evaluate).
+pub fn score_core(
+    findings: &[doctor_core::Finding],
+    gap: &dyn Fn(&doctor_core::Finding) -> bool,
+) -> Score {
+    score_of(findings.iter().map(|f| (f.id.as_str(), f.severity, gap(f))))
+}
+
+fn score_of<'a>(findings: impl Iterator<Item = (&'a str, Severity, bool)>) -> Score {
     let mut groups: BTreeMap<(&str, bool), (Severity, u32)> = BTreeMap::new();
-    for f in findings {
-        let g = groups.entry((&f.rule, f.gap)).or_insert((f.severity, 0));
-        g.0 = g.0.max(f.severity);
+    let mut gaps = 0;
+    for (rule, severity, gap) in findings {
+        let g = groups.entry((rule, gap)).or_insert((severity, 0));
+        g.0 = g.0.max(severity);
         g.1 += 1;
+        gaps += usize::from(gap);
     }
     let quarters: u32 = groups
         .iter()
@@ -519,7 +537,6 @@ pub fn score(findings: &[Finding]) -> Score {
         })
         .sum();
     let value = 100u32.saturating_sub(quarters.div_ceil(4));
-    let gaps = findings.iter().filter(|f| f.gap).count();
     Score::new(value as u8, "android/1", gaps)
 }
 

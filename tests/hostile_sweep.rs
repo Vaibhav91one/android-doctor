@@ -72,6 +72,20 @@ fn invocations(d: &Path) -> Vec<Vec<String>> {
         vec!["files".into(), img.display().to_string()],
         vec!["audit".into(), img.display().to_string()],
         vec!["doctor".into(), ota.display().to_string()],
+        // the interactive commands run the same scans (explore needs a terminal, so it is not here)
+        vec![
+            "shell".into(),
+            img.display().to_string(),
+            "-c".into(),
+            "ls; scan; why 1".into(),
+        ],
+        vec![
+            "shell".into(),
+            ota.display().to_string(),
+            "-c".into(),
+            "ls; scan".into(),
+            "--json".into(),
+        ],
         // the reporting flags must survive hostile input too
         vec!["audit".into(), img.display().to_string(), "--score".into()],
         vec![

@@ -1,6 +1,6 @@
 [package]
 name = "android-doctor"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 description = "Extract and audit Android OTA and firmware images (payload.bin, super.img, ext4, erofs) without running them"
 license = "MIT"
@@ -10,6 +10,12 @@ readme = "README.md"
 keywords = ["android", "firmware", "ota", "security", "forensics"]
 categories = ["command-line-utilities", "development-tools"]
 exclude = ["/docs/", "/npm/", "/.github/", "/AGENTS.md"]
+
+[features]
+default = ["shell", "explore"]
+# `shell` (REPL) and `explore` (TUI); builders who want a smaller binary can turn them off.
+shell = ["doctor-kit/repl"]
+explore = ["doctor-kit/tui"]
 
 [build-dependencies]
 cc = "1"
@@ -21,7 +27,7 @@ anyhow = "1.0.104"
 brotli = "9.0.0"
 bzip2 = "0.6.1"
 doctor-core = "0.1"
-doctor-kit = "0.2.1"
+doctor-kit = { version = "0.2.1", default-features = false, features = ["mcp", "signals"] }
 clap = { version = "4.6.7", features = ["derive"] }
 crc32fast = "1.5.2"
 flate2 = "1.1.10"

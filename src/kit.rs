@@ -2,12 +2,14 @@
 //! and the JSON/SARIF rendering the shared kit pipeline (`finish_with`) calls. The domain stays
 //! here: the rules and the findings are produced by `audit`, `doctor` and `fwdiff`.
 
-use crate::findings;
-use crate::term::{Renderer, Style};
+use crate::term::{Renderer, Style, sanitize};
+use crate::tree::{Entry, Kind, Tree};
+use crate::{audit, doctor, findings};
 use anyhow::Context;
 use doctor_kit::baseline::Saved;
+use doctor_kit::doctor_core::Score;
 use doctor_kit::doctor_core::{BaselineState, Envelope, Finding};
-use doctor_kit::{Check, Doctor, Face, ScanFailure, TargetKind, Theme};
+use doctor_kit::{Check, Collected, Ctx, Doctor, Face, Node, ScanFailure, TargetKind, Theme};
 use serde_json::Value;
 use std::cell::Cell;
 use std::collections::HashSet;
@@ -36,9 +38,76 @@ pub struct AndroidDoctor {
     pub report: Option<Report>,
     /// New (non-gap) findings under a baseline, for the gate message.
     pub new_findings: Cell<usize>,
+    /// What `shell` and `explore` look at: a firmware directory or one image.
+    pub subject: Option<PathBuf>,
+}
+
+/// Children listed per directory node; a hostile image can hold millions of entries.
+const MAX_CHILDREN: usize = 5000;
+/// Bytes of a file `cat`/`decode` shows.
+const MAX_FILE_BYTES: usize = 64 << 10;
+
+/// A writer that keeps the first `MAX_FILE_BYTES` and then stops the copy.
+struct Capped(Vec<u8>);
+impl std::io::Write for Capped {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        let room = MAX_FILE_BYTES - self.0.len();
+        self.0.extend_from_slice(&b[..b.len().min(room)]);
+        if b.len() > room {
+            return Err(std::io::Error::other("capped"));
+        }
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn entry_node(image: &Path, e: &Entry) -> Node {
+    let name = e.path.rsplit('/').next().unwrap_or(&e.path);
+    let kind = match e.kind {
+        Kind::File => "file",
+        Kind::Dir => "dir",
+        Kind::Symlink => "symlink",
+        _ => "special",
+    };
+    let link = e.link.as_deref().map(|l| format!(" -> {}", sanitize(l)));
+    let mut n = Node::new(
+        &sanitize(name),
+        kind,
+        format!(
+            "{:04o} {}:{} {} bytes{}",
+            e.mode,
+            e.uid,
+            e.gid,
+            e.size,
+            link.unwrap_or_default()
+        ),
+    )
+    .meta("image", image.display().to_string())
+    .meta("path", format!("/{}", e.path))
+    .meta("mode", format!("{:04o}", e.mode))
+    .meta("size", e.size);
+    if let Some((_, label)) = e.xattrs.iter().find(|(k, _)| k == "security.selinux") {
+        n = n.meta("selinux", sanitize(label));
+    }
+    n
 }
 
 impl AndroidDoctor {
+    /// The scan context of the interactive commands: nothing is walked, the root is the subject.
+    #[cfg(any(feature = "shell", feature = "explore"))]
+    pub fn ctx(&self) -> Ctx {
+        let mut ctx = Ctx::detached(
+            doctor_kit::Config::default(),
+            doctor_kit::doctor_core::Severity::Critical,
+        );
+        if let Some(s) = &self.subject {
+            ctx.root = s.clone();
+        }
+        ctx
+    }
+
     /// The findings a human sees: all of them, or only the new ones under a baseline.
     fn shown(env: &Envelope) -> Vec<Finding> {
         let baselined = env.baseline.is_some();
@@ -136,6 +205,110 @@ impl Doctor for AndroidDoctor {
             server_info: Some(("android-doctor".into(), env!("CARGO_PKG_VERSION").into())),
             ..Default::default()
         }
+    }
+    fn score(&self, findings: &[Finding], _: &Ctx) -> Option<Score> {
+        Some(findings::score_core(findings, &|f| self.is_gap(f)))
+    }
+    /// A directory gets the `doctor scan` health scan, an image gets the `audit` rules.
+    fn collect(&self, _: &Ctx) -> Result<Collected, ScanFailure> {
+        let subject = self
+            .subject
+            .as_deref()
+            .ok_or_else(|| ScanFailure::new("no firmware directory or image given"))?;
+        let found = if subject.is_dir() {
+            doctor::scan_scoped(subject).map(findings::from_doctor)
+        } else {
+            audit::audit_image(subject).map(|a| findings::from_audit(&[a]))
+        }
+        .map_err(|e| ScanFailure::new(format!("{e:#}")))?;
+        let gaps = found.iter().filter(|f| f.gap).count();
+        Ok(Collected {
+            findings: found.iter().map(findings::Finding::to_core).collect(),
+            data: serde_json::json!({}),
+            gaps,
+        })
+    }
+    /// The findings tree of the kit, plus the firmware itself under `images`: image, directory,
+    /// file, each level read when it is first opened (`expand`).
+    fn tree(&self, env: &Envelope, ctx: &Ctx) -> Node {
+        let mut root = doctor_kit::session::default_tree(env, ctx);
+        if self.subject.is_some() {
+            root = root.child(Node::new("images", "images", "the images and their files"));
+        }
+        root
+    }
+    fn expand(&self, _: &Envelope, _: &Ctx, _: &[String], node: &Node) -> Option<Vec<Node>> {
+        let meta = |k: &str| node.meta.get(k).and_then(Value::as_str).map(String::from);
+        let failed = |e: anyhow::Error| {
+            vec![Node::new(
+                "(unreadable)",
+                "error",
+                sanitize(&format!("{e:#}")),
+            )]
+        };
+        match node.kind.as_str() {
+            "images" => {
+                let subject = self.subject.clone()?;
+                Some(match audit::image_list(&[subject]) {
+                    Ok(images) => images
+                        .iter()
+                        .map(|p| {
+                            let name = p
+                                .file_stem()
+                                .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+                            Node::new(&sanitize(&name), "image", p.display().to_string())
+                                .meta("image", p.display().to_string())
+                                .meta("path", "/")
+                        })
+                        .collect(),
+                    Err(e) => failed(e),
+                })
+            }
+            "image" | "dir" => {
+                let image = PathBuf::from(meta("image")?);
+                let dir = meta("path")?;
+                Some(match Tree::open(&image).and_then(|t| t.list_dir(&dir)) {
+                    Ok(entries) => {
+                        let mut kids: Vec<Node> = entries
+                            .iter()
+                            .take(MAX_CHILDREN)
+                            .map(|e| entry_node(&image, e))
+                            .collect();
+                        if entries.len() > MAX_CHILDREN {
+                            kids.push(Node::new(
+                                "(more)",
+                                "note",
+                                format!("{} more entries not listed", entries.len() - MAX_CHILDREN),
+                            ));
+                        }
+                        kids
+                    }
+                    Err(e) => failed(e),
+                })
+            }
+            _ => None,
+        }
+    }
+    /// A file's first 64 KiB: text as it is (control characters blanked), anything else as a hex dump.
+    fn decode(&self, node: &Node) -> Option<String> {
+        if node.kind != "file" {
+            return None;
+        }
+        let image = node.meta.get("image")?.as_str()?;
+        let path = node.meta.get("path")?.as_str()?;
+        let mut buf = Capped(Vec::new());
+        let read = Tree::open(Path::new(image)).and_then(|t| t.cat_path(path, &mut buf));
+        let truncated = buf.0.len() >= MAX_FILE_BYTES;
+        let body = match std::str::from_utf8(&buf.0) {
+            Ok(t) => t.lines().map(sanitize).collect::<Vec<_>>().join("\n"),
+            Err(_) => doctor_kit::node::hexdump(&buf.0),
+        };
+        let tail = match (&read, truncated) {
+            (Err(e), false) => format!("\n(read failed: {})", sanitize(&format!("{e:#}"))),
+            (_, true) => format!("\n(first {} KiB)", MAX_FILE_BYTES >> 10),
+            _ => String::new(),
+        };
+        Some(body + &tail)
     }
     /// `ci install` refuses to touch any existing workflow unless `--force`.
     fn ci_overwrite(&self) -> doctor_kit::install::Overwrite {

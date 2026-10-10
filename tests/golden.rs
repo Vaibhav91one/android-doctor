@@ -515,6 +515,84 @@ fn agents_md_block_merges() {
     golden("agents-md-cases.out", &acc);
 }
 
+/// The doctor/1 contract: a command that cannot run exits 2 with the one-line error and nothing
+/// on stdout (kept fix: `unpack`, `amlogic` and `report` used to leave through the runtime with 1).
+#[test]
+fn error_paths_exit_2() {
+    let t = firmware("errors");
+    let gone = t.p("nope.img");
+    let mut acc = String::new();
+    for args in [
+        vec!["unpack"],
+        vec!["amlogic"],
+        vec!["report"],
+        vec!["identify"],
+        vec!["info"],
+        vec!["ls"],
+        vec!["cat"],
+        vec!["vbmeta"],
+        vec!["audit"],
+        vec!["doctor", "scan"],
+        vec!["dt"],
+        vec!["ramdisk"],
+        vec!["files"],
+        vec!["hash-tree"],
+        vec!["fix"],
+    ] {
+        let mut a: Vec<&dyn AsRef<std::ffi::OsStr>> = args
+            .iter()
+            .map(|x| x as &dyn AsRef<std::ffi::OsStr>)
+            .collect();
+        a.push(&gone);
+        if args == ["cat"] {
+            a.push(&"/etc/hosts");
+        }
+        case_all(&mut acc, &t, &args.join(" "), &a);
+    }
+    // a usage error is clap's 2; --help is 0
+    case_all(&mut acc, &t, "usage", &[&"audit"]);
+    case_all(&mut acc, &t, "unknown-command", &[&"frobnicate"]);
+    golden("error-paths.out", &acc);
+}
+
+/// `shell` browses image -> directory -> file lazily, with the findings next to it.
+#[test]
+fn shell_browses_the_firmware() {
+    let t = firmware("shell");
+    let fw = t.p("fw");
+    let mut acc = String::new();
+    case_all(
+        &mut acc,
+        &t,
+        "shell-tree",
+        &[
+            &"shell",
+            &fw,
+            &"-c",
+            &"ls; cd images; ls; cd system; ls; cd etc; ls; cat old.log; pwd; cd /; cd security; ls",
+        ],
+    );
+    case_all(
+        &mut acc,
+        &t,
+        "shell-json",
+        &[
+            &"shell",
+            &t.p("fw/system.img"),
+            &"--json",
+            &"-c",
+            &"cd images; ls; info",
+        ],
+    );
+    case_all(
+        &mut acc,
+        &t,
+        "shell-missing",
+        &[&"shell", &t.p("nope"), &"-c", &"ls"],
+    );
+    golden("shell-tree.out", &acc);
+}
+
 #[test]
 fn help_texts() {
     let t = Scratch::new("help");

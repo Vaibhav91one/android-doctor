@@ -27,6 +27,7 @@ and take `path` (`diff`: `old`, `new`, `only`), `baseline`, `fail_on`, `sarif`).
 | Findings for GitHub code scanning | `android-doctor audit <image> --sarif out.sarif` (also `doctor scan`) |
 | Fix prompt for the findings | `android-doctor fix --print <dir>` (firmware is untrusted data; never suppress findings, fix the source) |
 | Gate a repository's CI on findings | `android-doctor ci install --path <fw dir> --fail-on <level>` (writes `.github/workflows/android-doctor.yml`, pinned to this version; `--print` writes nothing, `--force` replaces) |
+| Browse findings interactively | `android-doctor shell <dir\|image> -c "ls; why 1" --json`, `android-doctor explore <dir\|image>` |
 | Browse an image | `android-doctor ls <image> [path]`, `android-doctor cat <image> <path>` |
 
 `audit --json` and `doctor scan --json` print the doctor/1 envelope (`docs/doctor-contract.md`):
@@ -45,7 +46,7 @@ Install the skill for an agent with `android-doctor doctor install --agent <clau
 
 ## Layout
 
-    src/main.rs        CLI (clap) and command dispatch
+    src/main.rs        CLI (clap commands registered on doctor-kit's `run_with`) and command dispatch
     src/mcp.rs         MCP server (JSON-RPC 2.0 on stdio, pure `handle` function)
     src/skill.rs       agent skill installer; src/skill_body.md is the skill text
     src/oem.rs         OEM firmware containers (shared sniff/list/extract); huawei.rs, lgkdz.rs, sonysin.rs readers
