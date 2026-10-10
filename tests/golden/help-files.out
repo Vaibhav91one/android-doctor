@@ -1,0 +1,12 @@
+List or extract the files of an ext2/3/4, erofs or f2fs image (with SELinux labels), no root needed
+
+Usage: android-doctor files [OPTIONS] <IMAGE>
+
+Arguments:
+  <IMAGE>  
+
+Options:
+      --no-color         Never emit colour, even on a terminal (also honours the NO_COLOR environment variable)
+  -o, --output <OUTPUT>  Extract into this new directory (files/ plus manifest.json); without it, list only
+      --json             Print JSON instead of text
+  -h, --help             Print help

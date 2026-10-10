@@ -1,0 +1,10 @@
+Describe an Amlogic image container (dt.img, dtbo.img, aml_upgrade_package.img)
+
+Usage: android-doctor amlogic [OPTIONS] <INPUT>
+
+Arguments:
+  <INPUT>  The Amlogic container to describe
+
+Options:
+      --no-color  Never emit colour, even on a terminal (also honours the NO_COLOR environment variable)
+  -h, --help      Print help

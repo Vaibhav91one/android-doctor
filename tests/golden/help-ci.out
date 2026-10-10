@@ -1,0 +1,11 @@
+CI integration: write a GitHub Actions workflow that runs the android-doctor action
+
+Usage: android-doctor ci [OPTIONS] <COMMAND>
+
+Commands:
+  install  Write .github/workflows/android-doctor.yml, pinned to this version, running on pull requests
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --no-color  Never emit colour, even on a terminal (also honours the NO_COLOR environment variable)
+  -h, --help      Print help

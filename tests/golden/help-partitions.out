@@ -1,0 +1,12 @@
+Show a flash manifest (Qualcomm rawprogram*.xml or MediaTek scatter.txt) and check it against the image files actually present
+
+Usage: android-doctor partitions [OPTIONS] <INPUT>
+
+Arguments:
+  <INPUT>  Directory holding rawprogram*.xml or scatter.txt, plus the images it references
+
+Options:
+      --no-color                   Never emit colour, even on a terminal (also honours the NO_COLOR environment variable)
+      --sector-size <SECTOR_SIZE>  Bytes per sector (Qualcomm uses 4096; MediaTek varies by device) [default: 4096]
+      --json                       Print JSON instead of text
+  -h, --help                       Print help

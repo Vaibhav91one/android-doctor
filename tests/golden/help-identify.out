@@ -1,0 +1,11 @@
+Say what each file is, by its magic bytes (never by name)
+
+Usage: android-doctor identify [OPTIONS] <PATHS>...
+
+Arguments:
+  <PATHS>...  
+
+Options:
+      --json      Print the result as JSON
+      --no-color  Never emit colour, even on a terminal (also honours the NO_COLOR environment variable)
+  -h, --help      Print help

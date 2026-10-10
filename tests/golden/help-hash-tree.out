@@ -1,0 +1,11 @@
+Regenerate the dm-verity hash tree for a partition image rebuilt from a payload
+
+Usage: android-doctor hash-tree [OPTIONS] <INPUT>
+
+Arguments:
+  <INPUT>  The partition image
+
+Options:
+      --no-color      Never emit colour, even on a terminal (also honours the NO_COLOR environment variable)
+      --output <OUT>  Write the tree here instead of only verifying it
+  -h, --help          Print help

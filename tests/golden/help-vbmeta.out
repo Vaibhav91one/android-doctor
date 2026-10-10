@@ -1,0 +1,14 @@
+Show an AVB vbmeta image (or a partition with an AVB footer): header, key, signature, descriptors, hashes
+
+Usage: android-doctor vbmeta [OPTIONS] <IMAGE>
+
+Arguments:
+  <IMAGE>  
+
+Options:
+      --images <IMAGES>     Also hash each hashed partition found as <DIR>/<partition>.img and compare
+      --no-color            Never emit colour, even on a terminal (also honours the NO_COLOR environment variable)
+      --json                Print JSON instead of text
+  -k, --key <KEY>           Verify the RSA signature against this PEM-encoded public key (overrides the key embedded in the image)
+      --vbmeta <TOP_LEVEL>  Check this partition against the signed top-level vbmeta that should cover it
+  -h, --help                Print help

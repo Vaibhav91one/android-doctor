@@ -1,0 +1,48 @@
+{
+  "baseline": {
+    "fixed": 0,
+    "new": 2,
+    "unchanged": 0
+  },
+  "data": {},
+  "exit_code": 3,
+  "findings": [
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "c2ec9589b428c23a",
+      "id": "partition_coverage",
+      "location": {
+        "kind": "image",
+        "ref": "images"
+      },
+      "message": "this does not look like an unpacked firmware: no .img files found",
+      "remedy": "extract or point doctor at the OTA directory",
+      "severity": "critical",
+      "subject": "images"
+    },
+    {
+      "baseline_state": "new",
+      "category": "security",
+      "fingerprint": "61f101bfe94929a8",
+      "id": "avb_signature",
+      "location": {
+        "kind": "file",
+        "ref": "vbmeta.img"
+      },
+      "message": "no vbmeta.img found; AVB signature not checked",
+      "remedy": "point doctor at a directory containing vbmeta.img",
+      "severity": "info",
+      "subject": "vbmeta.img"
+    }
+  ],
+  "schema": "doctor/1",
+  "score": {
+    "coverage_gaps": 1,
+    "label": "needs work",
+    "model": "android/1",
+    "value": 77
+  },
+  "tool": "android-doctor",
+  "version": "<VERSION>"
+}

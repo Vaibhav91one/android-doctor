@@ -1,0 +1,12 @@
+Run a deterministic health scan on an unpacked firmware directory
+
+Usage: android-doctor doctor [OPTIONS] <COMMAND>
+
+Commands:
+  scan     Scan a directory and report findings
+  install  Write the agent skill into an agent config dir so a coding agent can use this tool
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --no-color  Never emit colour, even on a terminal (also honours the NO_COLOR environment variable)
+  -h, --help      Print help

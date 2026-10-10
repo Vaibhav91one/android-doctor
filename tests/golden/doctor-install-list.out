@@ -1,0 +1,6 @@
+claude-code: <TMP>/home/.claude/skills
+cursor: <TMP>/home/.cursor/skills
+codex: <TMP>/home/.codex/skills
+opencode: <TMP>/home/.config/opencode/skills
+
+pass --agent <name> to write, or --print to see the skill

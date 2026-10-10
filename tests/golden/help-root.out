@@ -1,0 +1,32 @@
+Extract and audit Android OTA/ROM images
+
+Usage: android-doctor [OPTIONS] <COMMAND>
+
+Commands:
+  extract     Extract partition images from an OTA zip or directory
+  info        Print build info from an OTA without extracting
+  amlogic     Describe an Amlogic image container (dt.img, dtbo.img, aml_upgrade_package.img)
+  dt          Show a device tree, dtbo table, or an opaque container header
+  partitions  Show a flash manifest (Qualcomm rawprogram*.xml or MediaTek scatter.txt) and check it against the image files actually present
+  unpack      Show a boot or vendor_boot image's header, and with -o write its kernel, ramdisk, dtb, ...
+  ls          List a directory (or show one file) inside an ext2/3/4, erofs or f2fs image, without extracting it
+  cat         Print one regular file from an ext2/3/4, erofs or f2fs image to standard output
+  audit       Security posture of firmware images: ADB properties, setuid files, su binaries, init services
+  diff        Compare two firmware builds file by file: added, removed and modified files (by SHA-256), mode, owner, capability and SELinux-label changes, property and init-service changes; what got worse becomes findings
+  vbmeta      Show an AVB vbmeta image (or a partition with an AVB footer): header, key, signature, descriptors, hashes
+  ramdisk     List a boot image's ramdisk (or a ramdisk file), report its ADB properties, and with -o extract it
+  files       List or extract the files of an ext2/3/4, erofs or f2fs image (with SELinux labels), no root needed
+  unsparse    Turn Android sparse image(s) into a raw image
+  identify    Say what each file is, by its magic bytes (never by name)
+  report      Staleness verdict from the OTA's build metadata
+  hash-tree   Regenerate the dm-verity hash tree for a partition image rebuilt from a payload
+  doctor      Run a deterministic health scan on an unpacked firmware directory
+  fix         Scan, then hand the findings to a coding agent as one fix prompt
+  ci          CI integration: write a GitHub Actions workflow that runs the android-doctor action
+  mcp         Expose android-doctor over the Model Context Protocol (JSON-RPC on stdio)
+  help        Print this message or the help of the given subcommand(s)
+
+Options:
+      --no-color  Never emit colour, even on a terminal (also honours the NO_COLOR environment variable)
+  -h, --help      Print help
+  -V, --version   Print version

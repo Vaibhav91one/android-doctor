@@ -1,0 +1,13 @@
+Show a boot or vendor_boot image's header, and with -o write its kernel, ramdisk, dtb, ...
+
+Usage: android-doctor unpack [OPTIONS] <INPUT>
+
+Arguments:
+  <INPUT>  
+
+Options:
+      --no-color         Never emit colour, even on a terminal (also honours the NO_COLOR environment variable)
+  -o, --output <OUTPUT>  Write the sections (kernel, ramdisk, second, dtb, ...) into this directory
+      --json             Print the header as JSON
+      --force            Replace existing files instead of refusing
+  -h, --help             Print help

@@ -1,0 +1,12 @@
+List a directory (or show one file) inside an ext2/3/4, erofs or f2fs image, without extracting it
+
+Usage: android-doctor ls [OPTIONS] <IMAGE> [PATH]
+
+Arguments:
+  <IMAGE>  
+  [PATH]   Path inside the image (default: the root) [default: /]
+
+Options:
+      --json      Print JSON instead of text
+      --no-color  Never emit colour, even on a terminal (also honours the NO_COLOR environment variable)
+  -h, --help      Print help

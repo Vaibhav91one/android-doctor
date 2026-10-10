@@ -1,0 +1,14 @@
+Scan, then hand the findings to a coding agent as one fix prompt
+
+Usage: android-doctor fix [OPTIONS] <INPUT>
+
+Arguments:
+  <INPUT>  Directory to scan (same input as `doctor scan`)
+
+Options:
+      --agent <AGENT>  Agent to launch if its binary is on PATH [default: claude] [possible values: claude, codex, cursor]
+      --no-color       Never emit colour, even on a terminal (also honours the NO_COLOR environment variable)
+      --print          Only print the prompt; launch nothing
+      --safe           Keep the agent's approval prompts (already the default)
+      --yolo           Launch the agent with its approval prompts skipped (unsafe: the firmware is untrusted)
+  -h, --help           Print help

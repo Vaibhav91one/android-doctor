@@ -1,0 +1,15 @@
+Security posture of firmware images: ADB properties, setuid files, su binaries, init services
+
+Usage: android-doctor audit [OPTIONS] <IMAGES>...
+
+Arguments:
+  <IMAGES>...  Image files (ext2/3/4, erofs or f2fs), or a directory of them (such as an `extract` output)
+
+Options:
+      --json                Print JSON instead of text
+      --no-color            Never emit colour, even on a terminal (also honours the NO_COLOR environment variable)
+      --score               Print only the 0-100 health score
+      --sarif <FILE>        Also write the findings as SARIF 2.1.0 to FILE
+      --baseline <FILE>     Report only findings that are not in FILE, a previous `--json` report; exit 3 if there are new ones
+      --fail-on <SEVERITY>  Exit 1 when a finding is at or above this severity (critical, high, medium, low, info); with --baseline, exit 3 when a new one is. Default: critical for `doctor scan`, never for `audit`; with --baseline, low for both
+  -h, --help                Print help
