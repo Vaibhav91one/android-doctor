@@ -1,0 +1,14 @@
+{"id":1,"jsonrpc":"2.0","result":{}}
+{"error":{"code":-32600,"message":"invalid request: no method"},"id":2,"jsonrpc":"2.0"}
+{"error":{"code":-32600,"message":"invalid request: bad id"},"id":null,"jsonrpc":"2.0"}
+{"error":{"code":-32600,"message":"invalid request"},"id":null,"jsonrpc":"2.0"}
+{"error":{"code":-32700,"message":"parse error: expected ident at line 1 column 2"},"id":null,"jsonrpc":"2.0"}
+{"error":{"code":-32601,"message":"unknown method nope/method"},"id":3,"jsonrpc":"2.0"}
+{"id":4,"jsonrpc":"2.0","result":{"capabilities":{"tools":{}},"protocolVersion":"2024-11-05","serverInfo":{"name":"android-doctor","version":"<VERSION>"}}}
+{"id":5,"jsonrpc":"2.0","result":{"content":[{"text":"unknown tool nope","type":"text"}],"isError":true}}
+{"id":6,"jsonrpc":"2.0","result":{"content":[{"text":"missing required argument \"path\"","type":"text"}],"isError":true}}
+{"id":7,"jsonrpc":"2.0","result":{"content":[{"text":"identify takes only \"path\"","type":"text"}],"isError":true}}
+{"id":8,"jsonrpc":"2.0","result":{"content":[{"text":"missing required arguments \"old\" and \"new\"","type":"text"}],"isError":true}}
+{"id":9,"jsonrpc":"2.0","result":{"content":[{"text":"opening <TMP>/nope.img\n  caused by: No such file or directory (os error 2) (exit 2)","type":"text"}],"isError":true}}
+{"id":10,"jsonrpc":"2.0","result":{"content":[{"text":"No such file or directory (os error 2) (exit 2)","type":"text"}],"isError":true}}
+{"id":11,"jsonrpc":"2.0","result":{"content":[{"text":"cannot read baseline <TMP>/nobase.json\n  caused by: No such file or directory (os error 2) (exit 2)","type":"text"}],"isError":true}}

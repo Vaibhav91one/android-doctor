@@ -122,11 +122,20 @@ impl Doctor for AndroidDoctor {
     fn target(&self) -> TargetKind {
         TargetKind::Detached
     }
+    fn is_gap(&self, f: &Finding) -> bool {
+        self.gaps.contains(&f.fingerprint)
+    }
     fn mcp_tools(&self) -> Option<Vec<doctor_kit::McpTool>> {
         Some(crate::mcp::tools())
     }
-    fn is_gap(&self, f: &Finding) -> bool {
-        self.gaps.contains(&f.fingerprint)
+    /// The texts of the first MCP server: the answers to a bad call stay what they were.
+    fn mcp_texts(&self) -> doctor_kit::mcp::McpTexts {
+        doctor_kit::mcp::McpTexts {
+            unknown_tool: "unknown tool {t}".into(),
+            tool_error: "{e}".into(),
+            server_info: Some(("android-doctor".into(), env!("CARGO_PKG_VERSION").into())),
+            ..Default::default()
+        }
     }
     /// `ci install` refuses to touch any existing workflow unless `--force`.
     fn ci_overwrite(&self) -> doctor_kit::install::Overwrite {
