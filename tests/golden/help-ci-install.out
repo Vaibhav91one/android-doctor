@@ -1,0 +1,12 @@
+Write .github/workflows/android-doctor.yml, pinned to this version, running on pull requests
+
+Usage: android-doctor ci install [OPTIONS]
+
+Options:
+      --dir <DIR>            Project root to write into [default: .]
+      --no-color             Never emit colour, even on a terminal (also honours the NO_COLOR environment variable)
+      --print                Print the workflow and write nothing
+      --force                Replace an existing workflow file instead of refusing
+      --path <FIRMWARE_DIR>  Firmware directory to scan, relative to the repository root [default: firmware]
+      --fail-on <LEVEL>      Minimum severity that fails the job [default: critical] [possible values: critical, high, medium, low, none, error, warn]
+  -h, --help                 Print help

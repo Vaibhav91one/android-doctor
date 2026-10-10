@@ -1,0 +1,11 @@
+Staleness verdict from the OTA's build metadata
+
+Usage: android-doctor report [OPTIONS] <INPUT>
+
+Arguments:
+  <INPUT>  
+
+Options:
+      --json      Print the report as JSON
+      --no-color  Never emit colour, even on a terminal (also honours the NO_COLOR environment variable)
+  -h, --help      Print help

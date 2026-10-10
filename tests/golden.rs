@@ -1,0 +1,486 @@
+//! Golden snapshots of the machine-readable surface (decision 1 of the doctor-kit migration:
+//! machine output stays byte-identical). Covered: `--json` envelopes and SARIF of every findings
+//! command, `--help` texts, the MCP stdio transcript, install file bodies (skill, `.mdc`,
+//! AGENTS.md block markers, CI workflow), `fix --print`, and exit codes (incl. 3 for baseline).
+//! Human terminal text (digest, flat list) is NOT snapshotted: it is allowed to change.
+//!
+//! Goldens live in tests/golden/ and are compared byte for byte. `UPDATE_GOLDENS=1 cargo test
+//! --test golden` rewrites them; review the diff before committing.
+//!
+//! Normalisation (the only one): the per-run scratch directory (also its canonical form) becomes
+//! `<TMP>` and the crate version becomes `<VERSION>`, so goldens survive temp names and releases.
+//! Fixtures are generated in-process (erofs builder, no mke2fs) plus the plain `ota-blocks`
+//! corpus case, so nothing depends on the host's tools or clock.
+
+use fs_erofs::mkfs::{Node, NodeMeta, build_image};
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+const BIN: &str = env!("CARGO_BIN_EXE_android-doctor");
+
+struct Scratch(PathBuf);
+impl Scratch {
+    fn new(tag: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("ad-golden-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(std::fs::canonicalize(dir).unwrap())
+    }
+    /// A path under the scratch root, parent directories created.
+    fn p(&self, rel: &str) -> PathBuf {
+        let p = self.0.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        p
+    }
+}
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Replace the scratch root and the version; see the module doc. Scanned fixtures live in
+/// `<TMP>/fw`, `<TMP>/diff`, `<TMP>/ota-blocks`; baselines and SARIF go to `<TMP>/meta`, so
+/// they are never scanned themselves.
+fn norm(s: &str, tmp: &Path) -> String {
+    s.replace(tmp.to_str().unwrap(), "<TMP>")
+        .replace(env!("CARGO_PKG_VERSION"), "<VERSION>")
+}
+
+/// Compare `actual` with tests/golden/`name` byte for byte (or rewrite it under UPDATE_GOLDENS).
+fn golden(name: &str, actual: &str) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden")
+        .join(name);
+    if std::env::var_os("UPDATE_GOLDENS").is_some() {
+        std::fs::write(&path, actual).unwrap();
+        return;
+    }
+    let want = std::fs::read(&path)
+        .unwrap_or_else(|_| panic!("missing golden {name}; run with UPDATE_GOLDENS=1"));
+    assert!(
+        want == actual.as_bytes(),
+        "golden {name} differs; if intended, run UPDATE_GOLDENS=1 cargo test --test golden\n--- want\n{}\n--- got\n{actual}",
+        String::from_utf8_lossy(&want)
+    );
+}
+
+/// Run the binary; snapshot stdout as `<name>.out`, record the exit code in `codes`.
+fn case(
+    codes: &mut String,
+    tmp: &Scratch,
+    name: &str,
+    args: &[&dyn AsRef<std::ffi::OsStr>],
+) -> String {
+    let out = Command::new(BIN)
+        .args(args.iter().map(|a| a.as_ref()))
+        .env("NO_COLOR", "1")
+        .env("COLUMNS", "100")
+        .output()
+        .unwrap();
+    let stdout = norm(&String::from_utf8_lossy(&out.stdout), &tmp.0);
+    golden(&format!("{name}.out"), &stdout);
+    writeln!(codes, "{name}\t{}", out.status.code().unwrap()).unwrap();
+    stdout
+}
+
+fn file(mode: u16, data: &[u8]) -> Node {
+    Node::File {
+        mode: 0o100000 | mode,
+        data: data.to_vec(),
+        meta: NodeMeta::default(),
+        xattrs: vec![],
+    }
+}
+fn dir(entries: Vec<(&str, Node)>) -> Node {
+    Node::Dir {
+        mode: 0o040755,
+        entries: entries
+            .into_iter()
+            .map(|(n, v)| (n.to_string(), v))
+            .collect::<BTreeMap<_, _>>(),
+        meta: NodeMeta::default(),
+        xattrs: vec![],
+    }
+}
+fn img(n: Node) -> Vec<u8> {
+    build_image(n, 12).unwrap()
+}
+
+/// system.img (debuggable, su, leftover log), vendor.img, boot.img, an unhandled file; no vbmeta,
+/// so the AVB rule cannot evaluate (a coverage gap).
+fn firmware(tag: &str) -> Scratch {
+    let d = Scratch::new(tag);
+    let system = dir(vec![
+        (
+            "build.prop",
+            file(
+                0o644,
+                b"ro.debuggable=1\nro.secure=0\nro.build.tags=release-keys\n",
+            ),
+        ),
+        ("etc", dir(vec![("old.log", file(0o644, b"log"))])),
+        ("xbin", dir(vec![("su", file(0o755, b"#!/bin/sh\n"))])),
+    ]);
+    std::fs::write(d.p("fw/system.img"), img(system)).unwrap();
+    std::fs::write(
+        d.p("fw/vendor.img"),
+        img(dir(vec![("build.prop", file(0o644, b"ro.secure=1\n"))])),
+    )
+    .unwrap();
+    let mut boot = vec![0u8; 1680];
+    boot[..8].copy_from_slice(b"ANDROID!");
+    std::fs::write(d.p("fw/boot.img"), boot).unwrap();
+    std::fs::write(d.p("fw/mystery.bin"), b"??").unwrap();
+    d
+}
+
+fn old_new(d: &Scratch) {
+    let old = dir(vec![
+        ("build.prop", file(0o644, b"ro.secure=1\nro.debuggable=0\n")),
+        ("gone.txt", file(0o644, b"bye")),
+        (
+            "bin",
+            dir(vec![
+                ("tool", file(0o755, b"version one")),
+                ("same", file(0o755, b"same")),
+                ("perm", file(0o644, b"perm")),
+            ]),
+        ),
+    ]);
+    let new = dir(vec![
+        ("build.prop", file(0o644, b"ro.secure=0\nro.debuggable=1\n")),
+        ("added.txt", file(0o644, b"new")),
+        (
+            "bin",
+            dir(vec![
+                ("tool", file(0o755, b"version two")),
+                ("same", file(0o755, b"same")),
+                ("perm", file(0o755, b"perm")),
+                ("helper", file(0o4755, b"suid")),
+            ]),
+        ),
+        ("xbin", dir(vec![("su", file(0o755, b"#!/bin/sh\n"))])),
+    ]);
+    std::fs::write(d.p("diff/old.img"), img(old)).unwrap();
+    std::fs::write(d.p("diff/new.img"), img(new)).unwrap();
+}
+
+fn corpus_ota(d: &Scratch) -> PathBuf {
+    let dst = d.p("ota-blocks");
+    std::fs::create_dir_all(&dst).unwrap();
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/trees/ota-blocks");
+    for e in std::fs::read_dir(src).unwrap() {
+        let e = e.unwrap();
+        std::fs::copy(e.path(), dst.join(e.file_name())).unwrap();
+    }
+    dst
+}
+
+/// The matrix for one findings command: json, sarif, score, fail-on, and every baseline outcome.
+/// `base` is the command prefix (`audit X` / `doctor scan D` / `diff A B`).
+fn findings_matrix(
+    codes: &mut String,
+    t: &Scratch,
+    tag: &str,
+    base: &[&dyn AsRef<std::ffi::OsStr>],
+    score: bool,
+) {
+    let sarif = t.p(&format!("meta/{tag}.sarif"));
+    let run = |codes: &mut String, name: &str, extra: &[&dyn AsRef<std::ffi::OsStr>]| {
+        let mut a: Vec<&dyn AsRef<std::ffi::OsStr>> = base.to_vec();
+        a.extend_from_slice(extra);
+        case(codes, t, &format!("{tag}-{name}"), &a)
+    };
+    let json = run(codes, "json", &[&"--json"]);
+    run(
+        codes,
+        "json-fail-on-low",
+        &[&"--json", &"--fail-on", &"low"],
+    );
+    run(
+        codes,
+        "json-fail-on-info",
+        &[&"--json", &"--fail-on", &"info"],
+    );
+    run(
+        codes,
+        "json-fail-on-critical",
+        &[&"--json", &"--fail-on", &"critical"],
+    );
+    run(codes, "json-sarif", &[&"--json", &"--sarif", &sarif]);
+    golden(
+        &format!("{tag}.sarif"),
+        &norm(&std::fs::read_to_string(&sarif).unwrap(), &t.0),
+    );
+    if score {
+        run(codes, "score", &[&"--score"]);
+    }
+    // baseline: empty (everything new, exit 3), itself (nothing new, exit 0)
+    let empty = t.p(&format!("meta/{tag}-empty-baseline.json"));
+    std::fs::write(&empty, "[]").unwrap();
+    run(
+        codes,
+        "baseline-empty-json",
+        &[&"--json", &"--baseline", &empty],
+    );
+    let sarif2 = t.p(&format!("meta/{tag}-b.sarif"));
+    run(
+        codes,
+        "baseline-empty-sarif",
+        &[&"--json", &"--baseline", &empty, &"--sarif", &sarif2],
+    );
+    golden(
+        &format!("{tag}-baseline.sarif"),
+        &norm(&std::fs::read_to_string(&sarif2).unwrap(), &t.0),
+    );
+    let own = t.p(&format!("meta/{tag}-own-baseline.json"));
+    std::fs::write(
+        &own,
+        json.replace("<TMP>", t.0.to_str().unwrap())
+            .replace("<VERSION>", env!("CARGO_PKG_VERSION")),
+    )
+    .unwrap();
+    run(
+        codes,
+        "baseline-own-json",
+        &[&"--json", &"--baseline", &own],
+    );
+    let bad = t.p(&format!("meta/{tag}-bad-baseline.json"));
+    std::fs::write(&bad, "not json").unwrap();
+    run(codes, "baseline-bad", &[&"--json", &"--baseline", &bad]);
+}
+
+#[test]
+fn findings_commands() {
+    let t = firmware("find");
+    old_new(&t);
+    let ota = corpus_ota(&t);
+    let mut codes = String::new();
+    let (sys, fw, old, new) = (
+        t.p("fw/system.img"),
+        t.0.clone(),
+        t.p("diff/old.img"),
+        t.p("diff/new.img"),
+    );
+    findings_matrix(&mut codes, &t, "audit", &[&"audit", &sys], true);
+    findings_matrix(
+        &mut codes,
+        &t,
+        "doctor-scan",
+        &[&"doctor", &"scan", &fw],
+        true,
+    );
+    findings_matrix(&mut codes, &t, "diff", &[&"diff", &old, &new], false);
+    findings_matrix(
+        &mut codes,
+        &t,
+        "doctor-scan-ota",
+        &[&"doctor", &"scan", &ota],
+        true,
+    );
+    // usage and input errors: exit 2, nothing on stdout worth pinning beyond that
+    case(
+        &mut codes,
+        &t,
+        "error-missing-path",
+        &[&"doctor", &"scan", &t.p("nope")],
+    );
+    case(
+        &mut codes,
+        &t,
+        "error-score-and-json",
+        &[&"audit", &sys, &"--score", &"--json"],
+    );
+    case(&mut codes, &t, "fix-print", &[&"fix", &"--print", &ota]);
+    golden("findings.exit", &codes);
+}
+
+#[test]
+fn help_texts() {
+    let t = Scratch::new("help");
+    let mut codes = String::new();
+    let subs = [
+        "extract",
+        "info",
+        "amlogic",
+        "dt",
+        "partitions",
+        "unpack",
+        "ls",
+        "cat",
+        "audit",
+        "diff",
+        "vbmeta",
+        "ramdisk",
+        "files",
+        "unsparse",
+        "identify",
+        "report",
+        "hash-tree",
+        "doctor",
+        "fix",
+        "ci",
+        "mcp",
+    ];
+    case(&mut codes, &t, "help-root", &[&"--help"]);
+    for s in subs {
+        case(&mut codes, &t, &format!("help-{s}"), &[&s, &"--help"]);
+    }
+    for (a, b) in [("doctor", "scan"), ("doctor", "install"), ("ci", "install")] {
+        case(
+            &mut codes,
+            &t,
+            &format!("help-{a}-{b}"),
+            &[&a, &b, &"--help"],
+        );
+    }
+    golden("help.exit", &codes);
+}
+
+#[test]
+fn mcp_transcript() {
+    let t = firmware("mcp");
+    old_new(&t);
+    let (fw, old, new) = (
+        t.0.to_str().unwrap().to_string(),
+        t.p("diff/old.img"),
+        t.p("diff/new.img"),
+    );
+    let reqs = [
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"golden","version":"1"}}}),
+        serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"doctor","arguments":{"path":fw,"fail_on":"low"}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"audit","arguments":{"paths":[t.p("fw/system.img")]}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"diff","arguments":{"old":old,"new":new}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"nope","arguments":{}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":7,"method":"nope/method"}),
+    ];
+    let mut child = Command::new(BIN)
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    for r in &reqs {
+        writeln!(stdin, "{r}").unwrap();
+    }
+    drop(stdin);
+    let mut out = String::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut out)
+        .unwrap();
+    child.wait().unwrap();
+    golden("mcp-transcript.out", &norm(&out, &t.0));
+}
+
+#[test]
+fn install_bodies() {
+    let t = Scratch::new("install");
+    let mut codes = String::new();
+    let mut files = String::new();
+    case(
+        &mut codes,
+        &t,
+        "doctor-install-print-only",
+        &[&"doctor", &"install", &"--print-only"],
+    );
+    case(
+        &mut codes,
+        &t,
+        "ci-install-print",
+        &[&"ci", &"install", &"--print"],
+    );
+    case(
+        &mut codes,
+        &t,
+        "ci-install-print-opts",
+        &[
+            &"ci",
+            &"install",
+            &"--print",
+            &"--path",
+            &"out/fw",
+            &"--fail-on",
+            &"high",
+        ],
+    );
+    // run installs with HOME and cwd inside the scratch dir; AGENTS.md pre-exists to pin the markers
+    let home = t.p("home");
+    let proj = t.p("proj");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(proj.join("AGENTS.md"), "# mine\n").unwrap();
+    let o = Command::new(BIN)
+        .args(["doctor", "install"])
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    writeln!(codes, "doctor-install-list\t{}", o.status.code().unwrap()).unwrap();
+    golden(
+        "doctor-install-list.out",
+        &norm(&String::from_utf8_lossy(&o.stdout), &t.0),
+    );
+    for agent in ["claude-code", "cursor", "codex", "opencode"] {
+        let o = Command::new(BIN)
+            .args(["doctor", "install", "--agent", agent])
+            .env("HOME", &home)
+            .current_dir(&proj)
+            .output()
+            .unwrap();
+        writeln!(codes, "install-{agent}\t{}", o.status.code().unwrap()).unwrap();
+        golden(
+            &format!("install-{agent}.out"),
+            &norm(&String::from_utf8_lossy(&o.stdout), &t.0),
+        );
+    }
+    // run twice: idempotent block upsert
+    Command::new(BIN)
+        .args(["doctor", "install", "--agent", "codex"])
+        .env("HOME", &home)
+        .current_dir(&proj)
+        .output()
+        .unwrap();
+    let o = Command::new(BIN)
+        .args(["ci", "install", "--dir"])
+        .arg(&proj)
+        .output()
+        .unwrap();
+    writeln!(codes, "ci-install\t{}", o.status.code().unwrap()).unwrap();
+    // every file written, path relative to the scratch dir, in sorted order
+    fn walk(d: &Path, out: &mut Vec<PathBuf>) {
+        let mut es: Vec<_> = std::fs::read_dir(d)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        es.sort();
+        for p in es {
+            if p.is_dir() {
+                walk(&p, out)
+            } else {
+                out.push(p)
+            }
+        }
+    }
+    let mut all = vec![];
+    walk(&t.0, &mut all);
+    for p in all {
+        let rel = p.strip_prefix(&t.0).unwrap().display().to_string();
+        writeln!(
+            files,
+            "=== {rel}\n{}",
+            norm(&String::from_utf8_lossy(&std::fs::read(&p).unwrap()), &t.0)
+        )
+        .unwrap();
+    }
+    golden("install-files.out", &files);
+    golden("install.exit", &codes);
+}

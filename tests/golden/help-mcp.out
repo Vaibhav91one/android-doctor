@@ -1,0 +1,8 @@
+Expose android-doctor over the Model Context Protocol (JSON-RPC on stdio)
+
+Usage: android-doctor mcp [OPTIONS]
+
+Options:
+      --no-color  Never emit colour, even on a terminal (also honours the NO_COLOR environment variable)
+      --verbose   Log each request to stderr; stdout stays pure JSON-RPC
+  -h, --help      Print help

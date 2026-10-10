@@ -1,0 +1,11 @@
+Show a device tree, dtbo table, or an opaque container header
+
+Usage: android-doctor dt [OPTIONS] <INPUT>
+
+Arguments:
+  <INPUT>  dt.img, dtbo.img, logo.img, bootloader.img or a boot image
+
+Options:
+      --json      Print JSON instead of text
+      --no-color  Never emit colour, even on a terminal (also honours the NO_COLOR environment variable)
+  -h, --help      Print help

@@ -1,0 +1,17 @@
+Compare two firmware builds file by file: added, removed and modified files (by SHA-256), mode, owner, capability and SELinux-label changes, property and init-service changes; what got worse becomes findings
+
+Usage: android-doctor diff [OPTIONS] <OLD> <NEW>
+
+Arguments:
+  <OLD>  The old image, or a directory of images (such as an `extract` output)
+  <NEW>  The new image, or a directory of images
+
+Options:
+      --json                Print JSON instead of text
+      --no-color            Never emit colour, even on a terminal (also honours the NO_COLOR environment variable)
+      --only <STATUS>       List only these file changes (comma-separated: added, removed, modified, metadata); findings are unaffected
+      --score               Print only the 0-100 health score
+      --sarif <FILE>        Also write the findings as SARIF 2.1.0 to FILE
+      --baseline <FILE>     Report only findings that are not in FILE, a previous `--json` report; exit 3 if there are new ones
+      --fail-on <SEVERITY>  Exit 1 when a finding is at or above this severity (critical, high, medium, low, info); with --baseline, exit 3 when a new one is. Default: critical for `doctor scan`, never for `audit`; with --baseline, low for both
+  -h, --help                Print help

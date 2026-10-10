@@ -1,0 +1,20 @@
+Extract partition images from an OTA zip or directory
+
+Usage: android-doctor extract [OPTIONS] <INPUT>
+
+Arguments:
+  <INPUT>  
+
+Options:
+  -o, --output <OUTPUT>  [default: out]
+      --force            Replace existing output files instead of refusing
+      --only <ONLY>      Extract only these partitions or images, comma-separated (e.g. system,boot)
+      --list             List what would be extracted, with sizes, and write nothing
+      --files            Also extract the files of every ext2/3/4, erofs or f2fs image into <out>/files/<image>/ (with manifests)
+      --base <DIR>       Base partition images for an incremental OTA, applied over these to rebuild partitions. Required for SOURCE_COPY and SOURCE_BSDIFF operations
+      --allow-partial    Do not fail when some inputs are skipped; report and exit 0
+      --strict           Fail on any file that cannot be classified at all
+  -q, --quiet            Suppress progress bars and summary output
+  -v, --verbose          Print debug traces to stderr
+      --no-color         Never emit colour
+  -h, --help             Print help

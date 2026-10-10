@@ -1,0 +1,24 @@
+# Written by `android-doctor ci install`. Pinned to android-doctor <VERSION>; re-run with --force to repin.
+name: android-doctor
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Uploads the SARIF report to code scanning; fork pull requests cannot, and the action skips the upload there.
+  security-events: write
+
+jobs:
+  android-doctor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: doctor-labs/android-doctor@v<VERSION>
+        with:
+          version: <VERSION>
+          # The firmware directory to scan, relative to the repository root. Edit it to match your layout.
+          path: 'out/fw'
+          command: doctor scan
+          fail-on: high

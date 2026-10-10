@@ -1,0 +1,106 @@
+{
+  "data": {},
+  "exit_code": 1,
+  "findings": [
+    {
+      "category": "quality",
+      "fingerprint": "bea7479b0cd08613",
+      "id": "partition_coverage",
+      "location": {
+        "kind": "image",
+        "ref": "boot.img"
+      },
+      "message": "expected partition image boot is missing",
+      "remedy": "ensure boot.img is present; the device may not boot without it",
+      "severity": "low",
+      "subject": "boot.img"
+    },
+    {
+      "category": "security",
+      "fingerprint": "61f101bfe94929a8",
+      "id": "avb_signature",
+      "location": {
+        "kind": "file",
+        "ref": "vbmeta.img"
+      },
+      "message": "no vbmeta.img found; AVB signature not checked",
+      "remedy": "point doctor at a directory containing vbmeta.img",
+      "severity": "info",
+      "subject": "vbmeta.img"
+    },
+    {
+      "category": "quality",
+      "fingerprint": "72e8ed7b7ae8e0d1",
+      "id": "debug_leftovers",
+      "location": {
+        "kind": "file",
+        "ref": "images"
+      },
+      "message": "cannot evaluate debug_leftovers: partition images are not present",
+      "remedy": "run `android-doctor extract <ota> <dir>` first",
+      "severity": "info",
+      "subject": "images"
+    },
+    {
+      "category": "quality",
+      "fingerprint": "12546cfd33525ed6",
+      "id": "duplicate_properties",
+      "location": {
+        "kind": "image",
+        "ref": "images"
+      },
+      "message": "cannot evaluate duplicate_properties: partition images are not present",
+      "remedy": "run `android-doctor extract <ota> <dir>` first",
+      "severity": "info",
+      "subject": "images"
+    },
+    {
+      "category": "quality",
+      "fingerprint": "d29302e0a63892ce",
+      "id": "init_service_hygiene",
+      "location": {
+        "kind": "image",
+        "ref": "images"
+      },
+      "message": "cannot evaluate init_service_hygiene: partition images are not present",
+      "remedy": "run `android-doctor extract <ota> <dir>` first",
+      "severity": "info",
+      "subject": "images"
+    },
+    {
+      "category": "quality",
+      "fingerprint": "6d562060fa10397d",
+      "id": "mode_anomalies",
+      "location": {
+        "kind": "file",
+        "ref": "images"
+      },
+      "message": "cannot evaluate mode_anomalies: partition images are not present",
+      "remedy": "run `android-doctor extract <ota> <dir>` first",
+      "severity": "info",
+      "subject": "images"
+    },
+    {
+      "category": "quality",
+      "fingerprint": "e65d2baa5fa234bd",
+      "id": "selinux_label_gaps",
+      "location": {
+        "kind": "image",
+        "ref": "images"
+      },
+      "message": "cannot evaluate selinux_label_gaps: partition images are not present",
+      "remedy": "run `android-doctor extract <ota> <dir>` first",
+      "severity": "info",
+      "subject": "images"
+    }
+  ],
+  "schema": "doctor/1",
+  "score": {
+    "coverage_gaps": 6,
+    "label": "needs work",
+    "model": "android/1",
+    "value": 80
+  },
+  "tool": "android-doctor",
+  "version": "<VERSION>"
+}

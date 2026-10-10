@@ -1,0 +1,926 @@
+{
+  "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+  "runs": [
+    {
+      "properties": {
+        "score": {
+          "coverage_gaps": 6,
+          "label": "needs work",
+          "model": "android/1",
+          "value": 80
+        }
+      },
+      "results": [
+        {
+          "baselineState": "new",
+          "level": "note",
+          "message": {
+            "text": "expected partition image boot is missing"
+          },
+          "partialFingerprints": {
+            "doctorFinding/v1": "bea7479b0cd08613"
+          },
+          "properties": {
+            "category": "quality",
+            "coverageGap": false,
+            "severity": "low"
+          },
+          "ruleId": "partition_coverage",
+          "ruleIndex": 38
+        },
+        {
+          "baselineState": "new",
+          "level": "note",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "vbmeta.img"
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "no vbmeta.img found; AVB signature not checked"
+          },
+          "partialFingerprints": {
+            "doctorFinding/v1": "61f101bfe94929a8"
+          },
+          "properties": {
+            "category": "security",
+            "coverageGap": true,
+            "severity": "info"
+          },
+          "ruleId": "avb_signature",
+          "ruleIndex": 15
+        },
+        {
+          "baselineState": "new",
+          "level": "note",
+          "message": {
+            "text": "cannot evaluate duplicate_properties: partition images are not present"
+          },
+          "partialFingerprints": {
+            "doctorFinding/v1": "12546cfd33525ed6"
+          },
+          "properties": {
+            "category": "quality",
+            "coverageGap": true,
+            "severity": "info"
+          },
+          "ruleId": "duplicate_properties",
+          "ruleIndex": 26
+        },
+        {
+          "baselineState": "new",
+          "level": "note",
+          "message": {
+            "text": "cannot evaluate selinux_label_gaps: partition images are not present"
+          },
+          "partialFingerprints": {
+            "doctorFinding/v1": "e65d2baa5fa234bd"
+          },
+          "properties": {
+            "category": "quality",
+            "coverageGap": true,
+            "severity": "info"
+          },
+          "ruleId": "selinux_label_gaps",
+          "ruleIndex": 39
+        },
+        {
+          "baselineState": "new",
+          "level": "note",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "images"
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "cannot evaluate mode_anomalies: partition images are not present"
+          },
+          "partialFingerprints": {
+            "doctorFinding/v1": "6d562060fa10397d"
+          },
+          "properties": {
+            "category": "quality",
+            "coverageGap": true,
+            "severity": "info"
+          },
+          "ruleId": "mode_anomalies",
+          "ruleIndex": 37
+        },
+        {
+          "baselineState": "new",
+          "level": "note",
+          "message": {
+            "text": "cannot evaluate init_service_hygiene: partition images are not present"
+          },
+          "partialFingerprints": {
+            "doctorFinding/v1": "d29302e0a63892ce"
+          },
+          "properties": {
+            "category": "quality",
+            "coverageGap": true,
+            "severity": "info"
+          },
+          "ruleId": "init_service_hygiene",
+          "ruleIndex": 35
+        },
+        {
+          "baselineState": "new",
+          "level": "note",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "images"
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "cannot evaluate debug_leftovers: partition images are not present"
+          },
+          "partialFingerprints": {
+            "doctorFinding/v1": "72e8ed7b7ae8e0d1"
+          },
+          "properties": {
+            "category": "quality",
+            "coverageGap": true,
+            "severity": "info"
+          },
+          "ruleId": "debug_leftovers",
+          "ruleIndex": 19
+        }
+      ],
+      "tool": {
+        "driver": {
+          "informationUri": "https://github.com/doctor-labs/android-doctor",
+          "name": "android-doctor",
+          "rules": [
+            {
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "fullDescription": {
+                "text": "ADB is enabled by default"
+              },
+              "help": {
+                "text": "Drop adb from persist.sys.usb.config and persist.service.adb.enable"
+              },
+              "id": "adb-by-default",
+              "name": "adb-by-default",
+              "shortDescription": {
+                "text": "ADB is enabled by default"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "fullDescription": {
+                "text": "service.adb.root=1 starts adbd as root"
+              },
+              "help": {
+                "text": "Remove service.adb.root from the build properties"
+              },
+              "id": "adb-root",
+              "name": "adb-root",
+              "shortDescription": {
+                "text": "service.adb.root=1 starts adbd as root"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "fullDescription": {
+                "text": "ro.adb.secure=0: ADB connections need no authorization"
+              },
+              "help": {
+                "text": "Set ro.adb.secure=1"
+              },
+              "id": "adb-unauthenticated",
+              "name": "adb-unauthenticated",
+              "shortDescription": {
+                "text": "ro.adb.secure=0: ADB connections need no authorization"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "fullDescription": {
+                "text": "adbd is declared as an init service"
+              },
+              "help": {
+                "text": "Confirm adbd is only started by an authorised trigger"
+              },
+              "id": "adbd-service",
+              "name": "adbd-service",
+              "shortDescription": {
+                "text": "adbd is declared as an init service"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "fullDescription": {
+                "text": "An APK sets android:allowBackup=true"
+              },
+              "help": {
+                "text": "Set android:allowBackup=\"false\" or restrict it with backup rules"
+              },
+              "id": "apk-allow-backup",
+              "name": "apk-allow-backup",
+              "shortDescription": {
+                "text": "An APK sets android:allowBackup=true"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "fullDescription": {
+                "text": "An APK signing certificate has expired (host clock)"
+              },
+              "help": {
+                "text": "Re-sign with a certificate that is valid, or confirm the platform ignores expiry"
+              },
+              "id": "apk-cert-expired",
+              "name": "apk-cert-expired",
+              "shortDescription": {
+                "text": "An APK signing certificate has expired (host clock)"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "fullDescription": {
+                "text": "An APK signing certificate is not yet valid (host clock)"
+              },
+              "help": {
+                "text": "Check the certificate dates and the host clock"
+              },
+              "id": "apk-cert-not-yet-valid",
+              "name": "apk-cert-not-yet-valid",
+              "shortDescription": {
+                "text": "An APK signing certificate is not yet valid (host clock)"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "fullDescription": {
+                "text": "An APK sets android:usesCleartextTraffic=true"
+              },
+              "help": {
+                "text": "Remove the attribute and use HTTPS, or scope cleartext to specific domains in a network security config"
+              },
+              "id": "apk-cleartext-traffic",
+              "name": "apk-cleartext-traffic",
+              "shortDescription": {
+                "text": "An APK sets android:usesCleartextTraffic=true"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "fullDescription": {
+                "text": "An APK is signed with a debug or AOSP test key"
+              },
+              "help": {
+                "text": "Re-sign with a private release key"
+              },
+              "id": "apk-debug-signing-cert",
+              "name": "apk-debug-signing-cert",
+              "shortDescription": {
+                "text": "An APK is signed with a debug or AOSP test key"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "fullDescription": {
+                "text": "An APK is marked android:debuggable"
+              },
+              "help": {
+                "text": "Remove android:debuggable from the release manifest"
+              },
+              "id": "apk-debuggable",
+              "name": "apk-debuggable",
+              "shortDescription": {
+                "text": "An APK is marked android:debuggable"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "fullDescription": {
+                "text": "An APK exports an activity, service or receiver with no permission"
+              },
+              "help": {
+                "text": "Set android:exported=\"false\", or guard it with a signature-level android:permission"
+              },
+              "id": "apk-exported-component",
+              "name": "apk-exported-component",
+              "shortDescription": {
+                "text": "An APK exports an activity, service or receiver with no permission"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "fullDescription": {
+                "text": "An APK exports a content provider with no permission"
+              },
+              "help": {
+                "text": "Set android:exported=\"false\", or require a signature-level permission (or separate read and write permissions)"
+              },
+              "id": "apk-exported-provider",
+              "name": "apk-exported-provider",
+              "shortDescription": {
+                "text": "An APK exports a content provider with no permission"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "fullDescription": {
+                "text": "An APK uses android:sharedUserId"
+              },
+              "help": {
+                "text": "Drop sharedUserId (deprecated since API 29) unless the apps are meant to share a uid"
+              },
+              "id": "apk-shared-user-id",
+              "name": "apk-shared-user-id",
+              "shortDescription": {
+                "text": "An APK uses android:sharedUserId"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "fullDescription": {
+                "text": "An APK is marked android:testOnly"
+              },
+              "help": {
+                "text": "Build the shipped APK without android:testOnly"
+              },
+              "id": "apk-test-only",
+              "name": "apk-test-only",
+              "shortDescription": {
+                "text": "An APK is marked android:testOnly"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "fullDescription": {
+                "text": "An APK is signed with signature scheme v1 only"
+              },
+              "help": {
+                "text": "Re-sign with APK Signature Scheme v2 or v3"
+              },
+              "id": "apk-v1-only-signing",
+              "name": "apk-v1-only-signing",
+              "shortDescription": {
+                "text": "An APK is signed with signature scheme v1 only"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "fullDescription": {
+                "text": "Android Verified Boot signature status"
+              },
+              "help": {
+                "text": "Sign the vbmeta image with a trusted key, or point doctor at a directory holding vbmeta.img"
+              },
+              "id": "avb_signature",
+              "name": "avb_signature",
+              "shortDescription": {
+                "text": "Android Verified Boot signature status"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "fullDescription": {
+                "text": "A cloud access key is embedded in the image"
+              },
+              "help": {
+                "text": "Remove the credential from the image and revoke it"
+              },
+              "id": "cloud_credentials",
+              "name": "cloud_credentials",
+              "shortDescription": {
+                "text": "A cloud access key is embedded in the image"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "fullDescription": {
+                "text": "Build type is userdebug or eng"
+              },
+              "help": {
+                "text": "Ship a build with ro.build.type=user"
+              },
+              "id": "debug-build-type",
+              "name": "debug-build-type",
+              "shortDescription": {
+                "text": "Build type is userdebug or eng"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "fullDescription": {
+                "text": "A debug endpoint is referenced in the image"
+              },
+              "help": {
+                "text": "Remove the debug hook from production firmware"
+              },
+              "id": "debug_endpoints",
+              "name": "debug_endpoints",
+              "shortDescription": {
+                "text": "A debug endpoint is referenced in the image"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "fullDescription": {
+                "text": "A test or leftover artefact ships in the image"
+              },
+              "help": {
+                "text": "Remove the file from the production image"
+              },
+              "id": "debug_leftovers",
+              "name": "debug_leftovers",
+              "shortDescription": {
+                "text": "A test or leftover artefact ships in the image"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "fullDescription": {
+                "text": "Build is debuggable: adbd runs as root"
+              },
+              "help": {
+                "text": "Ship a user build with ro.debuggable=0"
+              },
+              "id": "debuggable-build",
+              "name": "debuggable-build",
+              "shortDescription": {
+                "text": "Build is debuggable: adbd runs as root"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "fullDescription": {
+                "text": "diff-new-capability"
+              },
+              "id": "diff-new-capability",
+              "name": "diff-new-capability",
+              "shortDescription": {
+                "text": "diff-new-capability"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "fullDescription": {
+                "text": "diff-new-setuid"
+              },
+              "id": "diff-new-setuid",
+              "name": "diff-new-setuid",
+              "shortDescription": {
+                "text": "diff-new-setuid"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "fullDescription": {
+                "text": "diff-prop-changed"
+              },
+              "id": "diff-prop-changed",
+              "name": "diff-prop-changed",
+              "shortDescription": {
+                "text": "diff-prop-changed"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "fullDescription": {
+                "text": "diff-root-service"
+              },
+              "id": "diff-root-service",
+              "name": "diff-root-service",
+              "shortDescription": {
+                "text": "diff-root-service"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "fullDescription": {
+                "text": "diff-sepolicy-changed"
+              },
+              "id": "diff-sepolicy-changed",
+              "name": "diff-sepolicy-changed",
+              "shortDescription": {
+                "text": "diff-sepolicy-changed"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "fullDescription": {
+                "text": "A property is defined in more than one file"
+              },
+              "help": {
+                "text": "Remove the duplicate so the effective value is unambiguous"
+              },
+              "id": "duplicate_properties",
+              "name": "duplicate_properties",
+              "shortDescription": {
+                "text": "A property is defined in more than one file"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "fullDescription": {
+                "text": "The stack is executable (PT_GNU_STACK has X, or is missing)"
+              },
+              "help": {
+                "text": "Link with -z noexecstack and mark assembly with .note.GNU-stack"
+              },
+              "id": "elf-exec-stack",
+              "name": "elf-exec-stack",
+              "shortDescription": {
+                "text": "The stack is executable (PT_GNU_STACK has X, or is missing)"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "fullDescription": {
+                "text": "No stack canary (__stack_chk_fail not imported; heuristic)"
+              },
+              "help": {
+                "text": "Build with -fstack-protector-strong"
+              },
+              "id": "elf-no-canary",
+              "name": "elf-no-canary",
+              "shortDescription": {
+                "text": "No stack canary (__stack_chk_fail not imported; heuristic)"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "fullDescription": {
+                "text": "No FORTIFY_SOURCE _chk wrappers (heuristic)"
+              },
+              "help": {
+                "text": "Build with -D_FORTIFY_SOURCE=2 at -O1 or higher"
+              },
+              "id": "elf-no-fortify",
+              "name": "elf-no-fortify",
+              "shortDescription": {
+                "text": "No FORTIFY_SOURCE _chk wrappers (heuristic)"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "fullDescription": {
+                "text": "A native executable is not position-independent (ET_EXEC): no ASLR"
+              },
+              "help": {
+                "text": "Build with -fPIE -pie so the loader can randomise its base"
+              },
+              "id": "elf-no-pie",
+              "name": "elf-no-pie",
+              "shortDescription": {
+                "text": "A native executable is not position-independent (ET_EXEC): no ASLR"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "fullDescription": {
+                "text": "No RELRO: the GOT stays writable after relocation"
+              },
+              "help": {
+                "text": "Link with -Wl,-z,relro"
+              },
+              "id": "elf-no-relro",
+              "name": "elf-no-relro",
+              "shortDescription": {
+                "text": "No RELRO: the GOT stays writable after relocation"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "fullDescription": {
+                "text": "Partial RELRO: RELRO is set but relocations are lazy"
+              },
+              "help": {
+                "text": "Link with -Wl,-z,relro,-z,now for full RELRO"
+              },
+              "id": "elf-partial-relro",
+              "name": "elf-partial-relro",
+              "shortDescription": {
+                "text": "Partial RELRO: RELRO is set but relocations are lazy"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "fullDescription": {
+                "text": "Files carry file capabilities"
+              },
+              "help": {
+                "text": "Review each capability grant"
+              },
+              "id": "file-capabilities",
+              "name": "file-capabilities",
+              "shortDescription": {
+                "text": "Files carry file capabilities"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "fullDescription": {
+                "text": "A private key is embedded in the image"
+              },
+              "help": {
+                "text": "Remove the key from the image and rotate it"
+              },
+              "id": "hardcoded_credentials",
+              "name": "hardcoded_credentials",
+              "shortDescription": {
+                "text": "A private key is embedded in the image"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "fullDescription": {
+                "text": "An init service is declared more than once"
+              },
+              "help": {
+                "text": "Keep one definition"
+              },
+              "id": "init_service_hygiene",
+              "name": "init_service_hygiene",
+              "shortDescription": {
+                "text": "An init service is declared more than once"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "fullDescription": {
+                "text": "ro.secure=0: adbd keeps root"
+              },
+              "help": {
+                "text": "Set ro.secure=1 in the shipped build"
+              },
+              "id": "insecure-adb",
+              "name": "insecure-adb",
+              "shortDescription": {
+                "text": "ro.secure=0: adbd keeps root"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "fullDescription": {
+                "text": "A file has an unexpected mode"
+              },
+              "help": {
+                "text": "chmod it to remove the write bit for others"
+              },
+              "id": "mode_anomalies",
+              "name": "mode_anomalies",
+              "shortDescription": {
+                "text": "A file has an unexpected mode"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "fullDescription": {
+                "text": "An expected partition image is missing"
+              },
+              "help": {
+                "text": "Make sure system, vendor and boot images are all present"
+              },
+              "id": "partition_coverage",
+              "name": "partition_coverage",
+              "shortDescription": {
+                "text": "An expected partition image is missing"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "fullDescription": {
+                "text": "Files have no SELinux label"
+              },
+              "help": {
+                "text": "Relabel the image, or confirm it is not SELinux-enforcing"
+              },
+              "id": "selinux_label_gaps",
+              "name": "selinux_label_gaps",
+              "shortDescription": {
+                "text": "Files have no SELinux label"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "fullDescription": {
+                "text": "The image contains setuid/setgid files"
+              },
+              "help": {
+                "text": "Review each setuid file and drop the bit where it is not needed"
+              },
+              "id": "setuid-files",
+              "name": "setuid-files",
+              "shortDescription": {
+                "text": "The image contains setuid/setgid files"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "fullDescription": {
+                "text": "An init service runs a shell or in the shell domain"
+              },
+              "help": {
+                "text": "Remove the service or confine it to a dedicated domain"
+              },
+              "id": "shell-service",
+              "name": "shell-service",
+              "shortDescription": {
+                "text": "An init service runs a shell or in the shell domain"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "fullDescription": {
+                "text": "A su binary ships in the image"
+              },
+              "help": {
+                "text": "Remove the su binary and its SELinux domain"
+              },
+              "id": "su-binary",
+              "name": "su-binary",
+              "shortDescription": {
+                "text": "A su binary ships in the image"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "fullDescription": {
+                "text": "An init service runs in the su SELinux domain"
+              },
+              "help": {
+                "text": "Remove the service or move it out of the su domain"
+              },
+              "id": "su-service",
+              "name": "su-service",
+              "shortDescription": {
+                "text": "An init service runs in the su SELinux domain"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "fullDescription": {
+                "text": "Image is signed with the public AOSP test keys"
+              },
+              "help": {
+                "text": "Re-sign the release with a private release key"
+              },
+              "id": "test-keys",
+              "name": "test-keys",
+              "shortDescription": {
+                "text": "Image is signed with the public AOSP test keys"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "fullDescription": {
+                "text": "A file has no handler and will not be extracted"
+              },
+              "help": {
+                "text": "Inspect it manually"
+              },
+              "id": "unhandled_input",
+              "name": "unhandled_input",
+              "shortDescription": {
+                "text": "A file has no handler and will not be extracted"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "fullDescription": {
+                "text": "Regular files are world-writable"
+              },
+              "help": {
+                "text": "chmod the files to remove the write bit for others"
+              },
+              "id": "world-writable",
+              "name": "world-writable",
+              "shortDescription": {
+                "text": "Regular files are world-writable"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "fullDescription": {
+                "text": "A setuid/setgid file is writable by group or others"
+              },
+              "help": {
+                "text": "chmod the file to remove group and other write bits"
+              },
+              "id": "writable-setuid",
+              "name": "writable-setuid",
+              "shortDescription": {
+                "text": "A setuid/setgid file is writable by group or others"
+              }
+            }
+          ],
+          "version": "<VERSION>"
+        }
+      }
+    }
+  ],
+  "version": "2.1.0"
+}

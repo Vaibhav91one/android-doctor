@@ -1,0 +1,13 @@
+List a boot image's ramdisk (or a ramdisk file), report its ADB properties, and with -o extract it
+
+Usage: android-doctor ramdisk [OPTIONS] <INPUT>
+
+Arguments:
+  <INPUT>  
+
+Options:
+      --no-color         Never emit colour, even on a terminal (also honours the NO_COLOR environment variable)
+  -o, --output <OUTPUT>  Extract the files into this new directory (symlinks and devices are recorded, not created)
+      --json             Print the result as JSON
+      --list             Also list every entry
+  -h, --help             Print help

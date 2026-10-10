@@ -1,0 +1,12 @@
+Print build info from an OTA without extracting
+
+Usage: android-doctor info [OPTIONS] <INPUT>
+
+Arguments:
+  <INPUT>  
+
+Options:
+      --json      Print all metadata as JSON
+      --no-color  Never emit colour, even on a terminal (also honours the NO_COLOR environment variable)
+      --details   Also summarise the updater-script and read the signing certificate
+  -h, --help      Print help

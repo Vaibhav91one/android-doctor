@@ -1,0 +1,11 @@
+Print one regular file from an ext2/3/4, erofs or f2fs image to standard output
+
+Usage: android-doctor cat [OPTIONS] <IMAGE> <PATH>
+
+Arguments:
+  <IMAGE>  
+  <PATH>   
+
+Options:
+      --no-color  Never emit colour, even on a terminal (also honours the NO_COLOR environment variable)
+  -h, --help      Print help

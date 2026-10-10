@@ -1,0 +1,12 @@
+Turn Android sparse image(s) into a raw image
+
+Usage: android-doctor unsparse [OPTIONS] --output <OUTPUT> <INPUTS>...
+
+Arguments:
+  <INPUTS>...  Sparse file(s); several files that describe the same image are applied in the order given
+
+Options:
+      --no-color         Never emit colour, even on a terminal (also honours the NO_COLOR environment variable)
+  -o, --output <OUTPUT>  
+      --force            Replace an existing output file instead of refusing
+  -h, --help             Print help

@@ -1,0 +1,272 @@
+{
+  "data": {
+    "images": [
+      {
+        "counts": {
+          "added": 3,
+          "metadata": 1,
+          "modified": 2,
+          "removed": 1,
+          "unchanged": 1
+        },
+        "files": [
+          {
+            "new": {
+              "capability": null,
+              "gid": 0,
+              "kind": "file",
+              "label": "",
+              "link": null,
+              "mode": "0644",
+              "sha256": "11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437",
+              "size": 3,
+              "uid": 0
+            },
+            "old": null,
+            "path": "added.txt",
+            "status": "added"
+          },
+          {
+            "new": {
+              "capability": null,
+              "gid": 0,
+              "kind": "file",
+              "label": "",
+              "link": null,
+              "mode": "4755",
+              "sha256": "15460c0b5edfae7f2ffbe4b0374123ca87016732fcaae48d6e0850f7cabe7943",
+              "size": 4,
+              "uid": 0
+            },
+            "old": null,
+            "path": "bin/helper",
+            "status": "added"
+          },
+          {
+            "new": {
+              "capability": null,
+              "gid": 0,
+              "kind": "file",
+              "label": "",
+              "link": null,
+              "mode": "0755",
+              "sha256": "017a80b680ac2531b4caa82c4659f007fcfbac1195d57c9ebbbf0e5eb8766eb5",
+              "size": 4,
+              "uid": 0
+            },
+            "old": {
+              "capability": null,
+              "gid": 0,
+              "kind": "file",
+              "label": "",
+              "link": null,
+              "mode": "0644",
+              "sha256": "017a80b680ac2531b4caa82c4659f007fcfbac1195d57c9ebbbf0e5eb8766eb5",
+              "size": 4,
+              "uid": 0
+            },
+            "path": "bin/perm",
+            "status": "metadata"
+          },
+          {
+            "new": {
+              "capability": null,
+              "gid": 0,
+              "kind": "file",
+              "label": "",
+              "link": null,
+              "mode": "0755",
+              "sha256": "a67d5f46542514f52d658493fc9405829d2922cf1647574c838b6b86f125477a",
+              "size": 11,
+              "uid": 0
+            },
+            "old": {
+              "capability": null,
+              "gid": 0,
+              "kind": "file",
+              "label": "",
+              "link": null,
+              "mode": "0755",
+              "sha256": "197c7c60ef8a8470a38d1a9212bdfde9cfe6fd4be910825fe6ac7880ac765d16",
+              "size": 11,
+              "uid": 0
+            },
+            "path": "bin/tool",
+            "status": "modified"
+          },
+          {
+            "new": {
+              "capability": null,
+              "gid": 0,
+              "kind": "file",
+              "label": "",
+              "link": null,
+              "mode": "0644",
+              "sha256": "6913324900098ec14d0048b5e98490553376699f08f6b0fe38a3a3a8ddce07c6",
+              "size": 28,
+              "uid": 0
+            },
+            "old": {
+              "capability": null,
+              "gid": 0,
+              "kind": "file",
+              "label": "",
+              "link": null,
+              "mode": "0644",
+              "sha256": "cc0c7d566e27fd0d4d44bfaef006134b32e64a75c1399a8f1bbf9a28eef2f9dd",
+              "size": 28,
+              "uid": 0
+            },
+            "path": "build.prop",
+            "status": "modified"
+          },
+          {
+            "new": null,
+            "old": {
+              "capability": null,
+              "gid": 0,
+              "kind": "file",
+              "label": "",
+              "link": null,
+              "mode": "0644",
+              "sha256": "b49f425a7e1f9cff3856329ada223f2f9d368f15a00cf48df16ca95986137fe8",
+              "size": 3,
+              "uid": 0
+            },
+            "path": "gone.txt",
+            "status": "removed"
+          },
+          {
+            "new": {
+              "capability": null,
+              "gid": 0,
+              "kind": "file",
+              "label": "",
+              "link": null,
+              "mode": "0755",
+              "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+              "size": 10,
+              "uid": 0
+            },
+            "old": null,
+            "path": "xbin/su",
+            "status": "added"
+          }
+        ],
+        "name": "new",
+        "presence": "both",
+        "properties": [
+          {
+            "file": "build.prop",
+            "key": "ro.debuggable",
+            "new": "1",
+            "old": "0"
+          },
+          {
+            "file": "build.prop",
+            "key": "ro.secure",
+            "new": "0",
+            "old": "1"
+          }
+        ],
+        "services": []
+      }
+    ]
+  },
+  "exit_code": 0,
+  "findings": [
+    {
+      "category": "security",
+      "fingerprint": "599221c573c8bd2e",
+      "id": "diff-debuggable-build",
+      "image": "new",
+      "location": {
+        "kind": "file",
+        "ref": "new/build.prop"
+      },
+      "message": "new in this build: ro.debuggable=1 in build.prop: adbd runs as root",
+      "remedy": "Ship a user build with ro.debuggable=0",
+      "severity": "high",
+      "subject": "build.prop"
+    },
+    {
+      "category": "security",
+      "fingerprint": "4bfdc03899ad3b04",
+      "id": "diff-insecure-adb",
+      "image": "new",
+      "location": {
+        "kind": "file",
+        "ref": "new/build.prop"
+      },
+      "message": "new in this build: ro.secure=0 in build.prop: adbd keeps root",
+      "remedy": "Set ro.secure=1 in the shipped build",
+      "severity": "high",
+      "subject": "build.prop"
+    },
+    {
+      "category": "security",
+      "fingerprint": "2b9e2c1a314f0f92",
+      "id": "diff-new-setuid",
+      "image": "new",
+      "location": {
+        "kind": "file",
+        "ref": "new/bin/helper"
+      },
+      "message": "/bin/helper is newly setuid/setgid (4755, uid 0)",
+      "remedy": "Drop the setuid bit, or confirm the file needs it",
+      "severity": "high",
+      "subject": "bin/helper"
+    },
+    {
+      "category": "security",
+      "fingerprint": "0a8cf68aa247b57e",
+      "id": "diff-su-binary",
+      "image": "new",
+      "location": {
+        "kind": "file",
+        "ref": "new/xbin/su"
+      },
+      "message": "new in this build: /xbin/su looks like a su binary",
+      "remedy": "Remove the su binary and its SELinux domain",
+      "severity": "high",
+      "subject": "xbin/su"
+    },
+    {
+      "category": "security",
+      "fingerprint": "24bb3f2136a7a3b3",
+      "id": "diff-prop-changed",
+      "image": "new",
+      "location": {
+        "kind": "file",
+        "ref": "new/build.prop"
+      },
+      "message": "ro.secure in build.prop: 1 -> 0",
+      "remedy": null,
+      "severity": "info",
+      "subject": "build.prop"
+    },
+    {
+      "category": "security",
+      "fingerprint": "304b2143f61c0a4c",
+      "id": "diff-prop-changed",
+      "image": "new",
+      "location": {
+        "kind": "file",
+        "ref": "new/build.prop"
+      },
+      "message": "ro.debuggable in build.prop: 0 -> 1",
+      "remedy": null,
+      "severity": "info",
+      "subject": "build.prop"
+    }
+  ],
+  "schema": "doctor/1",
+  "score": {
+    "coverage_gaps": 0,
+    "label": "needs work",
+    "model": "android/1",
+    "value": 60
+  },
+  "tool": "android-doctor",
+  "version": "<VERSION>"
+}

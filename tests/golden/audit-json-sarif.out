@@ -1,0 +1,115 @@
+{
+  "data": {
+    "adb": "ADB: ro.secure=0 ro.adb.secure=not set ro.debuggable=1 usb=not set: adbd can run as root",
+    "images": [
+      {
+        "apks": [],
+        "content_bytes_scanned": 68,
+        "content_findings": [],
+        "elf": {
+          "errors": [],
+          "objects": [],
+          "scanned": 0,
+          "truncated": false
+        },
+        "entries": 5,
+        "file_capabilities": [],
+        "findings": [
+          {
+            "detail": "ro.debuggable=1 in build.prop: adbd runs as root",
+            "rule": "debuggable-build",
+            "severity": "high"
+          },
+          {
+            "detail": "ro.secure=0 in build.prop: adbd keeps root",
+            "rule": "insecure-adb",
+            "severity": "high"
+          },
+          {
+            "detail": "/xbin/su looks like a su binary",
+            "rule": "su-binary",
+            "severity": "high"
+          }
+        ],
+        "name": "system",
+        "properties": [
+          {
+            "file": "build.prop",
+            "key": "ro.debuggable",
+            "value": "1"
+          },
+          {
+            "file": "build.prop",
+            "key": "ro.secure",
+            "value": "0"
+          },
+          {
+            "file": "build.prop",
+            "key": "ro.build.tags",
+            "value": "release-keys"
+          }
+        ],
+        "services": [],
+        "setuid_files": [],
+        "su_binaries": [
+          "xbin/su"
+        ],
+        "world_writable_files": []
+      }
+    ]
+  },
+  "exit_code": 0,
+  "findings": [
+    {
+      "category": "security",
+      "fingerprint": "0b2efae56741524d",
+      "id": "debuggable-build",
+      "image": "system",
+      "location": {
+        "kind": "file",
+        "ref": "system/build.prop"
+      },
+      "message": "ro.debuggable=1 in build.prop: adbd runs as root",
+      "remedy": "Ship a user build with ro.debuggable=0",
+      "severity": "high",
+      "subject": "build.prop"
+    },
+    {
+      "category": "security",
+      "fingerprint": "abc1701c88911787",
+      "id": "insecure-adb",
+      "image": "system",
+      "location": {
+        "kind": "file",
+        "ref": "system/build.prop"
+      },
+      "message": "ro.secure=0 in build.prop: adbd keeps root",
+      "remedy": "Set ro.secure=1 in the shipped build",
+      "severity": "high",
+      "subject": "build.prop"
+    },
+    {
+      "category": "security",
+      "fingerprint": "a84ef8a8cf375112",
+      "id": "su-binary",
+      "image": "system",
+      "location": {
+        "kind": "file",
+        "ref": "system/xbin/su"
+      },
+      "message": "/xbin/su looks like a su binary",
+      "remedy": "Remove the su binary and its SELinux domain",
+      "severity": "high",
+      "subject": "xbin/su"
+    }
+  ],
+  "schema": "doctor/1",
+  "score": {
+    "coverage_gaps": 0,
+    "label": "needs work",
+    "model": "android/1",
+    "value": 70
+  },
+  "tool": "android-doctor",
+  "version": "<VERSION>"
+}

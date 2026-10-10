@@ -1,0 +1,9 @@
+Write the agent skill into an agent config dir so a coding agent can use this tool
+
+Usage: android-doctor doctor install [OPTIONS]
+
+Options:
+      --agent <AGENT>  Which agent to install for; omit to print where each one would go
+      --no-color       Never emit colour, even on a terminal (also honours the NO_COLOR environment variable)
+      --print-only     Print the skill instead of writing it
+  -h, --help           Print help
