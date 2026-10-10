@@ -125,6 +125,10 @@ impl Doctor for AndroidDoctor {
     fn is_gap(&self, f: &Finding) -> bool {
         self.gaps.contains(&f.fingerprint)
     }
+    /// `ci install` refuses to touch any existing workflow unless `--force`.
+    fn ci_overwrite(&self) -> doctor_kit::install::Overwrite {
+        doctor_kit::install::Overwrite::Never
+    }
     /// Sorted keys, as `doctor_core::Envelope::to_value` writes them: the output of every release.
     fn render_json(&self, env: &Envelope) -> String {
         serde_json::to_string_pretty(&env.to_value()).expect("an envelope is JSON") + "\n"

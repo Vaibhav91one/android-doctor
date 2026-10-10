@@ -408,6 +408,113 @@ fn baseline_variants() {
     golden("baseline-variants.out", &acc);
 }
 
+fn show(acc: &mut String, label: &str, path: &Path, tmp: &Scratch) {
+    let body = match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => "(a symlink)".to_string(),
+        Ok(_) => norm(&std::fs::read_to_string(path).unwrap(), &tmp.0),
+        Err(_) => "(missing)".to_string(),
+    };
+    writeln!(acc, "--- {label}\n{body}").unwrap();
+}
+
+/// `ci install` over existing files, links and dirs; the exact refusal words and what survives.
+#[test]
+fn ci_install_overwrite_cases() {
+    use std::os::unix::fs::symlink;
+    let t = Scratch::new("ci-cases");
+    let mut acc = String::new();
+    let p = t.p("proj/x");
+    let proj = p.parent().unwrap().to_path_buf();
+    let wf = proj.join(".github/workflows/android-doctor.yml");
+    let ci = |acc: &mut String, name: &str, extra: &[&str]| {
+        let mut a: Vec<&dyn AsRef<std::ffi::OsStr>> = vec![&"ci", &"install", &"--dir", &proj];
+        a.extend(extra.iter().map(|e| e as &dyn AsRef<std::ffi::OsStr>));
+        case_all(acc, &t, name, &a);
+    };
+    ci(&mut acc, "fresh", &["--path", "out/fw"]);
+    show(&mut acc, "file", &wf, &t);
+    ci(&mut acc, "again-identical", &["--path", "out/fw"]);
+    std::fs::write(&wf, "mine\n").unwrap();
+    ci(&mut acc, "existing-differs", &[]);
+    show(&mut acc, "file", &wf, &t);
+    ci(&mut acc, "force", &["--force", "--fail-on", "high"]);
+    show(&mut acc, "file", &wf, &t);
+    // the workflow is a symlink to a file elsewhere
+    let victim = t.p("outside/victim");
+    std::fs::write(&victim, "keep\n").unwrap();
+    std::fs::remove_file(&wf).unwrap();
+    symlink(&victim, &wf).unwrap();
+    ci(&mut acc, "symlink-no-force", &[]);
+    show(&mut acc, "victim", &victim, &t);
+    ci(&mut acc, "symlink-force", &["--force"]);
+    show(&mut acc, "victim", &victim, &t);
+    show(&mut acc, "file", &wf, &t);
+    // .github itself is a link out of the project
+    let p2 = t.p("proj2/x");
+    let proj2 = p2.parent().unwrap().to_path_buf();
+    symlink(t.p("outside/x").parent().unwrap(), proj2.join(".github")).unwrap();
+    case_all(
+        &mut acc,
+        &t,
+        "github-dir-is-a-link",
+        &[&"ci", &"install", &"--dir", &proj2, &"--force"],
+    );
+    writeln!(
+        acc,
+        "--- outside holds: {:?}",
+        std::fs::read_dir(t.p("outside/x").parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<std::collections::BTreeSet<_>>()
+    )
+    .unwrap();
+    golden("ci-install-cases.out", &acc);
+}
+
+/// The AGENTS.md block is merged byte for byte whatever the file looked like before.
+#[test]
+fn agents_md_block_merges() {
+    let t = Scratch::new("agents-md");
+    let home = t.p("home/x").parent().unwrap().to_path_buf();
+    let mut acc = String::new();
+    let begin = "<!-- android-doctor:begin (managed; re-run `android-doctor doctor install`) -->";
+    let end = "<!-- android-doctor:end -->";
+    let existing = [
+        ("absent", None),
+        ("empty", Some(String::new())),
+        ("one-newline", Some("# mine\n".to_string())),
+        ("no-newline", Some("# mine".to_string())),
+        ("blank-lines", Some("# mine\n\n\n".to_string())),
+        (
+            "stale-block-then-text",
+            Some(format!("top\n{begin}\nold\n{end}\n\n\nbottom\n")),
+        ),
+        ("block-at-end", Some(format!("top\n\n{begin}\nold\n{end}"))),
+    ];
+    for (name, content) in existing {
+        let proj = t.p(&format!("{name}/x")).parent().unwrap().to_path_buf();
+        if let Some(c) = content {
+            std::fs::write(proj.join("AGENTS.md"), c).unwrap();
+        }
+        for round in ["first", "second"] {
+            let o = Command::new(bin())
+                .args(["doctor", "install", "--agent", "codex"])
+                .env("HOME", &home)
+                .current_dir(&proj)
+                .output()
+                .unwrap();
+            writeln!(
+                acc,
+                "=== {name} {round} (exit {})",
+                o.status.code().unwrap()
+            )
+            .unwrap();
+            show(&mut acc, "AGENTS.md", &proj.join("AGENTS.md"), &t);
+        }
+    }
+    golden("agents-md-cases.out", &acc);
+}
+
 #[test]
 fn help_texts() {
     let t = Scratch::new("help");

@@ -1,7 +1,10 @@
 //! `ci install`: write a GitHub Actions workflow that runs this repository's action on pull
 //! requests, pinned to this binary's own version so CI gates with the tool the operator ran locally.
 
+use crate::kit::AndroidDoctor;
 use anyhow::{Context, Result, bail};
+use doctor_kit::Doctor;
+use doctor_kit::install::{Overwrite, put_safe};
 use std::path::{Path, PathBuf};
 
 /// Where the workflow goes, relative to the project root.
@@ -52,48 +55,50 @@ jobs:
     ))
 }
 
-/// Create `dir/<parts...>` one directory at a time, refusing a symlink anywhere below `dir`.
-fn create_dirs(dir: &Path, parts: &[&str]) -> Result<PathBuf> {
-    let mut cur = dir.to_path_buf();
-    for part in parts {
-        cur.push(part);
-        match cur.symlink_metadata() {
-            Ok(m) if m.file_type().is_dir() => {}
-            Ok(_) => bail!(
-                "{} is not a plain directory (a symlink or a file); refusing to write through it",
-                cur.display()
-            ),
-            Err(_) => {
-                std::fs::create_dir(&cur).with_context(|| format!("creating {}", cur.display()))?
-            }
+/// The workflow file when it is a symlink and every directory above it is a real one.
+fn linked_workflow(dir: &Path) -> Option<PathBuf> {
+    let mut p = dir.to_path_buf();
+    for part in &WORKFLOW[..2] {
+        p.push(part);
+        if !p.symlink_metadata().is_ok_and(|m| m.is_dir()) {
+            return None;
         }
     }
-    Ok(cur)
+    p.push(WORKFLOW[2]);
+    p.symlink_metadata()
+        .is_ok_and(|m| m.file_type().is_symlink())
+        .then_some(p)
 }
 
-/// Write `text` as `dir/.github/workflows/android-doctor.yml`.
+/// Write `text` as `dir/.github/workflows/android-doctor.yml`, never through a symlink.
 ///
-/// An existing file (or symlink) there is an error unless `force`; with `force` it is removed
-/// first (a symlink is unlinked, never followed) and the new file is created exclusively, so
-/// nothing is ever written through a link.
+/// An existing file (or symlink) there is an error unless `force`; with `force` a symlink is
+/// unlinked, never followed, and the file is replaced. The refusal policy is the doctor's own
+/// (`Doctor::ci_overwrite`: any existing file), the safe writing is doctor-kit's.
 pub fn write(dir: &Path, text: &str, force: bool) -> Result<PathBuf> {
-    use std::io::Write;
-    let parent = create_dirs(dir, &WORKFLOW[..2])?;
-    let dest = parent.join(WORKFLOW[2]);
-    if dest.symlink_metadata().is_ok() {
+    if let Some(link) = linked_workflow(dir) {
         if !force {
             bail!(
                 "{} already exists; use --force to replace it",
-                dest.display()
+                link.display()
             );
         }
-        std::fs::remove_file(&dest).with_context(|| format!("replacing {}", dest.display()))?;
+        std::fs::remove_file(&link).with_context(|| format!("replacing {}", link.display()))?;
     }
-    let mut f =
-        std::fs::File::create_new(&dest).with_context(|| format!("writing {}", dest.display()))?;
-    f.write_all(text.as_bytes())
-        .with_context(|| format!("writing {}", dest.display()))?;
-    Ok(dest)
+    let overwrite = if force {
+        Overwrite::Always
+    } else {
+        AndroidDoctor::default().ci_overwrite()
+    };
+    put_safe(dir, &WORKFLOW, text, overwrite).map_err(|e| {
+        // the words this command has always used
+        anyhow::anyhow!(match e.strip_prefix("refusing to write through symlink ") {
+            Some(dir) => format!(
+                "{dir} is not a plain directory (a symlink or a file); refusing to write through it"
+            ),
+            None => e.replace("use --force to overwrite", "use --force to replace it"),
+        })
+    })
 }
 
 #[cfg(test)]
@@ -158,6 +163,10 @@ jobs:
         let p = write(&s, "one\n", false).unwrap();
         assert!(p.ends_with(".github/workflows/android-doctor.yml"));
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "one\n");
+        assert!(
+            write(&s, "one\n", false).is_err(),
+            "even identical content is refused"
+        );
         let err = write(&s, "two\n", false).unwrap_err().to_string();
         assert!(
             err.contains("already exists") && err.contains("--force"),
