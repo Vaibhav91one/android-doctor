@@ -158,18 +158,7 @@ impl Renderer {
 /// controls, zero-width characters and line/paragraph separators become spaces. Every human
 /// renderer and the fix prompt go through this one helper (doctor/1 section 8).
 pub fn sanitize(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_control()
-                || matches!(c, '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}'
-                    | '\u{2060}'..='\u{2069}' | '\u{feff}')
-            {
-                ' '
-            } else {
-                c
-            }
-        })
-        .collect()
+    doctor_core::sanitize_spaced(s)
 }
 
 /// Strip ANSI escape sequences, so a caller can measure or compare plain text.

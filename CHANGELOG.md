@@ -8,6 +8,7 @@ All notable changes to this project are documented here. The format follows
 ### Changed
 
 - Point URLs at the doctor-labs org (the repository moved from Vaibhav91one).
+- Use the shared `doctor-core` crate for the doctor/1 severity, exit codes, envelope, score shape, sanitizer and fingerprint instead of local copies. Output is byte-identical. The one visible difference: the sanitizer now also blanks soft hyphens and a few other invisible code points.
 
 ### Added
 

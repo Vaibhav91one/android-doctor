@@ -3,17 +3,15 @@
 
 use crate::findings::{self, Finding, Severity};
 use crate::term;
+use doctor_core::{BaselineState, ExitCode};
 use std::io::IsTerminal;
 use std::path::PathBuf;
-
-/// Exit status when `--baseline` finds something new.
-pub const EXIT_NEW_FINDINGS: i32 = 3;
 
 /// A run that completed but whose gate failed. `main` prints the message and exits with `code`:
 /// 1 for a finding at or above `--fail-on`, 3 for a new one under `--baseline`.
 #[derive(Debug)]
 pub struct Gate {
-    pub code: i32,
+    pub code: ExitCode,
     pub message: String,
 }
 
@@ -41,7 +39,7 @@ pub struct ReportArgs {
     /// Exit 1 when a finding is at or above this severity (critical, high, medium, low, info);
     /// with --baseline, exit 3 when a new one is. Default: critical for `doctor scan`, never for
     /// `audit`; with --baseline, low for both
-    #[arg(long, value_name = "SEVERITY", value_parser = Severity::parse)]
+    #[arg(long, value_name = "SEVERITY", value_parser = findings::parse_fail_on)]
     pub fail_on: Option<Severity>,
 }
 
@@ -107,7 +105,7 @@ pub fn emit(
         Some(d) => (
             d.all
                 .iter()
-                .filter(|f| f.baseline_state == Some("new"))
+                .filter(|f| f.baseline_state == Some(BaselineState::New))
                 .cloned()
                 .collect(),
             d.unchanged,
@@ -115,7 +113,7 @@ pub fn emit(
         None => (all.clone(), 0),
     };
     let (min, gated) = if diff.is_some() {
-        let min = args.fail_on.unwrap_or(Severity::Warn);
+        let min = args.fail_on.unwrap_or(Severity::Low);
         (Some(min), findings::gates(&shown, min, true))
     } else {
         let min = args.fail_on.or(e.fail_default);
@@ -123,9 +121,9 @@ pub fn emit(
     };
     let new = shown.iter().filter(|f| !f.gap).count();
     let exit = match (gated, diff.is_some()) {
-        (false, _) => 0,
-        (true, true) => EXIT_NEW_FINDINGS,
-        (true, false) => 1,
+        (false, _) => ExitCode::Ok,
+        (true, true) => ExitCode::NewFindings,
+        (true, false) => ExitCode::Findings,
     };
     if let Some(path) = &args.sarif {
         let doc = findings::to_sarif(&shown, &score, baseline.is_some());
@@ -181,12 +179,12 @@ pub fn emit(
         eprintln!("{n}");
     }
     match (exit, min) {
-        (0, _) => Ok(()),
-        (c, Some(m)) if c == EXIT_NEW_FINDINGS => Err(Gate {
+        (ExitCode::Ok, _) => Ok(()),
+        (c, Some(m)) if c == ExitCode::NewFindings => Err(Gate {
             code: c,
             message: format!(
                 "{new} new finding(s) at or above {} not in the baseline",
-                m.name()
+                m.as_str()
             ),
         }
         .into()),
@@ -194,7 +192,7 @@ pub fn emit(
             code: c,
             message: format!(
                 "one or more findings are at or above {}",
-                m.map_or("the threshold", Severity::name)
+                m.map_or("the threshold", Severity::as_str)
             ),
         }
         .into()),
@@ -225,7 +223,7 @@ mod tests {
     #[test]
     fn a_gate_displays_its_message() {
         let g = Gate {
-            code: 3,
+            code: ExitCode::NewFindings,
             message: "x".into(),
         };
         assert_eq!(g.to_string(), "x");

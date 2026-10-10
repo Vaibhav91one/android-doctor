@@ -53,6 +53,16 @@ impl Severity {
         }
     }
 
+    /// Map to the doctor/1 severity (`warn` is `low`).
+    pub fn unified(self) -> doctor_core::Severity {
+        match self {
+            Severity::High => doctor_core::Severity::High,
+            Severity::Medium => doctor_core::Severity::Medium,
+            Severity::Warn => doctor_core::Severity::Low,
+            Severity::Info => doctor_core::Severity::Info,
+        }
+    }
+
     /// Map `audit::Severity` to the terminal colour severity.
     fn to_term(self) -> TermSeverity {
         match self {

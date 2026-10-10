@@ -26,95 +26,47 @@
 //! ordering, timestamps and any host path are never part of it, so a re-scan of the same firmware
 //! from another directory, or after an unrelated image changed, yields the same fingerprints.
 
-use crate::audit::{self, ImageAudit};
+use crate::audit::ImageAudit;
 use crate::doctor;
 use anyhow::{Context, Result};
+use doctor_core::{
+    BaselineCounts, BaselineState, Envelope, ExitCode, Location, LocationKind, Score,
+};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
 use crate::term::sanitize as clean;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Severity {
-    Info,
-    Warn,
-    Medium,
-    High,
-    Error,
+pub use doctor_core::Severity;
+
+/// Parse a `--fail-on` value: the doctor/1 names, plus the old `error` and `warn` as aliases.
+pub fn parse_fail_on(s: &str) -> Result<Severity, String> {
+    Severity::parse_legacy(s)
+        .ok_or_else(|| format!("expected one of critical, high, medium, low, info (got {s:?})"))
 }
 
-impl Severity {
-    pub fn name(self) -> &'static str {
-        match self {
-            Severity::Info => "info",
-            Severity::Warn => "low",
-            Severity::Medium => "medium",
-            Severity::High => "high",
-            Severity::Error => "critical",
-        }
-    }
+/// Doctor and content-hit severities are strings. Unknown text is the lowest severity.
+fn from_name(s: &str) -> Severity {
+    Severity::parse_legacy(s).unwrap_or(Severity::Info)
+}
 
-    /// Parse a `--fail-on` value: the doctor/1 names, plus the old `error` and `warn` as aliases.
-    pub fn parse(s: &str) -> Result<Self, String> {
-        match s {
-            "critical" | "error" => Ok(Severity::Error),
-            "high" => Ok(Severity::High),
-            "medium" => Ok(Severity::Medium),
-            "low" | "warn" => Ok(Severity::Warn),
-            "info" => Ok(Severity::Info),
-            _ => Err(format!(
-                "expected one of critical, high, medium, low, info (got {s:?})"
-            )),
-        }
+/// Points a rule costs the health score. `info` is free.
+fn weight(s: Severity) -> u32 {
+    match s {
+        Severity::Critical => 20,
+        Severity::High => 10,
+        Severity::Medium => 5,
+        Severity::Low => 2,
+        Severity::Info => 0,
     }
+}
 
-    /// Doctor and content-hit severities are strings. Unknown text is the lowest severity.
-    fn from_name(s: &str) -> Self {
-        match s {
-            "error" | "critical" => Severity::Error,
-            "high" => Severity::High,
-            "medium" => Severity::Medium,
-            "warn" | "low" => Severity::Warn,
-            _ => Severity::Info,
-        }
-    }
-
-    pub(crate) fn from_audit(s: audit::Severity) -> Self {
-        match s {
-            audit::Severity::High => Severity::High,
-            audit::Severity::Medium => Severity::Medium,
-            audit::Severity::Warn => Severity::Warn,
-            audit::Severity::Info => Severity::Info,
-        }
-    }
-
-    /// Points a rule costs the health score. `info` is free.
-    fn weight(self) -> u32 {
-        match self {
-            Severity::Error => 20,
-            Severity::High => 10,
-            Severity::Medium => 5,
-            Severity::Warn => 2,
-            Severity::Info => 0,
-        }
-    }
-
-    fn sarif_level(self) -> &'static str {
-        match self {
-            Severity::Error | Severity::High => "error",
-            Severity::Medium => "warning",
-            Severity::Warn | Severity::Info => "note",
-        }
-    }
-
-    fn term(self) -> crate::term::Severity {
-        match self {
-            Severity::Error | Severity::High => crate::term::Severity::Error,
-            Severity::Medium | Severity::Warn => crate::term::Severity::Warn,
-            Severity::Info => crate::term::Severity::Info,
-        }
+fn term_severity(s: Severity) -> crate::term::Severity {
+    match s {
+        Severity::Critical | Severity::High => crate::term::Severity::Error,
+        Severity::Medium | Severity::Low => crate::term::Severity::Warn,
+        Severity::Info => crate::term::Severity::Info,
     }
 }
 
@@ -140,7 +92,7 @@ pub struct Finding {
     pub uri: Option<String>,
     pub fingerprint: String,
     /// `new` or `unchanged`; set only when a `--baseline` was given.
-    pub baseline_state: Option<&'static str>,
+    pub baseline_state: Option<BaselineState>,
 }
 
 fn norm_subject(s: &str) -> String {
@@ -153,15 +105,12 @@ fn norm_subject(s: &str) -> String {
 }
 
 fn fingerprint(rule: &str, scope: &str, subject: &str, key: &str) -> String {
-    let mut h = Sha256::new();
+    let mut buf = Vec::new();
     for part in [rule, scope, &norm_subject(subject), key] {
-        h.update(part.as_bytes());
-        h.update([0]);
+        buf.extend_from_slice(part.as_bytes());
+        buf.push(0);
     }
-    h.finalize()[..8]
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    doctor_core::fingerprint(&buf)
 }
 
 impl Finding {
@@ -180,9 +129,9 @@ impl Finding {
     }
 
     /// One doctor/1 finding. `subject` and `image` are extra keys kept from the old rows.
-    pub fn to_json(&self) -> Value {
-        let loc = if let Some(uri) = &self.uri {
-            json!({"kind": "file", "ref": uri})
+    pub fn to_core(&self) -> doctor_core::Finding {
+        let location = if let Some(uri) = &self.uri {
+            Location::new(LocationKind::File, uri.clone())
         } else if !self.scope.is_empty() || !self.subject.is_empty() {
             let r = [self.scope.as_str(), self.subject.as_str()]
                 .iter()
@@ -190,27 +139,28 @@ impl Finding {
                 .copied()
                 .collect::<Vec<_>>()
                 .join("/");
-            json!({"kind": "image", "ref": r})
+            Location::new(LocationKind::Image, r)
         } else {
-            json!({"kind": "none", "ref": ""})
+            Location::new(LocationKind::None, "")
         };
-        let mut v = json!({
-            "id": self.rule,
-            "fingerprint": self.fingerprint,
-            "severity": self.severity.name(),
-            "category": self.category,
-            "message": self.message,
-            "location": loc,
-            "remedy": self.remedy,
-            "subject": self.subject,
-        });
+        let mut extra = serde_json::Map::new();
+        extra.insert("subject".into(), json!(self.subject));
         if !self.scope.is_empty() {
-            v["image"] = json!(self.scope);
+            extra.insert("image".into(), json!(self.scope));
         }
-        if let Some(st) = self.baseline_state {
-            v["baseline_state"] = json!(st);
+        doctor_core::Finding {
+            id: self.rule.clone(),
+            fingerprint: self.fingerprint.clone(),
+            severity: self.severity,
+            confidence: None,
+            category: self.category.clone(),
+            message: self.message.clone(),
+            location,
+            evidence: Vec::new(),
+            remedy: self.remedy.clone(),
+            baseline_state: self.baseline_state,
+            extra,
         }
-        v
     }
 }
 
@@ -235,7 +185,7 @@ pub fn from_audit(audits: &[ImageAudit]) -> Vec<Finding> {
                 Finding {
                     rule: f.rule.to_string(),
                     category: "security".into(),
-                    severity: Severity::from_audit(f.severity),
+                    severity: f.severity.unified(),
                     scope: a.name.clone(),
                     subject: subject.clone(),
                     key: key.clone(),
@@ -254,7 +204,7 @@ pub fn from_audit(audits: &[ImageAudit]) -> Vec<Finding> {
                 Finding {
                     rule: c.rule.clone(),
                     category: "security".into(),
-                    severity: Severity::from_name(&c.severity),
+                    severity: from_name(&c.severity),
                     scope: a.name.clone(),
                     subject: c.path.clone(),
                     key: c.detail.clone(),
@@ -290,7 +240,7 @@ pub fn from_doctor(scoped: Vec<(doctor::Finding, Option<String>)>) -> Vec<Findin
             Finding {
                 rule: f.id,
                 category: f.category,
-                severity: Severity::from_name(&f.severity),
+                severity: from_name(&f.severity),
                 scope: scope.unwrap_or_default(),
                 subject: f.subject,
                 key: String::new(),
@@ -449,12 +399,12 @@ pub fn help(rule: &str) -> Option<Help> {
         "elf-partial-relro" => (
             "Partial RELRO: RELRO is set but relocations are lazy",
             "Link with -Wl,-z,relro,-z,now for full RELRO",
-            Warn,
+            Low,
         ),
         "elf-no-canary" => (
             "No stack canary (__stack_chk_fail not imported; heuristic)",
             "Build with -fstack-protector-strong",
-            Warn,
+            Low,
         ),
         "elf-no-fortify" => (
             "No FORTIFY_SOURCE _chk wrappers (heuristic)",
@@ -504,42 +454,42 @@ pub fn help(rule: &str) -> Option<Help> {
         "partition_coverage" => (
             "An expected partition image is missing",
             "Make sure system, vendor and boot images are all present",
-            Warn,
+            Low,
         ),
         "unhandled_input" => (
             "A file has no handler and will not be extracted",
             "Inspect it manually",
-            Warn,
+            Low,
         ),
         "avb_signature" => (
             "Android Verified Boot signature status",
             "Sign the vbmeta image with a trusted key, or point doctor at a directory holding vbmeta.img",
-            Warn,
+            Low,
         ),
         "duplicate_properties" => (
             "A property is defined in more than one file",
             "Remove the duplicate so the effective value is unambiguous",
-            Warn,
+            Low,
         ),
         "selinux_label_gaps" => (
             "Files have no SELinux label",
             "Relabel the image, or confirm it is not SELinux-enforcing",
-            Warn,
+            Low,
         ),
         "mode_anomalies" => (
             "A file has an unexpected mode",
             "chmod it to remove the write bit for others",
-            Warn,
+            Low,
         ),
         "init_service_hygiene" => (
             "An init service is declared more than once",
             "Keep one definition",
-            Warn,
+            Low,
         ),
         "debug_leftovers" => (
             "A test or leftover artefact ships in the image",
             "Remove the file from the production image",
-            Warn,
+            Low,
         ),
         _ => return None,
     };
@@ -556,19 +506,6 @@ pub fn help(rule: &str) -> Option<Help> {
 
 /// Points a rule that could not evaluate costs, once per rule however many images it missed.
 const GAP_WEIGHT: u32 = 3;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Score {
-    pub value: u32,
-    pub label: &'static str,
-    pub gaps: usize,
-}
-
-impl Score {
-    pub fn to_json(&self) -> Value {
-        json!({"value": self.value, "label": self.label, "model": "android/1", "coverage_gaps": self.gaps})
-    }
-}
 
 /// The 0-100 health score (model `android/1`), a pure function of the findings.
 ///
@@ -591,19 +528,13 @@ pub fn score(findings: &[Finding]) -> Score {
             if *gap {
                 return 4 * GAP_WEIGHT;
             }
-            let w = sev.weight();
+            let w = weight(*sev);
             (4 * w + (n - 1) * w).min(8 * w)
         })
         .sum();
     let value = 100u32.saturating_sub(quarters.div_ceil(4));
     let gaps = findings.iter().filter(|f| f.gap).count();
-    let label = match value {
-        90.. if gaps > 0 => "incomplete",
-        90.. => "good",
-        60.. => "needs work",
-        _ => "critical",
-    };
-    Score { value, label, gaps }
+    Score::new(value as u8, "android/1", gaps)
 }
 
 // ---------------------------------------------------------------------------
@@ -675,11 +606,15 @@ impl Baseline {
             .count();
         for f in &mut findings {
             let known = !f.gap && self.known.contains(&f.fingerprint);
-            f.baseline_state = Some(if known { "unchanged" } else { "new" });
+            f.baseline_state = Some(if known {
+                BaselineState::Unchanged
+            } else {
+                BaselineState::New
+            });
         }
         let unchanged = findings
             .iter()
-            .filter(|f| f.baseline_state == Some("unchanged"))
+            .filter(|f| f.baseline_state == Some(BaselineState::Unchanged))
             .count();
         Diff {
             new: findings.len() - unchanged,
@@ -692,32 +627,28 @@ impl Baseline {
 
 /// The doctor/1 envelope. `findings` are sorted worst first, then by id and fingerprint.
 pub fn envelope(
-    exit_code: i32,
+    exit_code: ExitCode,
     score: &Score,
     findings: &[Finding],
     baseline: Option<&Diff>,
     data: Value,
 ) -> Value {
-    let mut sorted: Vec<&Finding> = findings.iter().collect();
-    sorted.sort_by(|a, b| {
-        b.severity
-            .cmp(&a.severity)
-            .then_with(|| a.rule.cmp(&b.rule))
-            .then_with(|| a.fingerprint.cmp(&b.fingerprint))
+    let mut rows: Vec<doctor_core::Finding> = findings.iter().map(Finding::to_core).collect();
+    doctor_core::Finding::sort(&mut rows);
+    let mut env = Envelope::new(
+        "android-doctor",
+        env!("CARGO_PKG_VERSION"),
+        exit_code.code(),
+        score.clone(),
+        rows,
+        data,
+    );
+    env.baseline = baseline.map(|d| BaselineCounts {
+        new: d.new,
+        unchanged: d.unchanged,
+        fixed: d.fixed,
     });
-    let mut v = json!({
-        "schema": "doctor/1",
-        "tool": "android-doctor",
-        "version": env!("CARGO_PKG_VERSION"),
-        "exit_code": exit_code,
-        "score": score.to_json(),
-        "findings": sorted.iter().map(|f| f.to_json()).collect::<Vec<_>>(),
-        "data": data,
-    });
-    if let Some(d) = baseline {
-        v["baseline"] = json!({"new": d.new, "unchanged": d.unchanged, "fixed": d.fixed});
-    }
-    v
+    env.to_value()
 }
 
 /// True when `shown` has a finding at or above `min`. Under `--baseline`, `shown` is the new
@@ -738,7 +669,7 @@ pub fn render_flat(findings: &[Finding]) -> String {
     for f in findings {
         lines.push(format!(
             "{} {} {}: {}: {}",
-            f.severity.name(),
+            f.severity.as_str(),
             clean(&f.category),
             clean(&f.rule),
             clean(&f.subject),
@@ -773,14 +704,14 @@ pub fn render_digest(
 ) -> String {
     const CELLS: usize = 20;
     let filled = (score.value as usize * CELLS + 50) / 100;
-    let tone = match score.label {
+    let tone = match score.label.as_str() {
         "good" => "32",
         "critical" => "31",
         _ => "33",
     };
     let mut label = score.label.to_string();
-    if score.gaps > 0 {
-        label = format!("{label}, {}", plural(score.gaps, "coverage gap"));
+    if score.coverage_gaps > 0 {
+        label = format!("{label}, {}", plural(score.coverage_gaps, "coverage gap"));
     }
     let mut out = vec![
         format!("android-doctor  {}", clean(title)),
@@ -797,15 +728,15 @@ pub fn render_digest(
     } else {
         let mut counts = Vec::new();
         for sev in [
-            Severity::Error,
+            Severity::Critical,
             Severity::High,
             Severity::Medium,
-            Severity::Warn,
+            Severity::Low,
             Severity::Info,
         ] {
             let n = shown.iter().filter(|f| f.severity == sev).count();
             if n > 0 {
-                counts.push(format!("{n} {}", sev.name()));
+                counts.push(format!("{n} {}", sev.as_str()));
             }
         }
         out.push(format!(
@@ -861,7 +792,7 @@ pub fn render_digest(
                 };
                 out.push(format!(
                     "  [{}] {}{times}  {}",
-                    r.severity(sev.term(), sev.name()),
+                    r.severity(term_severity(sev), sev.as_str()),
                     clean(rule.0),
                     clean(&fs[0].message)
                 ));
@@ -961,9 +892,9 @@ pub fn to_sarif(findings: &[Finding], score: &Score, baselined: bool) -> Value {
                 "ruleIndex": index[f.rule.as_str()],
                 "level": f.severity.sarif_level(),
                 "message": {"text": if f.message.is_empty() { &f.rule } else { &f.message }},
-                "partialFingerprints": {"doctorFinding/v1": f.fingerprint},
+                "partialFingerprints": doctor_core::sarif::partial_fingerprints(&f.fingerprint),
                 "properties": {
-                    "severity": f.severity.name(),
+                    "severity": f.severity.as_str(),
                     "category": f.category,
                     "coverageGap": f.gap,
                 },
@@ -991,7 +922,7 @@ pub fn to_sarif(findings: &[Finding], score: &Score, baselined: bool) -> Value {
                 "rules": rules,
             }},
             "results": results,
-            "properties": {"score": score.to_json()},
+            "properties": {"score": score},
         }],
     })
 }
@@ -1080,21 +1011,21 @@ mod tests {
 
     #[test]
     fn severity_scale_orders_and_maps() {
-        assert!(Severity::Error > Severity::High && Severity::High > Severity::Medium);
-        assert!(Severity::Medium > Severity::Warn && Severity::Warn > Severity::Info);
-        assert_eq!(Severity::from_name("error"), Severity::Error);
-        assert_eq!(Severity::from_name("critical"), Severity::Error);
-        assert_eq!(Severity::from_name("nonsense"), Severity::Info);
-        assert_eq!(Severity::from_audit(audit::Severity::High), Severity::High);
-        assert_eq!(Severity::Error.sarif_level(), "error");
+        assert!(Severity::Critical > Severity::High && Severity::High > Severity::Medium);
+        assert!(Severity::Medium > Severity::Low && Severity::Low > Severity::Info);
+        assert_eq!(from_name("error"), Severity::Critical);
+        assert_eq!(from_name("critical"), Severity::Critical);
+        assert_eq!(from_name("nonsense"), Severity::Info);
+        assert_eq!(crate::audit::Severity::High.unified(), Severity::High);
+        assert_eq!(Severity::Critical.sarif_level(), "error");
         assert_eq!(Severity::High.sarif_level(), "error");
         assert_eq!(Severity::Medium.sarif_level(), "warning");
-        assert_eq!(Severity::Warn.sarif_level(), "note");
-        assert_eq!(Severity::Error.name(), "critical");
-        assert_eq!(Severity::Warn.name(), "low");
-        assert_eq!(Severity::parse("warn"), Ok(Severity::Warn));
-        assert_eq!(Severity::parse("critical"), Ok(Severity::Error));
-        assert!(Severity::parse("none").is_err());
+        assert_eq!(Severity::Low.sarif_level(), "note");
+        assert_eq!(Severity::Critical.as_str(), "critical");
+        assert_eq!(Severity::Low.as_str(), "low");
+        assert_eq!(parse_fail_on("warn"), Ok(Severity::Low));
+        assert_eq!(parse_fail_on("critical"), Ok(Severity::Critical));
+        assert!(parse_fail_on("none").is_err());
         assert_eq!(Severity::Info.sarif_level(), "note");
     }
 
@@ -1131,9 +1062,9 @@ mod tests {
         assert_eq!(score(&[]).value, 100);
         assert_eq!(score(&[]).label, "good");
         let one_high = score(&[f("a", Severity::High, "i", "p")]);
-        assert_eq!((one_high.value, one_high.label), (90, "good"));
+        assert_eq!((one_high.value, one_high.label.as_str()), (90, "good"));
         let many: Vec<_> = (0..40)
-            .map(|i| f(&format!("r{i}"), Severity::Error, "i", "p"))
+            .map(|i| f(&format!("r{i}"), Severity::Critical, "i", "p"))
             .collect();
         assert_eq!(score(&many).value, 0);
         assert_eq!(score(&many).label, "critical");
@@ -1153,14 +1084,17 @@ mod tests {
         let info = score(&[f("setuid-files", Severity::Info, "i", "")]);
         assert_eq!(info.value, 100);
         let g = score(&[gap("avb_signature")]);
-        assert_eq!((g.value, g.label, g.gaps), (97, "incomplete", 1));
+        assert_eq!(
+            (g.value, g.label.as_str(), g.coverage_gaps),
+            (97, "incomplete", 1)
+        );
     }
 
     #[test]
     fn score_does_not_depend_on_order() {
         let mut v = vec![
             f("a", Severity::High, "i", "1"),
-            f("b", Severity::Warn, "i", "2"),
+            f("b", Severity::Low, "i", "2"),
             f("a", Severity::Medium, "i", "3"),
             gap("c"),
         ];
@@ -1174,7 +1108,7 @@ mod tests {
         let dir = crate::testutil::Scratch::new("baseline-unit");
         let old = [f("su-binary", Severity::High, "system", "xbin/su")];
         let body =
-            serde_json::to_string(&old.iter().map(Finding::to_json).collect::<Vec<_>>()).unwrap();
+            serde_json::to_string(&old.iter().map(Finding::to_core).collect::<Vec<_>>()).unwrap();
         let p = dir.join("b.json");
         std::fs::write(&p, body).unwrap();
         let b = read_baseline(&p).unwrap();
@@ -1188,15 +1122,15 @@ mod tests {
         let new: Vec<_> = d
             .all
             .iter()
-            .filter(|f| f.baseline_state == Some("new"))
+            .filter(|f| f.baseline_state == Some(BaselineState::New))
             .cloned()
             .collect();
-        assert!(gates(&new, Severity::Warn, true));
+        assert!(gates(&new, Severity::Low, true));
         // only a gap and an info are new: reported, but no gate
         let mut quiet = vec![gap("x"), f("setuid-files", Severity::Info, "system", "")];
-        assert!(!gates(&quiet, Severity::Warn, true));
-        quiet.push(f("a", Severity::Warn, "i", "p"));
-        assert!(gates(&quiet, Severity::Warn, true));
+        assert!(!gates(&quiet, Severity::Low, true));
+        quiet.push(f("a", Severity::Low, "i", "p"));
+        assert!(gates(&quiet, Severity::Low, true));
     }
 
     #[test]
@@ -1237,7 +1171,7 @@ mod tests {
 
     #[test]
     fn flat_text_matches_the_original_doctor_lines() {
-        let mut a = f("avb_signature", Severity::Warn, "", "vbmeta.img");
+        let mut a = f("avb_signature", Severity::Low, "", "vbmeta.img");
         a.category = "security".into();
         a.message = "image is unsigned".into();
         a.remedy = Some("sign it".into());
@@ -1249,7 +1183,7 @@ mod tests {
 
     #[test]
     fn target_text_never_reaches_a_terminal_with_an_escape() {
-        let mut a = f("avb_signature", Severity::Warn, "", "evil\x1b[31m.img");
+        let mut a = f("avb_signature", Severity::Low, "", "evil\x1b[31m.img");
         a.message = "\x1b]0;pwned\x07 \u{202e}rtl \u{200b}zw".into();
         a.remedy = Some("\x1b[2Jfix".into());
         for text in [
@@ -1275,7 +1209,7 @@ mod tests {
 
     #[test]
     fn digest_is_grouped_worst_first_with_next_steps() {
-        let mut q = f("debug_leftovers", Severity::Warn, "system", "a.log");
+        let mut q = f("debug_leftovers", Severity::Low, "system", "a.log");
         q.category = "quality".into();
         let list = vec![
             q,
