@@ -4,6 +4,7 @@
 //! having to read the source.
 
 use anyhow::{Context, Result};
+use doctor_kit::install::{Overwrite, put_safe};
 use std::path::PathBuf;
 
 /// Agents we know how to install a skill for, with their config directory.
@@ -73,10 +74,13 @@ const SKILL_BODY: &str = include_str!("skill_body.md");
 /// Write the skill into `dir`, under the agent's own subdirectory.
 pub fn install_in(agent: Agent, dir: &std::path::Path) -> Result<PathBuf> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let dest = dir.join(format!("{}.md", agent.skill_name()));
-    std::fs::write(&dest, skill_content())
-        .with_context(|| format!("writing {}", dest.display()))?;
-    Ok(dest)
+    put_safe(
+        dir,
+        &[&format!("{}.md", agent.skill_name())],
+        &skill_content(),
+        Overwrite::Always,
+    )
+    .map_err(|e| anyhow::anyhow!(e))
 }
 
 const BLOCK_BEGIN: &str =
@@ -90,18 +94,19 @@ const BLOCK_END: &str = "<!-- android-doctor:end -->";
 pub fn install_project(agent: Agent, root: &std::path::Path) -> Result<Option<PathBuf>> {
     let dest = match agent {
         Agent::Cursor => {
-            let dest = root.join(".cursor/rules/android-doctor.mdc");
-            std::fs::create_dir_all(dest.parent().unwrap())
-                .with_context(|| format!("creating {}", dest.display()))?;
             let mdc = format!(
                 "---\ndescription: Audit Android firmware images with android-doctor\nalwaysApply: false\n---\n{SKILL_BODY}"
             );
-            std::fs::write(&dest, mdc).with_context(|| format!("writing {}", dest.display()))?;
-            dest
+            put_safe(
+                root,
+                &[".cursor", "rules", "android-doctor.mdc"],
+                &mdc,
+                Overwrite::Always,
+            )
+            .map_err(|e| anyhow::anyhow!(e))?
         }
         Agent::Codex | Agent::Opencode => {
-            let dest = root.join("AGENTS.md");
-            let old = std::fs::read_to_string(&dest).unwrap_or_default();
+            let old = std::fs::read_to_string(root.join("AGENTS.md")).unwrap_or_default();
             let block = format!("{BLOCK_BEGIN}\n{SKILL_BODY}\n{BLOCK_END}\n");
             let new = match (old.find(BLOCK_BEGIN), old.find(BLOCK_END)) {
                 (Some(b), Some(e)) if b < e => {
@@ -115,8 +120,8 @@ pub fn install_project(agent: Agent, root: &std::path::Path) -> Result<Option<Pa
                 _ if old.is_empty() => block,
                 _ => format!("{}\n\n{}", old.trim_end(), block),
             };
-            std::fs::write(&dest, new).with_context(|| format!("writing {}", dest.display()))?;
-            dest
+            put_safe(root, &["AGENTS.md"], &new, Overwrite::Always)
+                .map_err(|e| anyhow::anyhow!(e))?
         }
         Agent::ClaudeCode => return Ok(None),
     };

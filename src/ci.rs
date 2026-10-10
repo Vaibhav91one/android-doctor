@@ -1,7 +1,8 @@
 //! `ci install`: write a GitHub Actions workflow that runs this repository's action on pull
 //! requests, pinned to this binary's own version so CI gates with the tool the operator ran locally.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
+use doctor_kit::install::{Overwrite, put_safe};
 use std::path::{Path, PathBuf};
 
 /// Where the workflow goes, relative to the project root.
@@ -52,48 +53,15 @@ jobs:
     ))
 }
 
-/// Create `dir/<parts...>` one directory at a time, refusing a symlink anywhere below `dir`.
-fn create_dirs(dir: &Path, parts: &[&str]) -> Result<PathBuf> {
-    let mut cur = dir.to_path_buf();
-    for part in parts {
-        cur.push(part);
-        match cur.symlink_metadata() {
-            Ok(m) if m.file_type().is_dir() => {}
-            Ok(_) => bail!(
-                "{} is not a plain directory (a symlink or a file); refusing to write through it",
-                cur.display()
-            ),
-            Err(_) => {
-                std::fs::create_dir(&cur).with_context(|| format!("creating {}", cur.display()))?
-            }
-        }
-    }
-    Ok(cur)
-}
-
-/// Write `text` as `dir/.github/workflows/android-doctor.yml`.
-///
-/// An existing file (or symlink) there is an error unless `force`; with `force` it is removed
-/// first (a symlink is unlinked, never followed) and the new file is created exclusively, so
-/// nothing is ever written through a link.
+/// Write `text` as `dir/.github/workflows/android-doctor.yml`, never through a symlink. An
+/// existing workflow that differs is an error unless `force` (identical content is a no-op).
 pub fn write(dir: &Path, text: &str, force: bool) -> Result<PathBuf> {
-    use std::io::Write;
-    let parent = create_dirs(dir, &WORKFLOW[..2])?;
-    let dest = parent.join(WORKFLOW[2]);
-    if dest.symlink_metadata().is_ok() {
-        if !force {
-            bail!(
-                "{} already exists; use --force to replace it",
-                dest.display()
-            );
-        }
-        std::fs::remove_file(&dest).with_context(|| format!("replacing {}", dest.display()))?;
-    }
-    let mut f =
-        std::fs::File::create_new(&dest).with_context(|| format!("writing {}", dest.display()))?;
-    f.write_all(text.as_bytes())
-        .with_context(|| format!("writing {}", dest.display()))?;
-    Ok(dest)
+    let overwrite = if force {
+        Overwrite::Always
+    } else {
+        Overwrite::RefuseDifferent
+    };
+    put_safe(dir, &WORKFLOW, text, overwrite).map_err(|e| anyhow::anyhow!(e))
 }
 
 #[cfg(test)]
@@ -158,9 +126,14 @@ jobs:
         let p = write(&s, "one\n", false).unwrap();
         assert!(p.ends_with(".github/workflows/android-doctor.yml"));
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "one\n");
+        assert_eq!(
+            write(&s, "one\n", false).unwrap(),
+            p,
+            "identical is a no-op"
+        );
         let err = write(&s, "two\n", false).unwrap_err().to_string();
         assert!(
-            err.contains("already exists") && err.contains("--force"),
+            err.contains("exists and differs") && err.contains("--force"),
             "{err}"
         );
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "one\n");
@@ -186,10 +159,10 @@ jobs:
         std::fs::write(&victim, "keep\n").unwrap();
         symlink(&victim, proj.join(".github/workflows/android-doctor.yml")).unwrap();
         assert!(write(&proj, "x\n", false).is_err());
-        write(&proj, "new\n", true).unwrap();
+        assert!(
+            write(&proj, "new\n", true).is_err(),
+            "even --force refuses a link"
+        );
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep\n");
-        let dest = proj.join(".github/workflows/android-doctor.yml");
-        assert!(!dest.symlink_metadata().unwrap().file_type().is_symlink());
-        assert_eq!(std::fs::read_to_string(dest).unwrap(), "new\n");
     }
 }

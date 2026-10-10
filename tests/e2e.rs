@@ -178,7 +178,7 @@ fn ci_install_writes_a_pinned_workflow_refuses_overwrite_and_honours_force() {
     assert_eq!(out.status.code(), Some(2));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("already exists") && err.contains("--force"),
+        err.contains("exists and differs") && err.contains("--force"),
         "{err}"
     );
     assert_eq!(std::fs::read_to_string(&dest).unwrap(), "mine\n");
