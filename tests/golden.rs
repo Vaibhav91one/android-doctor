@@ -598,6 +598,54 @@ fn mcp_transcript() {
     golden("mcp-transcript.out", &norm(&out, &t.0));
 }
 
+/// Protocol edges and failing tools. `ping` and -32600 are the contract fixes kept from the kit;
+/// the rest are the first server's exact answers.
+#[test]
+fn mcp_contract() {
+    let t = firmware("mcp-contract");
+    let gone = t.p("nope.img").display().to_string();
+    let lines = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":2}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":{"a":1},"method":"tools/list"}"#.to_string(),
+        r#"[1,2]"#.to_string(),
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.to_string(),
+        "".to_string(),
+        "   ".to_string(),
+        "not json".to_string(),
+        r#"{"jsonrpc":"2.0","id":3,"method":"nope/method"}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":4,"method":"initialize","params":{"protocolVersion":"2099-01-01"}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"nope","arguments":{}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"identify","arguments":{}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"identify","arguments":{"path":"a","baseline":"b"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"diff","arguments":{"old":"a"}}}"#.to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"audit","arguments":{"paths":[gone]}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"doctor","arguments":{"path":gone}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"doctor","arguments":{"path":t.p("fw").display().to_string(),"baseline":t.p("nobase.json").display().to_string()}}}).to_string(),
+    ];
+    let mut child = Command::new(bin())
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    for l in &lines {
+        writeln!(stdin, "{l}").unwrap();
+    }
+    drop(stdin);
+    let mut out = String::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut out)
+        .unwrap();
+    child.wait().unwrap();
+    golden("mcp-contract.out", &norm(&out, &t.0));
+}
+
 #[test]
 fn install_bodies() {
     let t = Scratch::new("install");
