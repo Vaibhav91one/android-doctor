@@ -6,54 +6,18 @@
 //! validation as `doctor scan`) and the agent is started with argv, never a shell string.
 
 use crate::doctor::{self, Finding};
-use anyhow::{Result, bail};
+use anyhow::Result;
+use doctor_kit::fix::{AGENTS, find_on_path, in_agent, launch};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+/// Set by hand to stop `fix` from launching an agent (the kit knows the agents' own variables).
+const AGENT_SWITCH: [&str; 1] = ["ANDROID_DOCTOR_AGENT"];
 
 const TEMPLATE: &str = include_str!("fix_prompt.md");
 /// Argv limits are real (macOS ARG_MAX is 1 MiB), so a huge scan is truncated in the prompt.
 const MAX_FINDINGS: usize = 200;
 const MAX_FIELD: usize = 300;
-
-struct Agent {
-    name: &'static str,
-    bin: &'static str,
-    /// Flag that skips the agent's approval prompts; only added by `--yolo`.
-    bypass: &'static str,
-}
-
-const AGENTS: [Agent; 3] = [
-    Agent {
-        name: "claude",
-        bin: "claude",
-        bypass: "--dangerously-skip-permissions",
-    },
-    Agent {
-        name: "codex",
-        bin: "codex",
-        bypass: "--dangerously-bypass-approvals-and-sandbox",
-    },
-    Agent {
-        name: "cursor",
-        bin: "cursor-agent",
-        bypass: "--force",
-    },
-];
-
-/// Set inside a coding agent's own shell; `ANDROID_DOCTOR_AGENT=1` is the manual switch.
-const AGENT_ENV: [&str; 5] = [
-    "CLAUDECODE",
-    "CODEX_THREAD_ID",
-    "CODEX_SANDBOX",
-    "CURSOR_SANDBOX",
-    "ANDROID_DOCTOR_AGENT",
-];
-
-pub fn in_agent(get: impl Fn(&str) -> Option<String>) -> bool {
-    AGENT_ENV
-        .iter()
-        .any(|k| get(k).is_some_and(|v| !v.is_empty()))
-}
 
 fn rank(severity: &str) -> u8 {
     match severity {
@@ -131,24 +95,6 @@ pub fn render_prompt(findings: &[Finding], path: &Path) -> String {
         .to_string()
 }
 
-fn find_on_path(bin: &str, path_var: Option<std::ffi::OsString>) -> Option<PathBuf> {
-    let path_var = path_var?;
-    std::env::split_paths(&path_var)
-        .map(|d| d.join(bin))
-        .find(|p| {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::metadata(p)
-                    .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-            }
-            #[cfg(not(unix))]
-            {
-                p.is_file()
-            }
-        })
-}
-
 fn out(text: &str) {
     // A closed pipe (`| head`) is not an error worth reporting.
     let _ = writeln!(std::io::stdout(), "{text}");
@@ -173,7 +119,7 @@ pub fn run(path: &Path, agent: &str, print: bool, yolo: bool) -> Result<()> {
         out(&prompt);
         return Ok(());
     }
-    if in_agent(|k| std::env::var(k).ok()) {
+    if in_agent(|k| std::env::var(k).ok(), &AGENT_SWITCH) {
         eprintln!(
             "android-doctor: running inside an agent; not launching {}. Prompt follows.",
             spec.bin
@@ -181,27 +127,21 @@ pub fn run(path: &Path, agent: &str, print: bool, yolo: bool) -> Result<()> {
         out(&prompt);
         return Ok(());
     }
-    let Some(bin) = find_on_path(spec.bin, std::env::var_os("PATH")) else {
+    if find_on_path(spec.bin, std::env::var_os("PATH")).is_none() {
         eprintln!(
             "android-doctor: {} is not on PATH; printing the prompt instead",
             spec.bin
         );
         out(&prompt);
         return Ok(());
-    };
-    let mut cmd = std::process::Command::new(bin);
+    }
     if yolo {
         eprintln!(
             "android-doctor: WARNING launching {} with approvals skipped ({}); the firmware is untrusted",
             spec.bin, spec.bypass
         );
-        cmd.arg(spec.bypass);
     }
-    match cmd.arg(&prompt).status() {
-        Ok(s) if s.success() => Ok(()),
-        Ok(s) => bail!("{} exited with {s}", spec.bin),
-        Err(e) => bail!("could not launch {}: {e}", spec.bin),
-    }
+    launch(spec, &prompt, yolo).map_err(|e| anyhow::anyhow!(e))
 }
 
 #[cfg(test)]
@@ -277,10 +217,10 @@ mod tests {
 
     #[test]
     fn agent_detection() {
-        assert!(!in_agent(|_| None));
-        assert!(!in_agent(|_| Some(String::new())));
-        for k in AGENT_ENV {
-            assert!(in_agent(|n| (n == k).then(|| "1".to_string())), "{k}");
-        }
+        let get = |k: &'static str| move |n: &str| (n == k).then(|| "1".to_string());
+        assert!(!in_agent(|_| None, &AGENT_SWITCH));
+        assert!(!in_agent(|_| Some(String::new()), &AGENT_SWITCH));
+        assert!(in_agent(get("ANDROID_DOCTOR_AGENT"), &AGENT_SWITCH));
+        assert!(in_agent(get("CLAUDECODE"), &AGENT_SWITCH));
     }
 }
