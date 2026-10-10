@@ -41,7 +41,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Vaibhav91one/android-doctor@v{version}
+      - uses: doctor-labs/android-doctor@v{version}
         with:
           version: {version}
           # The firmware directory to scan, relative to the repository root. Edit it to match your layout.
@@ -129,7 +129,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Vaibhav91one/android-doctor@v1.2.3
+      - uses: doctor-labs/android-doctor@v1.2.3
         with:
           version: 1.2.3
           path: 'fw/out'

@@ -12,7 +12,7 @@ inputs:
   version:
     description: >-
       android-doctor release to install (for example 0.2.0). Empty means this action's own version:
-      a pinned `uses: Vaibhav91one/android-doctor@vX.Y.Z` installs release vX.Y.Z. A branch or sha
+      a pinned `uses: doctor-labs/android-doctor@vX.Y.Z` installs release vX.Y.Z. A branch or sha
       ref has no version, so it must set this input; `latest` is never assumed.
     default: ""
   command:

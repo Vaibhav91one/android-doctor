@@ -12,7 +12,7 @@
 # ponytail: paths and args are split on spaces, so a path with a space is not supported.
 set -uo pipefail
 
-REPO=Vaibhav91one/android-doctor
+REPO=doctor-labs/android-doctor
 
 die() { echo "::error::android-doctor action: $*" >&2; exit 2; }
 

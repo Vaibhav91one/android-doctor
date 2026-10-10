@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Vaibhav91one/android-doctor/actions/workflows/ci.yml"><img src="https://github.com/Vaibhav91one/android-doctor/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/doctor-labs/android-doctor/actions/workflows/ci.yml"><img src="https://github.com/doctor-labs/android-doctor/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://www.npmjs.com/package/android-doctor"><img src="https://img.shields.io/npm/v/android-doctor?style=flat&color=000000&labelColor=000000" alt="npm version"></a>
   <a href="https://crates.io/crates/android-doctor"><img src="https://img.shields.io/crates/v/android-doctor?style=flat&color=000000&labelColor=000000" alt="crates.io version"></a>
   <img src="https://img.shields.io/badge/Rust-2024-000000?style=flat&color=000000&labelColor=000000" alt="Rust 2024">
@@ -66,7 +66,7 @@ cargo install android-doctor
 ```
 
 Or take a prebuilt binary from the
-[GitHub releases](https://github.com/Vaibhav91one/android-doctor/releases):
+[GitHub releases](https://github.com/doctor-labs/android-doctor/releases):
 download `android-doctor-<target>.tar.gz` (`aarch64-apple-darwin`,
 `x86_64-apple-darwin` or `x86_64-unknown-linux-gnu`), extract it, and place the
 binary on your `PATH`:
@@ -84,10 +84,10 @@ privileges):
 docker run --rm \
   --network none --read-only --cap-drop ALL \
   -v "$PWD:/work:ro" -w /work \
-  ghcr.io/vaibhav91one/android-doctor:v0.3.1 identify ota.zip
+  ghcr.io/doctor-labs/android-doctor:v0.3.1 identify ota.zip
 ```
 
-The image is published to `ghcr.io/vaibhav91one/android-doctor:v<version>` by
+The image is published to `ghcr.io/doctor-labs/android-doctor:v<version>` by
 the release workflow; there is no mutable `:latest`, matching how the GitHub
 Action pins the binary. (Writing output needs a writable mount, e.g.
 `-v "$PWD/out:/out" ... extract ota.zip -o /out`.)
@@ -528,7 +528,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Vaibhav91one/android-doctor@v0.2.0   # pin a release tag
+      - uses: doctor-labs/android-doctor@v0.2.0   # pin a release tag
         with:
           path: firmware            # a directory of images (doctor scan) or image files (audit)
           command: doctor scan      # or: audit
@@ -566,7 +566,7 @@ by `.github/workflows/action-selftest.yml`, which builds the binary from the che
 ### `ci install`
 
 `android-doctor ci install` writes the workflow above for you, pinned to the version of the binary
-that wrote it (`uses: Vaibhav91one/android-doctor@v<version>` and `version: <version>`):
+that wrote it (`uses: doctor-labs/android-doctor@v<version>` and `version: <version>`):
 
 ```console
 $ cd my-firmware-repo
@@ -592,7 +592,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Vaibhav91one/android-doctor@v0.3.1
+      - uses: doctor-labs/android-doctor@v0.3.1
         with:
           version: 0.3.1
           # The firmware directory to scan, relative to the repository root. Edit it to match your layout.

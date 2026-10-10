@@ -5,6 +5,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Point URLs at the doctor-labs org (the repository moved from Vaibhav91one).
+
 ### Added
 
 - `diff <old> <new>`: file-level comparison of two firmware builds (images or directories of
