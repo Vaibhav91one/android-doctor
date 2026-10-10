@@ -683,7 +683,13 @@ fn main() -> anyhow::Result<()> {
                 fail_on,
             } => ci_install(&dir, print, force, &path, &fail_on),
         },
-        Command::Mcp { verbose } => mcp::serve(verbose),
+        Command::Mcp { verbose } => doctor_kit::mcp::serve_verbose(
+            &kit::AndroidDoctor {
+                gaps: Default::default(),
+            },
+            verbose,
+        )
+        .map_err(Into::into),
     };
     // Unified error rendering (issue #77): a one-line headline, then the indented cause
     // chain. Printed once, here, and the process exits non-zero - returning the error as

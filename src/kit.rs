@@ -32,6 +32,9 @@ impl Doctor for AndroidDoctor {
     fn target(&self) -> TargetKind {
         TargetKind::Detached
     }
+    fn mcp_tools(&self) -> Option<Vec<doctor_kit::McpTool>> {
+        Some(crate::mcp::tools())
+    }
     fn is_gap(&self, f: &Finding) -> bool {
         self.gaps.contains(&f.fingerprint)
     }

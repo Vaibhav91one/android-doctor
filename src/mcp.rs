@@ -1,11 +1,10 @@
-//! A Model Context Protocol server: JSON-RPC 2.0 over stdio, no new crates.
-//!
-//! An agent calls android-doctor as tools instead of shelling out and parsing stdout, so
-//! findings arrive as structured data. `handle` is a pure function so the protocol can be
-//! tested without spawning a process.
+//! The tools android-doctor offers over the Model Context Protocol. The JSON-RPC loop is
+//! doctor-kit's (`Doctor::mcp_tools`); this module owns the tool schemas and the mapping of a
+//! tool call to CLI arguments.
 use anyhow::Result;
+use doctor_kit::McpTool;
+use doctor_kit::mcp::{ExecOpts, exec_self};
 use serde_json::{Value, json};
-use std::io::{BufRead, Write};
 
 /// Flags the findings tools accept besides the target path(s). Excluded over MCP: `--json`
 /// (always on), `--score`, `--no-color` (never any colour in JSON), `help` and `version`.
@@ -41,51 +40,6 @@ fn tool(name: &str, description: &str, schema: &str) -> Value {
         "description": description,
         "inputSchema": serde_json::from_str::<Value>(schema).expect("static schema parses"),
     })
-}
-
-/// Handle one JSON-RPC request and return the response, or `None` for a notification.
-pub fn handle(req: &Value) -> Option<Value> {
-    let method = req.get("method").and_then(Value::as_str)?;
-    // JSON-RPC: a request without an id is a notification and must NEVER be answered, not
-    // even with an error. Check that before anything else.
-    let id = req.get("id").cloned()?;
-
-    let result = match method {
-        "initialize" => json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": { "tools": {} },
-            "serverInfo": { "name": "android-doctor", "version": env!("CARGO_PKG_VERSION") },
-        }),
-        "tools/list" => tool_list(),
-        "tools/call" => {
-            let name = req
-                .pointer("/params/name")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let args = req
-                .pointer("/params/arguments")
-                .cloned()
-                .unwrap_or(json!({}));
-            match call_tool(name, &args) {
-                Ok(text) => json!({
-                    "content": [{ "type": "text", "text": text }],
-                    "isError": false,
-                }),
-                Err(e) => json!({
-                    "content": [{ "type": "text", "text": format!("{e:#}") }],
-                    "isError": true,
-                }),
-            }
-        }
-        // Unknown methods get a proper error rather than silence.
-        other => return Some(error(Some(id), -32601, &format!("unknown method {other}"))),
-    };
-
-    Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
-}
-
-fn error(id: Option<Value>, code: i64, message: &str) -> Value {
-    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
 /// The CLI arguments for a tool call (everything after the binary name).
@@ -134,60 +88,47 @@ fn cli_args(name: &str, args: &Value) -> Result<Vec<String>> {
     Ok(argv)
 }
 
-/// Run one tool: the CLI itself with `--json`, so the reply is byte-identical to the CLI's
-/// stdout. Exit 0, 1 and 3 are results (the envelope says which); anything else is an error.
-fn call_tool(name: &str, args: &Value) -> Result<String> {
-    let out = std::process::Command::new(std::env::current_exe()?)
-        .arg("--no-color")
-        .args(cli_args(name, args)?)
-        .output()?;
-    if matches!(out.status.code(), Some(0 | 1 | 3)) {
-        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
-    }
-    anyhow::bail!(
-        "{} (exit {})",
-        String::from_utf8_lossy(&out.stderr).trim(),
-        out.status.code().map_or("signal".into(), |c| c.to_string())
-    )
-}
-
-/// Serve JSON-RPC over stdin/stdout until EOF.
-pub fn serve(verbose: bool) -> Result<()> {
-    let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
-    for line in stdin.lock().lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        if verbose {
-            eprintln!("<- {line}");
-        }
-        let req: Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(e) => {
-                // Malformed input must produce an error response, not a crash: an agent
-                // will happily send us garbage.
-                let resp = error(None, -32700, &format!("parse error: {e}"));
-                writeln!(stdout, "{resp}")?;
-                stdout.flush()?;
-                continue;
+/// The tools in kit shape. Each runs the CLI itself with `--json`, so the reply is byte-identical
+/// to the CLI's stdout. Exit 0, 1 and 3 are results (the envelope says which); anything else is
+/// an error.
+pub fn tools() -> Vec<McpTool> {
+    tool_list()["tools"]
+        .as_array()
+        .expect("tool_list has tools")
+        .iter()
+        .map(|t| {
+            let name = t["name"].as_str().expect("tool name").to_string();
+            McpTool {
+                name: name.clone(),
+                description: t["description"].as_str().unwrap_or_default().to_string(),
+                schema: t["inputSchema"].clone(),
+                call: Box::new(move |args| {
+                    let mut argv = vec!["--no-color".to_string()];
+                    argv.extend(cli_args(&name, args).map_err(|e| format!("{e:#}"))?);
+                    exec_self(
+                        &argv,
+                        &ExecOpts {
+                            ok_codes: vec![0, 1, 3],
+                            ..Default::default()
+                        },
+                    )
+                }),
             }
-        };
-        if let Some(resp) = handle(&req) {
-            if verbose {
-                eprintln!("-> {resp}");
-            }
-            writeln!(stdout, "{resp}")?;
-            stdout.flush()?;
-        }
-    }
-    Ok(())
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kit::AndroidDoctor;
+    use doctor_kit::mcp::handle;
+
+    fn doctor() -> AndroidDoctor {
+        AndroidDoctor {
+            gaps: Default::default(),
+        }
+    }
 
     fn req(method: &str, id: Option<i64>) -> Value {
         match id {
@@ -198,7 +139,7 @@ mod tests {
 
     #[test]
     fn initialize_advertises_tool_capability() {
-        let r = handle(&req("initialize", Some(1))).unwrap();
+        let r = handle(&doctor(), &req("initialize", Some(1))).unwrap();
         assert_eq!(r["id"], 1);
         assert_eq!(r["jsonrpc"], "2.0");
         assert!(r["result"]["capabilities"]["tools"].is_object());
@@ -207,7 +148,7 @@ mod tests {
 
     #[test]
     fn tools_list_returns_parseable_schemas() {
-        let r = handle(&req("tools/list", Some(2))).unwrap();
+        let r = handle(&doctor(), &req("tools/list", Some(2))).unwrap();
         let tools = r["result"]["tools"].as_array().unwrap();
         assert!(!tools.is_empty());
         for t in tools {
@@ -220,12 +161,12 @@ mod tests {
     #[test]
     fn a_notification_gets_no_response() {
         // No id means notification: answering would be wrong.
-        assert!(handle(&req("notifications/initialized", None)).is_none());
+        assert!(handle(&doctor(), &req("notifications/initialized", None)).is_none());
     }
 
     #[test]
     fn an_unknown_method_is_an_error_not_silence() {
-        let r = handle(&req("does/not/exist", Some(3))).unwrap();
+        let r = handle(&doctor(), &req("does/not/exist", Some(3))).unwrap();
         assert_eq!(r["error"]["code"], -32601);
         assert!(r["result"].is_null());
     }
@@ -238,7 +179,7 @@ mod tests {
             "method": "tools/call",
             "params": { "name": "identify", "arguments": {} }
         });
-        let r = handle(&call).unwrap();
+        let r = handle(&doctor(), &call).unwrap();
         assert_eq!(r["result"]["isError"], true);
         assert!(
             r["result"]["content"][0]["text"]
@@ -256,12 +197,7 @@ mod tests {
             "method": "tools/call",
             "params": { "name": "nope", "arguments": { "path": "/tmp" } }
         });
-        let r = handle(&call).unwrap();
+        let r = handle(&doctor(), &call).unwrap();
         assert_eq!(r["result"]["isError"], true);
-    }
-
-    #[test]
-    fn a_request_with_no_method_is_ignored_rather_than_panicking() {
-        assert!(handle(&json!({ "jsonrpc": "2.0", "id": 6 })).is_none());
     }
 }
