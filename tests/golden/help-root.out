@@ -24,6 +24,8 @@ Commands:
   fix         Scan, then hand the findings to a coding agent as one fix prompt
   ci          CI integration: write a GitHub Actions workflow that runs the android-doctor action
   mcp         Expose android-doctor over the Model Context Protocol (JSON-RPC on stdio)
+  shell       Browse the findings of a firmware directory or image in an interactive shell
+  explore     Browse the findings of a firmware directory or image in a full-screen explorer
   help        Print this message or the help of the given subcommand(s)
 
 Options:

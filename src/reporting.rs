@@ -88,13 +88,12 @@ pub fn emit(
     data: impl FnOnce() -> serde_json::Value,
     domain: impl FnOnce() -> Option<String>,
 ) -> anyhow::Result<()> {
-    let d = AndroidDoctor {
-        gaps: all
-            .iter()
+    let d = AndroidDoctor::with_gaps(
+        all.iter()
             .filter(|f| f.gap)
             .map(|f| f.fingerprint.clone())
             .collect(),
-    };
+    );
     let saved = args
         .baseline
         .as_deref()

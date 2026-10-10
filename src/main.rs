@@ -1,4 +1,6 @@
-use clap::{Parser, Subcommand};
+use clap::{Arg, ArgAction, ArgMatches, CommandFactory, Parser, Subcommand};
+use doctor_kit::{ExtCommand, Extensions, Meta};
+use kit::AndroidDoctor;
 use reporting::{Emit, ReportArgs, emit};
 use std::io::Write;
 use std::path::PathBuf;
@@ -544,10 +546,10 @@ pub fn print_out(text: &str) -> anyhow::Result<()> {
     }
 }
 
-fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+/// Run one parsed command. The error path (below, in `dispatch`) renders it once and picks the exit code.
+fn run_command(cli: Cli) -> anyhow::Result<()> {
     let no_color = cli.no_color;
-    let result = match cli.command {
+    match cli.command {
         Command::HashTree { input, output } => hash_tree_command(&input, output.as_deref()),
         Command::Extract {
             input,
@@ -683,35 +685,173 @@ fn main() -> anyhow::Result<()> {
                 fail_on,
             } => ci_install(&dir, print, force, &path, &fail_on),
         },
-        Command::Mcp { verbose } => doctor_kit::mcp::serve_verbose(
-            &kit::AndroidDoctor {
-                gaps: Default::default(),
-            },
-            verbose,
-        )
-        .map_err(Into::into),
-    };
-    // Unified error rendering (issue #77): a one-line headline, then the indented cause
-    // chain. Printed once, here, and the process exits non-zero - returning the error as
-    // well would make the runtime print it a second time.
-    match result {
-        Ok(()) => Ok(()),
-        Err(e) if e.downcast_ref::<reporting::Gate>().is_some() => {
-            eprintln!("{e}");
-            std::process::exit(
-                e.downcast_ref::<reporting::Gate>()
-                    .map_or(1, |g| i32::from(g.code.code())),
-            );
-        }
-        Err(e) => {
-            eprintln!(
-                "{}",
-                term::Renderer::new(term::Style::detect(no_color)).error(&e)
-            );
-            // doctor/1: the tool could not run (bad input, unreadable file) is 2.
-            std::process::exit(i32::from(doctor_core::ExitCode::Error.code()));
+        Command::Mcp { verbose } => {
+            doctor_kit::mcp::serve_verbose(&kit::AndroidDoctor::default(), verbose)
+                .map_err(Into::into)
         }
     }
+}
+
+/// Run a parsed command line and turn its outcome into the process exit code.
+fn dispatch(cli: Cli) -> u8 {
+    let no_color = cli.no_color;
+    // Unified error rendering (issue #77): a one-line headline, then the indented cause
+    // chain. Printed once, here.
+    match run_command(cli) {
+        Ok(()) => 0,
+        Err(e) => match e.downcast_ref::<reporting::Gate>() {
+            Some(g) => {
+                eprintln!("{e}");
+                g.code.code()
+            }
+            None => {
+                eprintln!(
+                    "{}",
+                    term::Renderer::new(term::Style::detect(no_color)).error(&e)
+                );
+                // doctor/1: the tool could not run (bad input, unreadable file) is 2.
+                doctor_core::ExitCode::Error.code()
+            }
+        },
+    }
+}
+
+type Ext = ExtCommand<AndroidDoctor>;
+
+fn run_cli(_: &AndroidDoctor, _: &ArgMatches) -> Result<u8, String> {
+    Ok(dispatch(Cli::parse()))
+}
+
+/// `scan` and `install` are doctor-kit's names for `doctor scan` / `doctor install`; they stay
+/// hidden aliases so the kit's commands exist but nothing new is advertised.
+fn run_alias(_: &AndroidDoctor, _: &ArgMatches) -> Result<u8, String> {
+    let mut argv: Vec<String> = std::env::args().collect();
+    if let Some(i) = argv
+        .iter()
+        .skip(1)
+        .position(|a| a == "scan" || a == "install")
+    {
+        argv.insert(i + 1, "doctor".into());
+    }
+    Ok(dispatch(Cli::parse_from(argv)))
+}
+
+#[cfg(feature = "shell")]
+fn shell_command() -> clap::Command {
+    clap::Command::new("shell")
+        .about("Browse the findings of a firmware directory or image in an interactive shell")
+        .arg(
+            Arg::new("input")
+                .required(true)
+                .value_parser(clap::value_parser!(PathBuf))
+                .help("Firmware directory or image"),
+        )
+        .arg(
+            Arg::new("command")
+                .short('c')
+                .help("Run these `;`-separated commands and exit"),
+        )
+        .arg(
+            Arg::new("json")
+                .long("json")
+                .action(ArgAction::SetTrue)
+                .help("Print every reply as one JSON record (for agents)"),
+        )
+}
+
+#[cfg(feature = "explore")]
+fn explore_command() -> clap::Command {
+    clap::Command::new("explore")
+        .about("Browse the findings of a firmware directory or image in a full-screen explorer")
+        .arg(
+            Arg::new("input")
+                .required(true)
+                .value_parser(clap::value_parser!(PathBuf))
+                .help("Firmware directory or image"),
+        )
+}
+
+/// `shell` and `explore` need something to look at; say so instead of showing an empty tree.
+#[cfg(any(feature = "shell", feature = "explore"))]
+fn subject_exists(d: &AndroidDoctor) -> Result<(), String> {
+    match &d.subject {
+        Some(p) if !p.exists() => Err(format!("{}: no such file or directory", p.display())),
+        _ => Ok(()),
+    }
+}
+
+fn extensions() -> Extensions<AndroidDoctor> {
+    // Built, so the global --no-color sits in each subcommand where clap always put it.
+    let mut root = Cli::command();
+    root.build();
+    let hidden = |path: &[&str], name: &'static str| {
+        let mut c = root.clone();
+        for p in path {
+            c = c.find_subcommand(p).expect("subcommand exists").clone();
+        }
+        c.name(name).hide(true)
+    };
+    let mut commands: Vec<Ext> = root
+        .get_subcommands()
+        .filter(|c| c.get_name() != "help")
+        .cloned()
+        .enumerate()
+        .map(|(i, c)| Ext {
+            command: c.display_order(i),
+            run: run_cli,
+        })
+        .collect();
+    commands.push(Ext {
+        command: hidden(&["doctor", "scan"], "scan"),
+        run: run_alias,
+    });
+    commands.push(Ext {
+        command: hidden(&["doctor", "install"], "install"),
+        run: run_alias,
+    });
+    #[cfg(feature = "shell")]
+    commands.push(Ext {
+        command: shell_command().display_order(100),
+        run: |d, m| {
+            subject_exists(d)?;
+            doctor_kit::repl::run(
+                d,
+                d.ctx(),
+                m.get_one::<String>("command").map(String::as_str),
+                m.get_flag("json"),
+            )
+        },
+    });
+    #[cfg(feature = "explore")]
+    commands.push(Ext {
+        command: explore_command().display_order(101),
+        run: |d, _| {
+            subject_exists(d)?;
+            doctor_kit::tui::run(d, d.ctx()).map(|_| 0)
+        },
+    });
+    Extensions {
+        commands,
+        global_args: vec![
+            Arg::new("no_color")
+                .long("no-color")
+                .action(ArgAction::SetTrue)
+                .help("Never emit colour, even on a terminal (also honours the NO_COLOR environment variable)"),
+        ],
+        ..Extensions::default()
+    }
+}
+
+fn main() -> std::process::ExitCode {
+    doctor_kit::run_with(Meta::of(&AndroidDoctor::default()), extensions(), |m| {
+        let mut d = AndroidDoctor::default();
+        if let Some((name, sm)) = m.subcommand()
+            && matches!(name, "shell" | "explore")
+        {
+            d.subject = sm.get_one::<PathBuf>("input").cloned();
+        }
+        Ok(d)
+    })
 }
 
 /// `partitions`: show a flash manifest and cross-check it against the images present.

@@ -3,15 +3,20 @@
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [0.5.0]
 
 ### Changed
+
+- Human output now uses doctor-kit faces; machine output is unchanged. `audit`, `doctor scan` and `diff` print the kit's `plain` face when piped and `rich` on a terminal; choose with the new `--face plain|rich|compact` and `--theme mono|clinical|contrast`. `audit` keeps its per-image report when piped without `--face`; `diff` keeps its file-change list ahead of the face. `--json`, `--sarif`, `--score`, fingerprints, exit codes (0/1/2/3), MCP tools and wire bytes, install file bodies and `--help` command names are byte-identical (pinned by `tests/golden.rs`).
+- The baseline loader, gate, MCP loop, agent launch for `fix` and symlink-safe writes now come from doctor-kit 0.2. Visible edges: a baseline object must carry `"schema": "doctor/1"` (bare arrays still work) and is capped at 16 MiB; `ci install` treats an identical existing workflow as a no-op, words the refusal "exists and differs", and `--force` no longer replaces a symlinked file; the MCP server answers `ping` and rejects a request with an id but no method (-32600); an MCP tool failure carries the child's stderr without the "(exit N)" suffix.
+- A command that fails with an error now always exits 2 with the one-line error (a few `?` paths used to exit 1 through the runtime).
 
 - Point URLs at the doctor-labs org (the repository moved from Vaibhav91one).
 - Use the shared `doctor-core` crate for the doctor/1 severity, exit codes, envelope, score shape, sanitizer and fingerprint instead of local copies. Output is byte-identical. The one visible difference: the sanitizer now also blanks soft hyphens and a few other invisible code points.
 
 ### Added
 
+- `shell <dir|image>` (interactive REPL, `-c "ls; scan"`, `--json` for agents) and `explore <dir|image>` (full-screen explorer) over the findings, from doctor-kit. Both are on by default; build with `--no-default-features` to leave them (and their dependencies) out. The tree is the kit's findings tree; a firmware file tree is not built yet.
 - `diff <old> <new>`: file-level comparison of two firmware builds (images or directories of
   images; ext2/3/4, erofs, f2fs). Reports added, removed, modified (SHA-256) and metadata-only
   (mode, owner, SELinux label, capability) file changes, plus property and init-service changes,

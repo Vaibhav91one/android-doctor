@@ -125,9 +125,7 @@ mod tests {
     use doctor_kit::mcp::handle;
 
     fn doctor() -> AndroidDoctor {
-        AndroidDoctor {
-            gaps: Default::default(),
-        }
+        AndroidDoctor::default()
     }
 
     fn req(method: &str, id: Option<i64>) -> Value {
