@@ -1,55 +1,47 @@
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.svg">
-    <img src="docs/assets/logo-light.svg" alt="android-doctor" width="360">
-  </picture>
-</p>
+<p align="center"><img src="docs/assets/hero.svg" alt="android-doctor illustration" width="100%"></p>
 
-<p align="center">
+<h1><img src="docs/assets/logo.svg" width="36" height="36" alt="" align="absmiddle"> android-doctor</h1>
+
+<p>
   <a href="https://github.com/doctor-labs/android-doctor/actions/workflows/ci.yml"><img src="https://github.com/doctor-labs/android-doctor/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://www.npmjs.com/package/android-doctor"><img src="https://img.shields.io/npm/v/android-doctor?style=flat&color=000000&labelColor=000000" alt="npm version"></a>
-  <a href="https://crates.io/crates/android-doctor"><img src="https://img.shields.io/crates/v/android-doctor?style=flat&color=000000&labelColor=000000" alt="crates.io version"></a>
-  <img src="https://img.shields.io/badge/Rust-2024-000000?style=flat&color=000000&labelColor=000000" alt="Rust 2024">
-  <img src="https://img.shields.io/badge/license-MIT-000000?style=flat&color=000000&labelColor=000000" alt="license MIT">
-  <img src="https://img.shields.io/badge/telemetry-none-000000?style=flat&color=000000&labelColor=000000" alt="telemetry none">
+  <a href="https://www.npmjs.com/package/android-doctor"><img src="https://img.shields.io/npm/v/android-doctor" alt="npm version"></a>
+  <a href="https://crates.io/crates/android-doctor"><img src="https://img.shields.io/crates/v/android-doctor" alt="crates.io version"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="license MIT"></a>
+  <img src="https://img.shields.io/badge/contract-doctor%2F1-19c3ab" alt="contract doctor/1">
+  <img src="https://img.shields.io/badge/telemetry-none-2fd27a" alt="telemetry none">
 </p>
 
-Extracts and audits Android OTA and firmware images, without running them.
+**Extracts and audits Android OTA and firmware images, without running them: is this build shipping a debuggable, rooted or unsigned configuration?**
 
 Firmware is a pile of containers inside containers: an OTA zip holds a
 `payload.bin`, which holds partitions, which hold ext4, erofs or f2fs trees, which
 hold init scripts and properties. `android-doctor` opens every layer, with no
-root, no mount and no device, and answers one question: **is this build
-shipping a debuggable, rooted or unsigned configuration?** Output is plain
-text for people and `--json` for agents.
+root, no mount and no device. Output is plain text for people and `--json` for agents.
 
-```sh
-npx android-doctor extract ota.zip -o out/
-android-doctor audit out/system.img
-android-doctor doctor scan out/
+```text
+$ android-doctor audit system.img
+ADB: ro.secure=0 ro.adb.secure=0 ro.debuggable=1 usb=mtp,adb: adbd can run as root
+
+== system (3 entries)
+[high] debuggable-build: ro.debuggable=1 in system/build.prop: adbd runs as root
+[high] insecure-adb: ro.secure=0 in system/build.prop: adbd keeps root
+[high] adb-unauthenticated: ro.adb.secure=0 in system/build.prop: ADB connections need no authorization
+[high] adb-root: service.adb.root=1 in system/build.prop
+[medium] test-keys: ro.build.tags=test-keys in system/build.prop: signed with public test keys
+[medium] debug-build-type: ro.build.type=userdebug in system/build.prop
+[medium] adb-by-default: persist.sys.usb.config=mtp,adb in system/build.prop: adb enabled by default
+properties:
+  ro.build.type=userdebug  (system/build.prop)
+  ro.build.tags=test-keys  (system/build.prop)
+  ro.secure=0  (system/build.prop)
+  ...
 ```
 
-## Contents
+(Real output: `system.img` built with `mke2fs -t ext4 -d tests/corpus/trees/debug-props/system.ext4 system.img 4M`, then `android-doctor audit system.img`, the property list is cut short.)
 
-- [Get started](#get-started)
-- [What it catches](#what-it-catches)
-- [Reports for CI: SARIF, baseline, score](#reports-for-ci-sarif-baseline-score)
-- [GitHub Action](#github-action)
-- [Agent integration](#agent-integration)
-- [CLI reference](#cli-reference)
-- [Format support](#format-support)
-- [What it will not tell you](#what-it-will-not-tell-you)
-- [Exit codes](#exit-codes)
-- [Privacy and telemetry](#privacy-and-telemetry)
-- [Build](#build)
-- [Third-party code and references](#third-party-code-and-references)
-- [License](#license)
+## Install
 
-## Get started
-
-### 1. Install
-
-Three ways to get it. The npm and crates.io packages are published from each
+Four ways to get it. The npm and crates.io packages are published from each
 tagged release together with the binaries.
 
 ```sh
@@ -91,6 +83,42 @@ The image is published to `ghcr.io/doctor-labs/android-doctor:v<version>` by
 the release workflow; there is no mutable `:latest`, matching how the GitHub
 Action pins the binary. (Writing output needs a writable mount, e.g.
 `-v "$PWD/out:/out" ... extract ota.zip -o /out`.)
+
+## Use
+
+| Command | What it does |
+| --- | --- |
+| `identify FILE` | say what a file is by its magic bytes |
+| `extract OTA -o out/` | write the partition images of an OTA zip, directory or `payload.bin` |
+| `audit IMAGE` | ADB properties, setuid files, `su`, init services, APK signing and manifests, ELF hardening |
+| `diff OLD NEW` | compare two builds; what got worse becomes findings |
+| `doctor scan DIR` | deterministic health scan of an unpacked firmware directory |
+| `fix DIR` | hand the findings to a coding agent as one fix prompt |
+| `--json` / `--sarif FILE` | doctor/1 envelope / SARIF 2.1.0 for code scanning |
+| `ci install` | write a GitHub Actions workflow that runs the action |
+| `mcp` | serve over the Model Context Protocol (stdio) |
+
+Other commands (`info`, `ls`, `cat`, `files`, `vbmeta`, `partitions`, `unpack`, `ramdisk`, `dt`, `amlogic`, `unsparse`, `report`, `hash-tree`) are in the [CLI reference](#cli-reference).
+
+## Contents
+
+- [Install](#install)
+- [Use](#use)
+- [Get started](#get-started)
+- [What it catches](#what-it-catches)
+- [Reports for CI: SARIF, baseline, score](#reports-for-ci-sarif-baseline-score)
+- [GitHub Action](#github-action)
+- [Agent integration](#agent-integration)
+- [CLI reference](#cli-reference)
+- [Format support](#format-support)
+- [What it will not tell you](#what-it-will-not-tell-you)
+- [Exit codes](#exit-codes)
+- [Privacy and telemetry](#privacy-and-telemetry)
+- [Build](#build)
+- [Third-party code and references](#third-party-code-and-references)
+- [License](#license)
+
+## Get started
 
 ### 2. Identify and extract
 
@@ -805,3 +833,7 @@ Not affiliated with or endorsed by Google. Android is a trademark of Google LLC.
 ## License
 
 MIT
+
+---
+
+Part of [doctor·labs](https://github.com/doctor-labs) — offline security doctors.
