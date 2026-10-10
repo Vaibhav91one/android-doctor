@@ -165,7 +165,7 @@ fn ci_install_writes_a_pinned_workflow_refuses_overwrite_and_honours_force() {
     );
     assert!(String::from_utf8_lossy(&out.stdout).starts_with("wrote "));
     let text = std::fs::read_to_string(&dest).unwrap();
-    assert!(text.contains(&format!("uses: Vaibhav91one/android-doctor@v{version}\n")));
+    assert!(text.contains(&format!("uses: doctor-labs/android-doctor@v{version}\n")));
     assert!(text.contains(&format!("version: {version}\n")));
     assert!(text.contains("path: 'out/fw'\n") && text.contains("fail-on: high\n"));
     assert!(text.contains("permissions:\n  contents: read\n"));

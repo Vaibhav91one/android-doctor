@@ -9,7 +9,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
-const REPO = "Vaibhav91one/android-doctor";
+const REPO = "doctor-labs/android-doctor";
 const TARGETS = {
   "darwin-arm64": "aarch64-apple-darwin",
   "darwin-x64": "x86_64-apple-darwin",

@@ -987,7 +987,7 @@ pub fn to_sarif(findings: &[Finding], score: &Score, baselined: bool) -> Value {
             "tool": {"driver": {
                 "name": "android-doctor",
                 "version": env!("CARGO_PKG_VERSION"),
-                "informationUri": "https://github.com/Vaibhav91one/android-doctor",
+                "informationUri": "https://github.com/doctor-labs/android-doctor",
                 "rules": rules,
             }},
             "results": results,

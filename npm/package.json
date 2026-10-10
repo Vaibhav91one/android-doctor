@@ -5,7 +5,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Vaibhav91one/android-doctor.git"
+    "url": "git+https://github.com/doctor-labs/android-doctor.git"
   },
   "bin": {
     "android-doctor": "bin/android-doctor.js"

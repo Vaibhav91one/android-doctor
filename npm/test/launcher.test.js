@@ -42,7 +42,7 @@ test("maps platforms to the release asset names", () => {
   assert.strictEqual(targetFor("win32", "x64"), null);
   assert.strictEqual(
     assetUrl("0.1.0", "aarch64-apple-darwin"),
-    "https://github.com/Vaibhav91one/android-doctor/releases/download/v0.1.0/android-doctor-aarch64-apple-darwin.tar.gz",
+    "https://github.com/doctor-labs/android-doctor/releases/download/v0.1.0/android-doctor-aarch64-apple-darwin.tar.gz",
   );
 });
 
