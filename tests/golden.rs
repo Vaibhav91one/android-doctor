@@ -19,7 +19,11 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const BIN: &str = env!("CARGO_BIN_EXE_android-doctor");
+/// The binary under test. `AD_GOLDEN_BIN=/path/to/older/android-doctor cargo test --test golden`
+/// replays the goldens against another build, to prove a refactor kept the behaviour.
+fn bin() -> String {
+    std::env::var("AD_GOLDEN_BIN").unwrap_or_else(|_| env!("CARGO_BIN_EXE_android-doctor").into())
+}
 
 struct Scratch(PathBuf);
 impl Scratch {
@@ -75,7 +79,7 @@ fn case(
     name: &str,
     args: &[&dyn AsRef<std::ffi::OsStr>],
 ) -> String {
-    let out = Command::new(BIN)
+    let out = Command::new(bin())
         .args(args.iter().map(|a| a.as_ref()))
         .env("NO_COLOR", "1")
         .env("COLUMNS", "100")
@@ -299,6 +303,111 @@ fn findings_commands() {
     golden("findings.exit", &codes);
 }
 
+/// Run the binary and snapshot exit code, stdout and stderr together (for cases whose stderr text
+/// is part of the behaviour being pinned) as one `<name>.out` section appended to `acc`.
+fn case_all(acc: &mut String, tmp: &Scratch, name: &str, args: &[&dyn AsRef<std::ffi::OsStr>]) {
+    let out = Command::new(bin())
+        .args(args.iter().map(|a| a.as_ref()))
+        .env("NO_COLOR", "1")
+        .env("COLUMNS", "100")
+        .output()
+        .unwrap();
+    writeln!(
+        acc,
+        "=== {name} (exit {})\n--- stdout\n{}--- stderr\n{}",
+        out.status.code().unwrap(),
+        norm(&String::from_utf8_lossy(&out.stdout), &tmp.0),
+        norm(&String::from_utf8_lossy(&out.stderr), &tmp.0)
+    )
+    .unwrap();
+}
+
+/// Which baseline files are accepted, and the exact words of the refusals (decision 6: the tool
+/// keeps its own baseline parsing: no `schema` requirement, no size cap).
+#[test]
+fn baseline_variants() {
+    let t = firmware("baseline-variants");
+    let fw = t.0.join("fw");
+    let json = Command::new(bin())
+        .args(["doctor", "scan"])
+        .arg(&fw)
+        .arg("--json")
+        .output()
+        .unwrap();
+    let env: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    let rows = env["findings"].clone();
+    let mut acc = String::new();
+    let cases: Vec<(&str, String)> = vec![
+        (
+            "object-without-schema",
+            serde_json::json!({"findings": rows}).to_string(),
+        ),
+        ("bare-array", rows.to_string()),
+        (
+            "other-schema-name",
+            serde_json::json!({"schema": "other/9", "findings": rows}).to_string(),
+        ),
+        ("empty-array", "[]".into()),
+        ("empty-findings", r#"{"findings":[]}"#.into()),
+        ("no-findings-key", r#"{"hello":"world"}"#.into()),
+        (
+            "row-without-fingerprint",
+            r#"[{"id":"x","severity":"warn"}]"#.into(),
+        ),
+        ("scalar", "42".into()),
+        ("not-json", "not json".into()),
+    ];
+    for (name, body) in cases {
+        let f = t.p(&format!("meta/{name}.json"));
+        std::fs::write(&f, body).unwrap();
+        case_all(
+            &mut acc,
+            &t,
+            &format!("doctor-scan {name}"),
+            &[&"doctor", &"scan", &fw, &"--baseline", &f, &"--json"],
+        );
+    }
+    case_all(
+        &mut acc,
+        &t,
+        "doctor-scan missing-file",
+        &[
+            &"doctor",
+            &"scan",
+            &fw,
+            &"--baseline",
+            &t.p("meta/nope.json"),
+        ],
+    );
+    // the human views under a baseline: nothing new, and only the new one
+    let own = t.p("meta/own.json");
+    std::fs::write(&own, &json.stdout).unwrap();
+    case_all(
+        &mut acc,
+        &t,
+        "doctor-scan human-all-known",
+        &[&"doctor", &"scan", &fw, &"--baseline", &own],
+    );
+    case_all(
+        &mut acc,
+        &t,
+        "audit human-baseline-empty",
+        &[
+            &"audit",
+            &t.p("fw/system.img"),
+            &"--baseline",
+            &t.p("meta/empty-array.json"),
+        ],
+    );
+    case_all(
+        &mut acc,
+        &t,
+        "audit never-gates-without-flags",
+        &[&"audit", &t.p("fw/system.img"), &"--score"],
+    );
+    golden("baseline-variants.out", &acc);
+}
+
 #[test]
 fn help_texts() {
     let t = Scratch::new("help");
@@ -360,7 +469,7 @@ fn mcp_transcript() {
         serde_json::json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"nope","arguments":{}}}),
         serde_json::json!({"jsonrpc":"2.0","id":7,"method":"nope/method"}),
     ];
-    let mut child = Command::new(BIN)
+    let mut child = Command::new(bin())
         .arg("mcp")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -419,7 +528,7 @@ fn install_bodies() {
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&proj).unwrap();
     std::fs::write(proj.join("AGENTS.md"), "# mine\n").unwrap();
-    let o = Command::new(BIN)
+    let o = Command::new(bin())
         .args(["doctor", "install"])
         .env("HOME", &home)
         .output()
@@ -430,7 +539,7 @@ fn install_bodies() {
         &norm(&String::from_utf8_lossy(&o.stdout), &t.0),
     );
     for agent in ["claude-code", "cursor", "codex", "opencode"] {
-        let o = Command::new(BIN)
+        let o = Command::new(bin())
             .args(["doctor", "install", "--agent", agent])
             .env("HOME", &home)
             .current_dir(&proj)
@@ -443,13 +552,13 @@ fn install_bodies() {
         );
     }
     // run twice: idempotent block upsert
-    Command::new(BIN)
+    Command::new(bin())
         .args(["doctor", "install", "--agent", "codex"])
         .env("HOME", &home)
         .current_dir(&proj)
         .output()
         .unwrap();
-    let o = Command::new(BIN)
+    let o = Command::new(bin())
         .args(["ci", "install", "--dir"])
         .arg(&proj)
         .output()
