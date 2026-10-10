@@ -375,7 +375,7 @@ fn doctor_scan(
                 shell_quote(&input.display().to_string())
             ),
             json,
-            fail_default: Some(findings::Severity::Error),
+            fail_default: Some(findings::Severity::Critical),
             no_color,
         },
         report,
@@ -695,7 +695,10 @@ fn main() -> anyhow::Result<()> {
         Ok(()) => Ok(()),
         Err(e) if e.downcast_ref::<reporting::Gate>().is_some() => {
             eprintln!("{e}");
-            std::process::exit(e.downcast_ref::<reporting::Gate>().map_or(1, |g| g.code));
+            std::process::exit(
+                e.downcast_ref::<reporting::Gate>()
+                    .map_or(1, |g| i32::from(g.code.code())),
+            );
         }
         Err(e) => {
             eprintln!(
@@ -703,7 +706,7 @@ fn main() -> anyhow::Result<()> {
                 term::Renderer::new(term::Style::detect(no_color)).error(&e)
             );
             // doctor/1: the tool could not run (bad input, unreadable file) is 2.
-            std::process::exit(2);
+            std::process::exit(i32::from(doctor_core::ExitCode::Error.code()));
         }
     }
 }
@@ -720,7 +723,7 @@ fn partitions_command(input: &std::path::Path, sector_size: u64, json: bool) -> 
     // A manifest that references a missing image is not a usable firmware set.
     if !m.missing_images.is_empty() {
         return Err(reporting::Gate {
-            code: 1,
+            code: doctor_core::ExitCode::Findings,
             message: format!(
                 "{} manifest image(s) are missing from {}",
                 m.missing_images.len(),
@@ -844,7 +847,7 @@ fn vbmeta_command(
     print_out(&text)?;
     if meta.any_failure(&checks) {
         return Err(reporting::Gate {
-            code: 1,
+            code: doctor_core::ExitCode::Findings,
             message: "the digest, signature, or a partition hash does not match".into(),
         }
         .into());

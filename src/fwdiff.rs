@@ -257,7 +257,7 @@ fn security_findings(old: &ImageAudit, new: &ImageAudit, d: &ImageDiff) -> Vec<F
         }
         add(
             format!("diff-{}", f.rule),
-            Severity::from_audit(f.severity),
+            f.severity.unified(),
             s,
             k,
             format!("new in this build: {}", f.detail),
@@ -315,7 +315,7 @@ fn security_findings(old: &ImageAudit, new: &ImageAudit, d: &ImageDiff) -> Vec<F
             add(
                 "diff-root-service".into(),
                 if s.disabled {
-                    Severity::Warn
+                    Severity::Low
                 } else {
                     Severity::Medium
                 },
