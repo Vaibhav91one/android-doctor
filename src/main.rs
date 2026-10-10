@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use reporting::{Emit, ReportArgs, emit, shell_quote};
+use reporting::{Emit, ReportArgs, emit};
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -27,6 +27,7 @@ mod fwdiff;
 mod hashtree;
 mod huawei;
 mod info;
+mod kit;
 mod lgkdz;
 mod libbrotli;
 mod lp;
@@ -369,19 +370,15 @@ fn doctor_scan(
     let all = findings::from_doctor(doctor::scan_scoped(input)?);
     emit(
         Emit {
-            title: display_name(input),
-            command: format!(
-                "android-doctor doctor scan {}",
-                shell_quote(&input.display().to_string())
-            ),
             json,
             fail_default: Some(findings::Severity::Critical),
             no_color,
+            domain_replaces_face: false,
         },
         report,
         all,
         || serde_json::json!({}),
-        findings::render_flat,
+        || None,
     )
 }
 /// `doctor install`: write the agent skill, or show where it would go.
@@ -694,7 +691,10 @@ fn main() -> anyhow::Result<()> {
     match result {
         Ok(()) => Ok(()),
         Err(e) if e.downcast_ref::<reporting::Gate>().is_some() => {
-            eprintln!("{e}");
+            // an empty message: the kit already said what went wrong
+            if !e.to_string().is_empty() {
+                eprintln!("{e}");
+            }
             std::process::exit(
                 e.downcast_ref::<reporting::Gate>()
                     .map_or(1, |g| i32::from(g.code.code())),
@@ -923,35 +923,20 @@ fn audit_command(
         .map(|p| audit::audit_image(p))
         .collect::<anyhow::Result<Vec<_>>>()?;
     let all = findings::from_audit(&audits);
-    let command = format!(
-        "android-doctor audit {}",
-        images
-            .iter()
-            .map(|p| shell_quote(&p.display().to_string()))
-            .collect::<Vec<_>>()
-            .join(" ")
-    );
     let baselined = report.baseline.is_some();
     emit(
         Emit {
-            title: images.first().map(|p| display_name(p)).unwrap_or_default(),
-            command,
             json,
             fail_default: None,
             no_color,
+            domain_replaces_face: true,
         },
         report,
         all,
         // The per-image detail (adb summary, properties, services, APKs, ELF...) lives under `data`.
         || audit::to_json(&audits),
         // Without a baseline the familiar per-image report; with one, only what is new.
-        |shown| {
-            if baselined {
-                findings::render_flat(shown)
-            } else {
-                audit::to_text(&audits, no_color)
-            }
-        },
+        || (!baselined).then(|| audit::to_text(&audits, no_color)),
     )
 }
 
@@ -973,30 +958,18 @@ fn diff_command(
         );
     }
     let r = fwdiff::run(old, new)?;
-    let command = format!(
-        "android-doctor diff {} {}",
-        shell_quote(&old.display().to_string()),
-        shell_quote(&new.display().to_string())
-    );
     emit(
         Emit {
-            title: display_name(new),
-            command,
             json,
             // A diff lists only what the new build introduced, so gating on high is safe.
             fail_default: Some(findings::Severity::High),
             no_color,
+            domain_replaces_face: false,
         },
         report,
         r.findings,
         || fwdiff::to_json(&r.images, only),
-        |shown| {
-            format!(
-                "{}\n{}",
-                fwdiff::to_text(&r.images, only),
-                findings::render_flat(shown)
-            )
-        },
+        || Some(fwdiff::to_text(&r.images, only)),
     )
 }
 

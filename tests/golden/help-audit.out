@@ -12,4 +12,6 @@ Options:
       --sarif <FILE>        Also write the findings as SARIF 2.1.0 to FILE
       --baseline <FILE>     Report only findings that are not in FILE, a previous `--json` report; exit 3 if there are new ones
       --fail-on <SEVERITY>  Exit 1 when a finding is at or above this severity (critical, high, medium, low, info); with --baseline, exit 3 when a new one is. Default: critical for `doctor scan`, never for `audit`; with --baseline, low for both
+      --face <FACE>         Layout of the human output: plain, rich or compact (default: rich on a terminal, plain when piped) [possible values: plain, rich, compact]
+      --theme <NAME>        Colours of the human output: mono, clinical or contrast
   -h, --help                Print help

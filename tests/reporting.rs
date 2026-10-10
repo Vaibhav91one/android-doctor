@@ -254,7 +254,7 @@ fn sarif_to_an_unwritable_path_is_an_error() {
         d.join("no/such/dir/x.sarif")
     );
     assert_eq!(o.code, 2);
-    assert!(o.stderr.contains("cannot write SARIF"), "{}", o.stderr);
+    assert!(o.stderr.contains("x.sarif"), "{}", o.stderr);
 }
 
 // --- --score ---------------------------------------------------------------------------------
@@ -310,17 +310,24 @@ fn score_conflicts_with_json_and_json_gains_a_score_for_audit() {
 }
 
 #[test]
-fn piped_doctor_output_is_still_the_flat_list_and_json_rows_keep_their_keys() {
+fn piped_doctor_output_is_the_plain_face_and_json_rows_keep_their_keys() {
     let d = firmware("flat");
     let o = run!("doctor", "scan", d.as_path());
     assert_eq!(o.code, 0);
+    // piped: the plain face, one line per finding
+    let line = o
+        .stdout
+        .lines()
+        .find(|l| l.contains("unhandled_input"))
+        .unwrap_or_default();
     assert!(
-        o.stdout
-            .contains("low security unhandled_input: mystery.bin: no handler for this file"),
+        line.starts_with("low")
+            && line.contains("mystery.bin")
+            && line.contains("no handler for this file"),
         "{}",
         o.stdout
     );
-    assert!(!o.stdout.contains("Next steps"), "no digest when piped");
+    assert!(!o.stdout.contains('╭'), "no boxed report when piped");
     let o = run!("doctor", "scan", d.as_path(), "--json");
     let rows = json(&o.stdout);
     let row = &rows["findings"].as_array().unwrap()[0];

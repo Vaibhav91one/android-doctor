@@ -51,8 +51,9 @@ Install the skill for an agent with `android-doctor doctor install --agent <clau
     src/oem.rs         OEM firmware containers (shared sniff/list/extract); huawei.rs, lgkdz.rs, sonysin.rs readers
     src/doctor.rs      health-scan rules
     src/elf.rs         ELF hardening triage (PIE, NX, RELRO, canary, FORTIFY) used by `audit`
-    src/findings.rs    shared finding model: severity scale, fingerprint, score, baseline, SARIF, digest
-    src/reporting.rs   the flags and exit status shared by `audit` and `doctor scan`
+    src/findings.rs    shared finding model: severity scale, fingerprint, score, SARIF
+    src/reporting.rs   the flags, baseline/exit status and human views shared by `audit`, `doctor scan`, `diff`
+    src/kit.rs         the doctor-kit `Doctor` impl (baseline hooks, JSON rendering)
     tests/e2e.rs       CLI subprocess tests; tests/hostile_sweep.rs corrupted-input sweep
     tests/corpus.rs    precision gate: generated fixtures vs snapshots, see docs/precision.md
     vendor/            vendored code, see THIRD_PARTY.md
@@ -66,7 +67,7 @@ Install the skill for an agent with `android-doctor doctor install --agent <clau
 4. Write output to a `.part` file and rename on success; never write through symlinks; refuse to
    overwrite without `--force`.
 5. Only adapt code from permissive licenses, and credit it in `THIRD_PARTY.md`.
-6. No new crate for what a few lines of std can do.
+6. No new crate for what a few lines of std can do. Exception: `doctor-kit` (baseline, faces, MCP, shell), the shared runtime of the doctor tools.
 7. A new format or rule needs a row in the README Format support table with an honest status
    (`verified` only if checked against an independent reference tool on real data).
 8. A new or changed rule needs a firing case in `tests/corpus/` and an updated snapshot
