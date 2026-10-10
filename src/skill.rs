@@ -4,7 +4,7 @@
 //! having to read the source.
 
 use anyhow::{Context, Result};
-use doctor_kit::install::{Overwrite, put_safe};
+use doctor_kit::install::{Overwrite, put_safe, upsert_block_with};
 use std::path::PathBuf;
 
 /// Agents we know how to install a skill for, with their config directory.
@@ -107,19 +107,21 @@ pub fn install_project(agent: Agent, root: &std::path::Path) -> Result<Option<Pa
         }
         Agent::Codex | Agent::Opencode => {
             let old = std::fs::read_to_string(root.join("AGENTS.md")).unwrap_or_default();
-            let block = format!("{BLOCK_BEGIN}\n{SKILL_BODY}\n{BLOCK_END}\n");
-            let new = match (old.find(BLOCK_BEGIN), old.find(BLOCK_END)) {
-                (Some(b), Some(e)) if b < e => {
-                    format!(
-                        "{}{}{}",
-                        &old[..b],
-                        block,
-                        old[e + BLOCK_END.len()..].trim_start_matches('\n')
-                    )
+            // The block has always ended with a blank line; the text after a replaced block has
+            // always lost its leading blank lines, and a block appended to a file is always
+            // separated by exactly one blank line. The kit keeps the file's own blank lines.
+            let old = match old.find(BLOCK_END) {
+                Some(e) if old.contains(BLOCK_BEGIN) => {
+                    let (head, rest) = old.split_at(e + BLOCK_END.len());
+                    match rest.trim_start_matches('\n') {
+                        "" => head.to_string(),
+                        tail => format!("{head}\n{tail}"),
+                    }
                 }
-                _ if old.is_empty() => block,
-                _ => format!("{}\n\n{}", old.trim_end(), block),
+                _ if old.is_empty() => old,
+                _ => format!("{}\n", old.trim_end()),
             };
+            let new = upsert_block_with(&old, BLOCK_BEGIN, BLOCK_END, &format!("{SKILL_BODY}\n"));
             put_safe(root, &["AGENTS.md"], &new, Overwrite::Always)
                 .map_err(|e| anyhow::anyhow!(e))?
         }
