@@ -163,10 +163,9 @@ jobs:
         let p = write(&s, "one\n", false).unwrap();
         assert!(p.ends_with(".github/workflows/android-doctor.yml"));
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "one\n");
-        assert_eq!(
-            write(&s, "one\n", false).unwrap(),
-            p,
-            "identical is a no-op"
+        assert!(
+            write(&s, "one\n", false).is_err(),
+            "even identical content is refused"
         );
         let err = write(&s, "two\n", false).unwrap_err().to_string();
         assert!(
