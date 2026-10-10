@@ -691,7 +691,10 @@ fn main() -> anyhow::Result<()> {
     match result {
         Ok(()) => Ok(()),
         Err(e) if e.downcast_ref::<reporting::Gate>().is_some() => {
-            eprintln!("{e}");
+            // an empty message: the kit already said what went wrong
+            if !e.to_string().is_empty() {
+                eprintln!("{e}");
+            }
             std::process::exit(
                 e.downcast_ref::<reporting::Gate>()
                     .map_or(1, |g| i32::from(g.code.code())),
