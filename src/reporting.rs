@@ -2,8 +2,12 @@
 //! the output views and the exit status. The finding model itself lives in `findings.rs`.
 
 use crate::findings::{self, Finding, Severity};
+use crate::kit::AndroidDoctor;
 use crate::term;
-use doctor_core::{BaselineState, ExitCode};
+use clap::ValueEnum;
+use doctor_core::{BaselineState, Envelope, ExitCode, Finding as CoreFinding};
+use doctor_kit::{Doctor, Face, Theme, baseline};
+use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
@@ -41,42 +45,33 @@ pub struct ReportArgs {
     /// `audit`; with --baseline, low for both
     #[arg(long, value_name = "SEVERITY", value_parser = findings::parse_fail_on)]
     pub fail_on: Option<Severity>,
+    /// Layout of the human output: plain, rich or compact (default: rich on a terminal, plain
+    /// when piped)
+    #[arg(long, value_name = "FACE", value_parser = ["plain", "rich", "compact"])]
+    pub face: Option<String>,
+    /// Colours of the human output: mono, clinical or contrast
+    #[arg(long, value_name = "NAME")]
+    pub theme: Option<String>,
 }
 
-/// What differs between `audit` and `doctor scan`.
+/// What differs between `audit`, `doctor scan` and `diff`.
 pub struct Emit {
-    pub title: String,
-    /// The command line to repeat, without flags (for "Next steps").
-    pub command: String,
     pub json: bool,
     /// The `--fail-on` threshold when none is given and there is no baseline (None = never fail).
     pub fail_default: Option<Severity>,
     pub no_color: bool,
+    /// The command's own text (the per-image report, the file changes) replaces the face when
+    /// piped without `--face`; when false it is printed ahead of the face.
+    pub domain_replaces_face: bool,
 }
 
-/// Single-quote a word for a shell when it has anything but safe characters.
-pub fn shell_quote(s: &str) -> String {
-    let safe = |c: char| c.is_ascii_alphanumeric() || "_./-:+=@,".contains(c);
-    if !s.is_empty() && s.chars().all(safe) {
-        s.to_string()
-    } else {
-        format!("'{}'", s.replace('\'', "'\\''"))
-    }
-}
-
-/// The exact commands the digest points at.
-pub fn next_steps(command: &str, baselined: bool) -> Vec<String> {
-    if baselined {
-        vec![
-            format!("{command} --json > baseline.json"),
-            format!("{command} --sarif report.sarif"),
-        ]
-    } else {
-        vec![
-            format!("{command} --json > baseline.json"),
-            format!("{command} --baseline baseline.json"),
-        ]
-    }
+/// Control and bidi characters of hostile firmware must not reach a terminal.
+fn clean_for_terminal(f: &mut CoreFinding) {
+    f.id = term::sanitize(&f.id);
+    f.category = term::sanitize(&f.category);
+    f.message = term::sanitize(&f.message);
+    f.remedy = f.remedy.as_deref().map(term::sanitize);
+    f.location.reference = term::sanitize(&f.location.reference);
 }
 
 /// Score, mark findings against the baseline, write SARIF, print the chosen view, and decide
@@ -85,85 +80,121 @@ pub fn next_steps(command: &str, baselined: bool) -> Vec<String> {
 /// Exit status (doctor/1): a hard error (unreadable input, baseline or SARIF target) is 2 and
 /// prints no report. Otherwise, without `--baseline`, 1 if a finding is at or above the
 /// `--fail-on` threshold; with it, 3 if a *new* finding is, else 0. `--json` prints every
-/// finding (with `baseline_state` under a baseline); the text views list only the new ones.
+/// finding (with `baseline_state` under a baseline); the human views list only the new ones.
 pub fn emit(
     e: Emit,
     args: &ReportArgs,
     all: Vec<Finding>,
     data: impl FnOnce() -> serde_json::Value,
-    flat_text: impl FnOnce(&[Finding]) -> String,
+    domain: impl FnOnce() -> Option<String>,
 ) -> anyhow::Result<()> {
-    // The score is the health of the whole scan, whatever a baseline hides from the listing.
-    let score = findings::score(&all);
-    let baseline = args
+    let d = AndroidDoctor {
+        gaps: all
+            .iter()
+            .filter(|f| f.gap)
+            .map(|f| f.fingerprint.clone())
+            .collect(),
+    };
+    let saved = args
         .baseline
         .as_deref()
-        .map(findings::read_baseline)
-        .transpose()?;
-    let diff = baseline.as_ref().map(|b| b.diff(all.clone()));
-    let (shown, suppressed) = match &diff {
-        Some(d) => (
-            d.all
-                .iter()
-                .filter(|f| f.baseline_state == Some(BaselineState::New))
-                .cloned()
-                .collect(),
-            d.unchanged,
-        ),
-        None => (all.clone(), 0),
+        .map(|p| baseline::load_for(&d, p))
+        .transpose()
+        .map_err(|f| anyhow::anyhow!(f.to_string()))?;
+    // The score is the health of the whole scan, whatever a baseline hides from the listing.
+    let score = findings::score(&all);
+    let mut rows: Vec<CoreFinding> = all.iter().map(Finding::to_core).collect();
+    CoreFinding::sort(&mut rows);
+    let mut env = Envelope::new(
+        d.name(),
+        d.version(),
+        0,
+        score.clone(),
+        rows,
+        serde_json::json!({}),
+    );
+    let counts = saved.as_ref().map(|s| baseline::apply(&d, &mut env, s));
+    let (min, code) = match &counts {
+        Some(_) => {
+            let min = args.fail_on.unwrap_or(Severity::Low);
+            (Some(min), baseline::gate(&d, &env, min, true))
+        }
+        None => {
+            let min = args.fail_on.or(e.fail_default);
+            (min, min.map_or(0, |m| baseline::gate(&d, &env, m, false)))
+        }
     };
-    let (min, gated) = if diff.is_some() {
-        let min = args.fail_on.unwrap_or(Severity::Low);
-        (Some(min), findings::gates(&shown, min, true))
-    } else {
-        let min = args.fail_on.or(e.fail_default);
-        (min, min.is_some_and(|m| findings::gates(&shown, m, false)))
+    env.exit_code = code;
+    let exit = match (code, counts.is_some()) {
+        (0, _) => ExitCode::Ok,
+        (_, true) => ExitCode::NewFindings,
+        (_, false) => ExitCode::Findings,
+    };
+    let shown_rows: Vec<CoreFinding> = env
+        .findings
+        .iter()
+        .filter(|f| counts.is_none() || f.baseline_state == Some(BaselineState::New))
+        .cloned()
+        .collect();
+    let shown: Vec<Finding> = {
+        let keep: HashSet<&str> = shown_rows.iter().map(|f| f.fingerprint.as_str()).collect();
+        all.iter()
+            .filter(|f| keep.contains(f.fingerprint.as_str()))
+            .cloned()
+            .collect()
     };
     let new = shown.iter().filter(|f| !f.gap).count();
-    let exit = match (gated, diff.is_some()) {
-        (false, _) => ExitCode::Ok,
-        (true, true) => ExitCode::NewFindings,
-        (true, false) => ExitCode::Findings,
-    };
     if let Some(path) = &args.sarif {
-        let doc = findings::to_sarif(&shown, &score, baseline.is_some());
+        let doc = findings::to_sarif(&shown, &score, counts.is_some());
         std::fs::write(path, serde_json::to_string_pretty(&doc)?)
             .map_err(|err| anyhow::anyhow!("cannot write SARIF to {}: {err}", path.display()))?;
     }
     // Coverage gaps are always listed (a baseline cannot vouch for a rule that did not run), so
     // they are counted apart from the new findings.
     let gaps = shown.iter().filter(|f| f.gap).count();
-    let note = baseline.as_ref().map(|b| {
+    let note = counts.map(|c| {
         let listed = match gaps {
             0 => String::new(),
             n => format!(", {n} coverage gap(s) listed"),
         };
         format!(
-            "baseline {}: {suppressed} suppressed as known, {new} new{listed}",
-            b.path
+            "baseline {}: {} suppressed as known, {new} new{listed}",
+            args.baseline
+                .as_deref()
+                .map_or_else(String::new, |p| p.display().to_string()),
+            c.unchanged
         )
     });
     if args.score {
         crate::print_out(&score.value.to_string())?;
     } else if e.json {
-        let v = findings::envelope(
-            exit,
-            &score,
-            diff.as_ref().map_or(&all, |d| &d.all),
-            diff.as_ref(),
-            data(),
-        );
-        crate::print_out(&serde_json::to_string_pretty(&v)?)?;
-    } else if std::io::stdout().is_terminal() && args.sarif.is_none() {
-        let next = next_steps(&e.command, baseline.is_some());
-        let r = term::Renderer::new(term::Style::detect(e.no_color));
-        let mut text = findings::render_digest(&e.title, &shown, &score, &next, r);
-        if let Some(n) = &note {
-            text.push_str(&format!("\n{n}"));
-        }
-        crate::print_out(&text)?;
+        env.data = data();
+        crate::print_out(d.render_json(&env).trim_end())?;
     } else {
-        let mut text = flat_text(&shown);
+        let tty = std::io::stdout().is_terminal();
+        let face_text = || -> anyhow::Result<String> {
+            let mut view = env.clone();
+            view.findings = shown_rows.clone();
+            view.findings.iter_mut().for_each(clean_for_terminal);
+            let mut theme = match &args.theme {
+                Some(n) => Theme::by_name(n).ok_or_else(|| {
+                    anyhow::anyhow!("unknown theme {n:?}: use mono, clinical or contrast")
+                })?,
+                None => d.theme(),
+            };
+            theme.enabled = term::Style::detect(e.no_color).color();
+            let face = args
+                .face
+                .as_deref()
+                .and_then(|f| Face::from_str(f, false).ok())
+                .unwrap_or(if tty { Face::Rich } else { Face::Plain });
+            Ok(doctor_kit::face::render(face, &view, &theme))
+        };
+        let mut text = match domain() {
+            Some(t) if e.domain_replaces_face && !tty && args.face.is_none() => t,
+            Some(t) if !e.domain_replaces_face => format!("{t}\n{}", face_text()?.trim_end()),
+            _ => face_text()?.trim_end().to_string(),
+        };
         if let Some(n) = &note {
             if shown.is_empty() {
                 text = "no new findings".to_string();
@@ -202,23 +233,6 @@ pub fn emit(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn shell_quote_leaves_safe_words_and_quotes_the_rest() {
-        assert_eq!(shell_quote("out/fw-1.2"), "out/fw-1.2");
-        assert_eq!(shell_quote("my fw"), "'my fw'");
-        assert_eq!(shell_quote("it's"), "'it'\\''s'");
-        assert_eq!(shell_quote(""), "''");
-    }
-
-    #[test]
-    fn next_steps_name_the_baseline_commands() {
-        let n = next_steps("android-doctor doctor scan fw", false);
-        assert!(n[0].contains("--json > baseline.json"));
-        assert!(n[1].contains("--baseline baseline.json"));
-        let n = next_steps("android-doctor doctor scan fw", true);
-        assert!(n[1].contains("--sarif report.sarif"));
-    }
 
     #[test]
     fn a_gate_displays_its_message() {
