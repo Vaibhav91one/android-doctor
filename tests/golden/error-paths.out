@@ -1,0 +1,106 @@
+=== unpack (exit 2)
+--- stdout
+--- stderr
+opening <TMP>/nope.img
+  caused by: No such file or directory (os error 2)
+
+=== amlogic (exit 2)
+--- stdout
+--- stderr
+reading <TMP>/nope.img
+  caused by: No such file or directory (os error 2)
+
+=== report (exit 2)
+--- stdout
+--- stderr
+opening <TMP>/nope.img
+  caused by: No such file or directory (os error 2)
+
+=== identify (exit 2)
+--- stdout
+<TMP>/nope.img: error: opening <TMP>/nope.img: No such file or directory (os error 2)
+--- stderr
+1 of 1 paths could not be read
+
+=== info (exit 2)
+--- stdout
+--- stderr
+opening <TMP>/nope.img
+  caused by: No such file or directory (os error 2)
+
+=== ls (exit 2)
+--- stdout
+--- stderr
+opening <TMP>/nope.img
+  caused by: No such file or directory (os error 2)
+
+=== cat (exit 2)
+--- stdout
+--- stderr
+opening <TMP>/nope.img
+  caused by: No such file or directory (os error 2)
+
+=== vbmeta (exit 2)
+--- stdout
+--- stderr
+opening <TMP>/nope.img
+  caused by: No such file or directory (os error 2)
+
+=== audit (exit 2)
+--- stdout
+--- stderr
+opening <TMP>/nope.img
+  caused by: No such file or directory (os error 2)
+
+=== doctor scan (exit 2)
+--- stdout
+--- stderr
+No such file or directory (os error 2)
+
+=== dt (exit 2)
+--- stdout
+--- stderr
+opening <TMP>/nope.img
+  caused by: No such file or directory (os error 2)
+
+=== ramdisk (exit 2)
+--- stdout
+--- stderr
+opening <TMP>/nope.img
+  caused by: No such file or directory (os error 2)
+
+=== files (exit 2)
+--- stdout
+--- stderr
+opening <TMP>/nope.img
+  caused by: No such file or directory (os error 2)
+
+=== hash-tree (exit 2)
+--- stdout
+--- stderr
+No such file or directory (os error 2)
+
+=== fix (exit 2)
+--- stdout
+--- stderr
+No such file or directory (os error 2)
+
+=== usage (exit 2)
+--- stdout
+--- stderr
+error: the following required arguments were not provided:
+  <IMAGES>...
+
+Usage: android-doctor audit <IMAGES>...
+
+For more information, try '--help'.
+
+=== unknown-command (exit 2)
+--- stdout
+--- stderr
+error: unrecognized subcommand 'frobnicate'
+
+Usage: android-doctor [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+

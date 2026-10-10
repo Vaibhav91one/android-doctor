@@ -3,7 +3,7 @@
 //! tool call to CLI arguments.
 use anyhow::Result;
 use doctor_kit::McpTool;
-use doctor_kit::mcp::{ExecOpts, exec_self};
+use doctor_kit::mcp::{ExecOpts, exec_self_fmt};
 use serde_json::{Value, json};
 
 /// Flags the findings tools accept besides the target path(s). Excluded over MCP: `--json`
@@ -105,12 +105,15 @@ pub fn tools() -> Vec<McpTool> {
                 call: Box::new(move |args| {
                     let mut argv = vec!["--no-color".to_string()];
                     argv.extend(cli_args(&name, args).map_err(|e| format!("{e:#}"))?);
-                    exec_self(
+                    exec_self_fmt(
                         &argv,
                         &ExecOpts {
                             ok_codes: vec![0, 1, 3],
+                            // the CLI's output was never capped or timed
+                            max_bytes: usize::MAX / 2,
                             ..Default::default()
                         },
+                        Some("{stderr} (exit {code})"),
                     )
                 }),
             }

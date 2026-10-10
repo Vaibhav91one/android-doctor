@@ -701,7 +701,10 @@ fn dispatch(cli: Cli) -> u8 {
         Ok(()) => 0,
         Err(e) => match e.downcast_ref::<reporting::Gate>() {
             Some(g) => {
-                eprintln!("{e}");
+                // an empty message: the kit already said what went wrong
+                if !g.message.is_empty() {
+                    eprintln!("{e}");
+                }
                 g.code.code()
             }
             None => {

@@ -1,0 +1,30 @@
+=== shell-tree (exit 0)
+--- stdout
+quality        category  8 findings
+security       category  2 findings
+images         images    the images and their files
+system         image     <TMP>/fw/system.img
+vendor         image     <TMP>/fw/vendor.img
+build.prop     file      0644 0:0 55 bytes
+etc            dir       0755 0:0 0 bytes
+xbin           dir       0755 0:0 0 bytes
+old.log        file      0644 0:0 3 bytes
+old.log (file) 0644 0:0 3 bytes
+log
+/images/system/etc
+2              finding   low       unhandled_input        mystery.bin
+3              finding   info      avb_signature          vbmeta.img
+--- stderr
+
+=== shell-json (exit 0)
+--- stdout
+{"command":"cd images","cwd":"/images","data":{"cwd":"/images"},"error":null,"ok":true,"schema":"doctor-shell/1","tool":"android-doctor"}
+{"command":"ls","cwd":"/images","data":[{"actions":0,"children":0,"kind":"image","name":"system","summary":"<TMP>/fw/system.img"}],"error":null,"ok":true,"schema":"doctor-shell/1","tool":"android-doctor"}
+{"command":"info","cwd":"/images","data":{"actions":[],"children":1,"kind":"images","meta":{},"name":"images","raw_hex":null,"summary":"the images and their files"},"error":null,"ok":true,"schema":"doctor-shell/1","tool":"android-doctor"}
+--- stderr
+
+=== shell-missing (exit 2)
+--- stdout
+--- stderr
+error: <TMP>/nope: no such file or directory
+

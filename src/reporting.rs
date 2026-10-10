@@ -2,12 +2,11 @@
 //! the output views and the exit status. The finding model itself lives in `findings.rs`.
 
 use crate::findings::{self, Finding, Severity};
-use crate::kit::AndroidDoctor;
-use crate::term;
+use crate::kit::{AndroidDoctor, Report};
 use clap::ValueEnum;
-use doctor_core::{BaselineState, Envelope, ExitCode, Finding as CoreFinding};
-use doctor_kit::{Doctor, Face, Theme, baseline};
-use std::collections::HashSet;
+use doctor_core::{Envelope, ExitCode, Finding as CoreFinding};
+use doctor_kit::Face;
+use doctor_kit::output::{Color, FinishOpts, OutputArgs, finish_with, preflight, report_failure};
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
@@ -65,17 +64,8 @@ pub struct Emit {
     pub domain_replaces_face: bool,
 }
 
-/// Control and bidi characters of hostile firmware must not reach a terminal.
-fn clean_for_terminal(f: &mut CoreFinding) {
-    f.id = term::sanitize(&f.id);
-    f.category = term::sanitize(&f.category);
-    f.message = term::sanitize(&f.message);
-    f.remedy = f.remedy.as_deref().map(term::sanitize);
-    f.location.reference = term::sanitize(&f.location.reference);
-}
-
 /// Score, mark findings against the baseline, write SARIF, print the chosen view, and decide
-/// the exit.
+/// the exit, all through doctor-kit's `finish_with`.
 ///
 /// Exit status (doctor/1): a hard error (unreadable input, baseline or SARIF target) is 2 and
 /// prints no report. Otherwise, without `--baseline`, 1 if a finding is at or above the
@@ -88,145 +78,117 @@ pub fn emit(
     data: impl FnOnce() -> serde_json::Value,
     domain: impl FnOnce() -> Option<String>,
 ) -> anyhow::Result<()> {
-    let d = AndroidDoctor::with_gaps(
-        all.iter()
-            .filter(|f| f.gap)
-            .map(|f| f.fingerprint.clone())
-            .collect(),
-    );
-    let saved = args
-        .baseline
-        .as_deref()
-        .map(|p| baseline::load_for(&d, p))
-        .transpose()
-        .map_err(|f| anyhow::anyhow!(f.to_string()))?;
     // The score is the health of the whole scan, whatever a baseline hides from the listing.
     let score = findings::score(&all);
     let mut rows: Vec<CoreFinding> = all.iter().map(Finding::to_core).collect();
     CoreFinding::sort(&mut rows);
     let mut env = Envelope::new(
-        d.name(),
-        d.version(),
+        "android-doctor",
+        env!("CARGO_PKG_VERSION"),
         0,
-        score.clone(),
+        score,
         rows,
         serde_json::json!({}),
     );
-    let counts = saved.as_ref().map(|s| baseline::apply(&d, &mut env, s));
-    let (min, code) = match &counts {
-        Some(_) => {
-            let min = args.fail_on.unwrap_or(Severity::Low);
-            (Some(min), baseline::gate(&d, &env, min, true))
-        }
-        None => {
-            let min = args.fail_on.or(e.fail_default);
-            (min, min.map_or(0, |m| baseline::gate(&d, &env, m, false)))
-        }
-    };
-    env.exit_code = code;
-    let exit = match (code, counts.is_some()) {
-        (0, _) => ExitCode::Ok,
-        (_, true) => ExitCode::NewFindings,
-        (_, false) => ExitCode::Findings,
-    };
-    let shown_rows: Vec<CoreFinding> = env
-        .findings
-        .iter()
-        .filter(|f| counts.is_none() || f.baseline_state == Some(BaselineState::New))
-        .cloned()
-        .collect();
-    let shown: Vec<Finding> = {
-        let keep: HashSet<&str> = shown_rows.iter().map(|f| f.fingerprint.as_str()).collect();
-        all.iter()
-            .filter(|f| keep.contains(f.fingerprint.as_str()))
-            .cloned()
-            .collect()
-    };
-    let new = shown.iter().filter(|f| !f.gap).count();
-    if let Some(path) = &args.sarif {
-        let doc = findings::to_sarif(&shown, &score, counts.is_some());
-        std::fs::write(path, serde_json::to_string_pretty(&doc)?)
-            .map_err(|err| anyhow::anyhow!("cannot write SARIF to {}: {err}", path.display()))?;
-    }
-    // Coverage gaps are always listed (a baseline cannot vouch for a rule that did not run), so
-    // they are counted apart from the new findings.
-    let gaps = shown.iter().filter(|f| f.gap).count();
-    let note = counts.map(|c| {
-        let listed = match gaps {
-            0 => String::new(),
-            n => format!(", {n} coverage gap(s) listed"),
-        };
-        format!(
-            "baseline {}: {} suppressed as known, {new} new{listed}",
-            args.baseline
-                .as_deref()
-                .map_or_else(String::new, |p| p.display().to_string()),
-            c.unchanged
-        )
-    });
-    if args.score {
-        crate::print_out(&score.value.to_string())?;
-    } else if e.json {
-        env.data = data();
-        crate::print_out(d.render_json(&env).trim_end())?;
+    let baselined = args.baseline.is_some();
+    let machine = e.json || args.score;
+    // Under a baseline the default threshold is `low`; without one, audit never fails by default.
+    let min = if baselined {
+        Some(args.fail_on.unwrap_or(Severity::Low))
     } else {
-        let tty = std::io::stdout().is_terminal();
-        let face_text = || -> anyhow::Result<String> {
-            let mut view = env.clone();
-            view.findings = shown_rows.clone();
-            view.findings.iter_mut().for_each(clean_for_terminal);
-            let mut theme = match &args.theme {
-                Some(n) => Theme::by_name(n).ok_or_else(|| {
-                    anyhow::anyhow!("unknown theme {n:?}: use mono, clinical or contrast")
-                })?,
-                None => d.theme(),
-            };
-            theme.enabled = term::Style::detect(e.no_color).color();
-            let face = args
-                .face
-                .as_deref()
-                .and_then(|f| Face::from_str(f, false).ok())
-                .unwrap_or(if tty { Face::Rich } else { Face::Plain });
-            Ok(doctor_kit::face::render(face, &view, &theme))
-        };
-        let mut text = match domain() {
-            Some(t) if e.domain_replaces_face && !tty && args.face.is_none() => t,
-            Some(t) if !e.domain_replaces_face => format!("{t}\n{}", face_text()?.trim_end()),
-            _ => face_text()?.trim_end().to_string(),
-        };
-        if let Some(n) = &note {
-            if shown.is_empty() {
-                text = "no new findings".to_string();
-            }
-            text.push_str(&format!("\n{n}"));
-        }
-        crate::print_out(&text)?;
+        args.fail_on.or(e.fail_default)
+    };
+    let tty = std::io::stdout().is_terminal();
+    let o = OutputArgs {
+        json: e.json,
+        score: args.score,
+        headless: false,
+        face: args
+            .face
+            .as_deref()
+            .and_then(|f| Face::from_str(f, false).ok())
+            .unwrap_or(if tty { Face::Rich } else { Face::Plain }),
+        theme: args.theme.clone(),
+        theme_file: None,
+        color: if e.no_color {
+            Color::Never
+        } else {
+            Color::Auto
+        },
+        sarif: args.sarif.clone(),
+        baseline: args.baseline.clone(),
+        fail_on: min.unwrap_or(Severity::Critical),
+        theme_root: None,
+    };
+    let d = AndroidDoctor {
+        gaps: all
+            .iter()
+            .filter(|f| f.gap)
+            .map(|f| f.fingerprint.clone())
+            .collect(),
+        report: Some(Report {
+            domain: if machine { None } else { domain() },
+            all,
+            baseline_path: args.baseline.clone(),
+            machine,
+            domain_replaces_face: e.domain_replaces_face,
+            face_explicit: args.face.is_some(),
+            no_color: e.no_color,
+        }),
+        new_findings: Default::default(),
+        subject: None,
+    };
+    if e.json {
+        env.data = data();
     }
-    // stdout is the machine-readable report here, so the baseline summary goes to stderr.
-    if (args.score || e.json)
-        && let Some(n) = &note
-    {
-        eprintln!("{n}");
-    }
-    match (exit, min) {
-        (ExitCode::Ok, _) => Ok(()),
-        (c, Some(m)) if c == ExitCode::NewFindings => Err(Gate {
-            code: c,
+    let pre = match preflight(&d, &o) {
+        Ok(p) => p,
+        Err(f) => return Err(failed(report_failure(&d, &f))),
+    };
+    let code = finish_with(
+        &d,
+        pre,
+        Ok(env),
+        &o,
+        &FinishOpts {
+            never_fail: min.is_none(),
+        },
+    );
+    match (code, min) {
+        (0, _) => Ok(()),
+        (3, Some(m)) => Err(Gate {
+            code: ExitCode::NewFindings,
             message: format!(
-                "{new} new finding(s) at or above {} not in the baseline",
+                "{} new finding(s) at or above {} not in the baseline",
+                d.new_findings.get(),
                 m.as_str()
             ),
         }
         .into()),
-        (c, m) => Err(Gate {
-            code: c,
+        (1, m) => Err(Gate {
+            code: ExitCode::Findings,
             message: format!(
                 "one or more findings are at or above {}",
                 m.map_or("the threshold", Severity::as_str)
             ),
         }
         .into()),
+        // the kit already printed what went wrong
+        (c, _) => Err(failed(c)),
     }
+}
+
+/// A run that failed after the kit reported the reason: exit with `code`, print nothing more.
+fn failed(code: u8) -> anyhow::Error {
+    Gate {
+        code: if code == 2 {
+            ExitCode::Error
+        } else {
+            ExitCode::Findings
+        },
+        message: String::new(),
+    }
+    .into()
 }
 
 #[cfg(test)]

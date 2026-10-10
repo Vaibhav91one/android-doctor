@@ -1,0 +1,900 @@
+=== doctor-scan object-without-schema (exit 0)
+--- stdout
+{
+  "baseline": {
+    "fixed": 0,
+    "new": 8,
+    "unchanged": 2
+  },
+  "data": {},
+  "exit_code": 0,
+  "findings": [
+    {
+      "baseline_state": "unchanged",
+      "category": "quality",
+      "fingerprint": "3d727a353b05a3de",
+      "id": "debug_leftovers",
+      "image": "system",
+      "location": {
+        "kind": "file",
+        "ref": "system/etc/old.log"
+      },
+      "message": "looks like a test or leftover file shipped in the image",
+      "remedy": "strip it from the build",
+      "severity": "low",
+      "subject": "etc/old.log"
+    },
+    {
+      "baseline_state": "unchanged",
+      "category": "security",
+      "fingerprint": "d9cd801d28a8cd03",
+      "id": "unhandled_input",
+      "location": {
+        "kind": "file",
+        "ref": "mystery.bin"
+      },
+      "message": "no handler for this file; it will not be extracted",
+      "remedy": "inspect it manually",
+      "severity": "low",
+      "subject": "mystery.bin"
+    },
+    {
+      "baseline_state": "new",
+      "category": "security",
+      "fingerprint": "61f101bfe94929a8",
+      "id": "avb_signature",
+      "location": {
+        "kind": "file",
+        "ref": "vbmeta.img"
+      },
+      "message": "no vbmeta.img found; AVB signature not checked",
+      "remedy": "point doctor at a directory containing vbmeta.img",
+      "severity": "info",
+      "subject": "vbmeta.img"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "37cf4fac0c2963f7",
+      "id": "debug_leftovers",
+      "location": {
+        "kind": "file",
+        "ref": "boot.img"
+      },
+      "message": "cannot evaluate debug_leftovers: failed to read image (too short to be an ext filesystem)",
+      "remedy": "ensure the image is a valid ext2/3/4 or erofs filesystem",
+      "severity": "info",
+      "subject": "boot.img"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "0bb731bbaa2f8170",
+      "id": "duplicate_properties",
+      "location": {
+        "kind": "file",
+        "ref": "boot.img"
+      },
+      "message": "cannot evaluate duplicate_properties: failed to read image (too short to be an ext filesystem)",
+      "remedy": "ensure the image is a valid ext2/3/4 or erofs filesystem",
+      "severity": "info",
+      "subject": "boot.img"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "ceef6b3db575712f",
+      "id": "init_service_hygiene",
+      "location": {
+        "kind": "file",
+        "ref": "boot.img"
+      },
+      "message": "cannot evaluate init_service_hygiene: failed to read image (too short to be an ext filesystem)",
+      "remedy": "ensure the image is a valid ext2/3/4 or erofs filesystem",
+      "severity": "info",
+      "subject": "boot.img"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "1846d5200afd0198",
+      "id": "mode_anomalies",
+      "location": {
+        "kind": "file",
+        "ref": "boot.img"
+      },
+      "message": "cannot evaluate mode_anomalies: failed to read image (too short to be an ext filesystem)",
+      "remedy": "ensure the image is a valid ext2/3/4 or erofs filesystem",
+      "severity": "info",
+      "subject": "boot.img"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "0cc76e7c7952dfab",
+      "id": "selinux_label_gaps",
+      "image": "system",
+      "location": {
+        "kind": "image",
+        "ref": "system/system"
+      },
+      "message": "image carries no SELinux labels at all; the rule cannot evaluate",
+      "remedy": "confirm the image is not SELinux-enforcing",
+      "severity": "info",
+      "subject": "system"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "69b9a2e6ca40167a",
+      "id": "selinux_label_gaps",
+      "image": "vendor",
+      "location": {
+        "kind": "image",
+        "ref": "vendor/vendor"
+      },
+      "message": "image carries no SELinux labels at all; the rule cannot evaluate",
+      "remedy": "confirm the image is not SELinux-enforcing",
+      "severity": "info",
+      "subject": "vendor"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "e58f38d98444d7a2",
+      "id": "selinux_label_gaps",
+      "location": {
+        "kind": "file",
+        "ref": "boot.img"
+      },
+      "message": "cannot evaluate selinux_label_gaps: failed to read image (too short to be an ext filesystem)",
+      "remedy": "ensure the image is a valid ext2/3/4 or erofs filesystem",
+      "severity": "info",
+      "subject": "boot.img"
+    }
+  ],
+  "schema": "doctor/1",
+  "score": {
+    "coverage_gaps": 8,
+    "label": "needs work",
+    "model": "android/1",
+    "value": 78
+  },
+  "tool": "android-doctor",
+  "version": "<VERSION>"
+}
+--- stderr
+baseline <TMP>/meta/object-without-schema.json: 2 suppressed as known, 0 new, 8 coverage gap(s) listed
+
+=== doctor-scan bare-array (exit 0)
+--- stdout
+{
+  "baseline": {
+    "fixed": 0,
+    "new": 8,
+    "unchanged": 2
+  },
+  "data": {},
+  "exit_code": 0,
+  "findings": [
+    {
+      "baseline_state": "unchanged",
+      "category": "quality",
+      "fingerprint": "3d727a353b05a3de",
+      "id": "debug_leftovers",
+      "image": "system",
+      "location": {
+        "kind": "file",
+        "ref": "system/etc/old.log"
+      },
+      "message": "looks like a test or leftover file shipped in the image",
+      "remedy": "strip it from the build",
+      "severity": "low",
+      "subject": "etc/old.log"
+    },
+    {
+      "baseline_state": "unchanged",
+      "category": "security",
+      "fingerprint": "d9cd801d28a8cd03",
+      "id": "unhandled_input",
+      "location": {
+        "kind": "file",
+        "ref": "mystery.bin"
+      },
+      "message": "no handler for this file; it will not be extracted",
+      "remedy": "inspect it manually",
+      "severity": "low",
+      "subject": "mystery.bin"
+    },
+    {
+      "baseline_state": "new",
+      "category": "security",
+      "fingerprint": "61f101bfe94929a8",
+      "id": "avb_signature",
+      "location": {
+        "kind": "file",
+        "ref": "vbmeta.img"
+      },
+      "message": "no vbmeta.img found; AVB signature not checked",
+      "remedy": "point doctor at a directory containing vbmeta.img",
+      "severity": "info",
+      "subject": "vbmeta.img"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "37cf4fac0c2963f7",
+      "id": "debug_leftovers",
+      "location": {
+        "kind": "file",
+        "ref": "boot.img"
+      },
+      "message": "cannot evaluate debug_leftovers: failed to read image (too short to be an ext filesystem)",
+      "remedy": "ensure the image is a valid ext2/3/4 or erofs filesystem",
+      "severity": "info",
+      "subject": "boot.img"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "0bb731bbaa2f8170",
+      "id": "duplicate_properties",
+      "location": {
+        "kind": "file",
+        "ref": "boot.img"
+      },
+      "message": "cannot evaluate duplicate_properties: failed to read image (too short to be an ext filesystem)",
+      "remedy": "ensure the image is a valid ext2/3/4 or erofs filesystem",
+      "severity": "info",
+      "subject": "boot.img"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "ceef6b3db575712f",
+      "id": "init_service_hygiene",
+      "location": {
+        "kind": "file",
+        "ref": "boot.img"
+      },
+      "message": "cannot evaluate init_service_hygiene: failed to read image (too short to be an ext filesystem)",
+      "remedy": "ensure the image is a valid ext2/3/4 or erofs filesystem",
+      "severity": "info",
+      "subject": "boot.img"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "1846d5200afd0198",
+      "id": "mode_anomalies",
+      "location": {
+        "kind": "file",
+        "ref": "boot.img"
+      },
+      "message": "cannot evaluate mode_anomalies: failed to read image (too short to be an ext filesystem)",
+      "remedy": "ensure the image is a valid ext2/3/4 or erofs filesystem",
+      "severity": "info",
+      "subject": "boot.img"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "0cc76e7c7952dfab",
+      "id": "selinux_label_gaps",
+      "image": "system",
+      "location": {
+        "kind": "image",
+        "ref": "system/system"
+      },
+      "message": "image carries no SELinux labels at all; the rule cannot evaluate",
+      "remedy": "confirm the image is not SELinux-enforcing",
+      "severity": "info",
+      "subject": "system"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "69b9a2e6ca40167a",
+      "id": "selinux_label_gaps",
+      "image": "vendor",
+      "location": {
+        "kind": "image",
+        "ref": "vendor/vendor"
+      },
+      "message": "image carries no SELinux labels at all; the rule cannot evaluate",
+      "remedy": "confirm the image is not SELinux-enforcing",
+      "severity": "info",
+      "subject": "vendor"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "e58f38d98444d7a2",
+      "id": "selinux_label_gaps",
+      "location": {
+        "kind": "file",
+        "ref": "boot.img"
+      },
+      "message": "cannot evaluate selinux_label_gaps: failed to read image (too short to be an ext filesystem)",
+      "remedy": "ensure the image is a valid ext2/3/4 or erofs filesystem",
+      "severity": "info",
+      "subject": "boot.img"
+    }
+  ],
+  "schema": "doctor/1",
+  "score": {
+    "coverage_gaps": 8,
+    "label": "needs work",
+    "model": "android/1",
+    "value": 78
+  },
+  "tool": "android-doctor",
+  "version": "<VERSION>"
+}
+--- stderr
+baseline <TMP>/meta/bare-array.json: 2 suppressed as known, 0 new, 8 coverage gap(s) listed
+
+=== doctor-scan other-schema-name (exit 0)
+--- stdout
+{
+  "baseline": {
+    "fixed": 0,
+    "new": 8,
+    "unchanged": 2
+  },
+  "data": {},
+  "exit_code": 0,
+  "findings": [
+    {
+      "baseline_state": "unchanged",
+      "category": "quality",
+      "fingerprint": "3d727a353b05a3de",
+      "id": "debug_leftovers",
+      "image": "system",
+      "location": {
+        "kind": "file",
+        "ref": "system/etc/old.log"
+      },
+      "message": "looks like a test or leftover file shipped in the image",
+      "remedy": "strip it from the build",
+      "severity": "low",
+      "subject": "etc/old.log"
+    },
+    {
+      "baseline_state": "unchanged",
+      "category": "security",
+      "fingerprint": "d9cd801d28a8cd03",
+      "id": "unhandled_input",
+      "location": {
+        "kind": "file",
+        "ref": "mystery.bin"
+      },
+      "message": "no handler for this file; it will not be extracted",
+      "remedy": "inspect it manually",
+      "severity": "low",
+      "subject": "mystery.bin"
+    },
+    {
+      "baseline_state": "new",
+      "category": "security",
+      "fingerprint": "61f101bfe94929a8",
+      "id": "avb_signature",
+      "location": {
+        "kind": "file",
+        "ref": "vbmeta.img"
+      },
+      "message": "no vbmeta.img found; AVB signature not checked",
+      "remedy": "point doctor at a directory containing vbmeta.img",
+      "severity": "info",
+      "subject": "vbmeta.img"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "37cf4fac0c2963f7",
+      "id": "debug_leftovers",
+      "location": {
+        "kind": "file",
+        "ref": "boot.img"
+      },
+      "message": "cannot evaluate debug_leftovers: failed to read image (too short to be an ext filesystem)",
+      "remedy": "ensure the image is a valid ext2/3/4 or erofs filesystem",
+      "severity": "info",
+      "subject": "boot.img"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "0bb731bbaa2f8170",
+      "id": "duplicate_properties",
+      "location": {
+        "kind": "file",
+        "ref": "boot.img"
+      },
+      "message": "cannot evaluate duplicate_properties: failed to read image (too short to be an ext filesystem)",
+      "remedy": "ensure the image is a valid ext2/3/4 or erofs filesystem",
+      "severity": "info",
+      "subject": "boot.img"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "ceef6b3db575712f",
+      "id": "init_service_hygiene",
+      "location": {
+        "kind": "file",
+        "ref": "boot.img"
+      },
+      "message": "cannot evaluate init_service_hygiene: failed to read image (too short to be an ext filesystem)",
+      "remedy": "ensure the image is a valid ext2/3/4 or erofs filesystem",
+      "severity": "info",
+      "subject": "boot.img"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "1846d5200afd0198",
+      "id": "mode_anomalies",
+      "location": {
+        "kind": "file",
+        "ref": "boot.img"
+      },
+      "message": "cannot evaluate mode_anomalies: failed to read image (too short to be an ext filesystem)",
+      "remedy": "ensure the image is a valid ext2/3/4 or erofs filesystem",
+      "severity": "info",
+      "subject": "boot.img"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "0cc76e7c7952dfab",
+      "id": "selinux_label_gaps",
+      "image": "system",
+      "location": {
+        "kind": "image",
+        "ref": "system/system"
+      },
+      "message": "image carries no SELinux labels at all; the rule cannot evaluate",
+      "remedy": "confirm the image is not SELinux-enforcing",
+      "severity": "info",
+      "subject": "system"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "69b9a2e6ca40167a",
+      "id": "selinux_label_gaps",
+      "image": "vendor",
+      "location": {
+        "kind": "image",
+        "ref": "vendor/vendor"
+      },
+      "message": "image carries no SELinux labels at all; the rule cannot evaluate",
+      "remedy": "confirm the image is not SELinux-enforcing",
+      "severity": "info",
+      "subject": "vendor"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "e58f38d98444d7a2",
+      "id": "selinux_label_gaps",
+      "location": {
+        "kind": "file",
+        "ref": "boot.img"
+      },
+      "message": "cannot evaluate selinux_label_gaps: failed to read image (too short to be an ext filesystem)",
+      "remedy": "ensure the image is a valid ext2/3/4 or erofs filesystem",
+      "severity": "info",
+      "subject": "boot.img"
+    }
+  ],
+  "schema": "doctor/1",
+  "score": {
+    "coverage_gaps": 8,
+    "label": "needs work",
+    "model": "android/1",
+    "value": 78
+  },
+  "tool": "android-doctor",
+  "version": "<VERSION>"
+}
+--- stderr
+baseline <TMP>/meta/other-schema-name.json: 2 suppressed as known, 0 new, 8 coverage gap(s) listed
+
+=== doctor-scan empty-array (exit 3)
+--- stdout
+{
+  "baseline": {
+    "fixed": 0,
+    "new": 10,
+    "unchanged": 0
+  },
+  "data": {},
+  "exit_code": 3,
+  "findings": [
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "3d727a353b05a3de",
+      "id": "debug_leftovers",
+      "image": "system",
+      "location": {
+        "kind": "file",
+        "ref": "system/etc/old.log"
+      },
+      "message": "looks like a test or leftover file shipped in the image",
+      "remedy": "strip it from the build",
+      "severity": "low",
+      "subject": "etc/old.log"
+    },
+    {
+      "baseline_state": "new",
+      "category": "security",
+      "fingerprint": "d9cd801d28a8cd03",
+      "id": "unhandled_input",
+      "location": {
+        "kind": "file",
+        "ref": "mystery.bin"
+      },
+      "message": "no handler for this file; it will not be extracted",
+      "remedy": "inspect it manually",
+      "severity": "low",
+      "subject": "mystery.bin"
+    },
+    {
+      "baseline_state": "new",
+      "category": "security",
+      "fingerprint": "61f101bfe94929a8",
+      "id": "avb_signature",
+      "location": {
+        "kind": "file",
+        "ref": "vbmeta.img"
+      },
+      "message": "no vbmeta.img found; AVB signature not checked",
+      "remedy": "point doctor at a directory containing vbmeta.img",
+      "severity": "info",
+      "subject": "vbmeta.img"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "37cf4fac0c2963f7",
+      "id": "debug_leftovers",
+      "location": {
+        "kind": "file",
+        "ref": "boot.img"
+      },
+      "message": "cannot evaluate debug_leftovers: failed to read image (too short to be an ext filesystem)",
+      "remedy": "ensure the image is a valid ext2/3/4 or erofs filesystem",
+      "severity": "info",
+      "subject": "boot.img"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "0bb731bbaa2f8170",
+      "id": "duplicate_properties",
+      "location": {
+        "kind": "file",
+        "ref": "boot.img"
+      },
+      "message": "cannot evaluate duplicate_properties: failed to read image (too short to be an ext filesystem)",
+      "remedy": "ensure the image is a valid ext2/3/4 or erofs filesystem",
+      "severity": "info",
+      "subject": "boot.img"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "ceef6b3db575712f",
+      "id": "init_service_hygiene",
+      "location": {
+        "kind": "file",
+        "ref": "boot.img"
+      },
+      "message": "cannot evaluate init_service_hygiene: failed to read image (too short to be an ext filesystem)",
+      "remedy": "ensure the image is a valid ext2/3/4 or erofs filesystem",
+      "severity": "info",
+      "subject": "boot.img"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "1846d5200afd0198",
+      "id": "mode_anomalies",
+      "location": {
+        "kind": "file",
+        "ref": "boot.img"
+      },
+      "message": "cannot evaluate mode_anomalies: failed to read image (too short to be an ext filesystem)",
+      "remedy": "ensure the image is a valid ext2/3/4 or erofs filesystem",
+      "severity": "info",
+      "subject": "boot.img"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "0cc76e7c7952dfab",
+      "id": "selinux_label_gaps",
+      "image": "system",
+      "location": {
+        "kind": "image",
+        "ref": "system/system"
+      },
+      "message": "image carries no SELinux labels at all; the rule cannot evaluate",
+      "remedy": "confirm the image is not SELinux-enforcing",
+      "severity": "info",
+      "subject": "system"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "69b9a2e6ca40167a",
+      "id": "selinux_label_gaps",
+      "image": "vendor",
+      "location": {
+        "kind": "image",
+        "ref": "vendor/vendor"
+      },
+      "message": "image carries no SELinux labels at all; the rule cannot evaluate",
+      "remedy": "confirm the image is not SELinux-enforcing",
+      "severity": "info",
+      "subject": "vendor"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "e58f38d98444d7a2",
+      "id": "selinux_label_gaps",
+      "location": {
+        "kind": "file",
+        "ref": "boot.img"
+      },
+      "message": "cannot evaluate selinux_label_gaps: failed to read image (too short to be an ext filesystem)",
+      "remedy": "ensure the image is a valid ext2/3/4 or erofs filesystem",
+      "severity": "info",
+      "subject": "boot.img"
+    }
+  ],
+  "schema": "doctor/1",
+  "score": {
+    "coverage_gaps": 8,
+    "label": "needs work",
+    "model": "android/1",
+    "value": 78
+  },
+  "tool": "android-doctor",
+  "version": "<VERSION>"
+}
+--- stderr
+baseline <TMP>/meta/empty-array.json: 0 suppressed as known, 2 new, 8 coverage gap(s) listed
+2 new finding(s) at or above low not in the baseline
+
+=== doctor-scan empty-findings (exit 3)
+--- stdout
+{
+  "baseline": {
+    "fixed": 0,
+    "new": 10,
+    "unchanged": 0
+  },
+  "data": {},
+  "exit_code": 3,
+  "findings": [
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "3d727a353b05a3de",
+      "id": "debug_leftovers",
+      "image": "system",
+      "location": {
+        "kind": "file",
+        "ref": "system/etc/old.log"
+      },
+      "message": "looks like a test or leftover file shipped in the image",
+      "remedy": "strip it from the build",
+      "severity": "low",
+      "subject": "etc/old.log"
+    },
+    {
+      "baseline_state": "new",
+      "category": "security",
+      "fingerprint": "d9cd801d28a8cd03",
+      "id": "unhandled_input",
+      "location": {
+        "kind": "file",
+        "ref": "mystery.bin"
+      },
+      "message": "no handler for this file; it will not be extracted",
+      "remedy": "inspect it manually",
+      "severity": "low",
+      "subject": "mystery.bin"
+    },
+    {
+      "baseline_state": "new",
+      "category": "security",
+      "fingerprint": "61f101bfe94929a8",
+      "id": "avb_signature",
+      "location": {
+        "kind": "file",
+        "ref": "vbmeta.img"
+      },
+      "message": "no vbmeta.img found; AVB signature not checked",
+      "remedy": "point doctor at a directory containing vbmeta.img",
+      "severity": "info",
+      "subject": "vbmeta.img"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "37cf4fac0c2963f7",
+      "id": "debug_leftovers",
+      "location": {
+        "kind": "file",
+        "ref": "boot.img"
+      },
+      "message": "cannot evaluate debug_leftovers: failed to read image (too short to be an ext filesystem)",
+      "remedy": "ensure the image is a valid ext2/3/4 or erofs filesystem",
+      "severity": "info",
+      "subject": "boot.img"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "0bb731bbaa2f8170",
+      "id": "duplicate_properties",
+      "location": {
+        "kind": "file",
+        "ref": "boot.img"
+      },
+      "message": "cannot evaluate duplicate_properties: failed to read image (too short to be an ext filesystem)",
+      "remedy": "ensure the image is a valid ext2/3/4 or erofs filesystem",
+      "severity": "info",
+      "subject": "boot.img"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "ceef6b3db575712f",
+      "id": "init_service_hygiene",
+      "location": {
+        "kind": "file",
+        "ref": "boot.img"
+      },
+      "message": "cannot evaluate init_service_hygiene: failed to read image (too short to be an ext filesystem)",
+      "remedy": "ensure the image is a valid ext2/3/4 or erofs filesystem",
+      "severity": "info",
+      "subject": "boot.img"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "1846d5200afd0198",
+      "id": "mode_anomalies",
+      "location": {
+        "kind": "file",
+        "ref": "boot.img"
+      },
+      "message": "cannot evaluate mode_anomalies: failed to read image (too short to be an ext filesystem)",
+      "remedy": "ensure the image is a valid ext2/3/4 or erofs filesystem",
+      "severity": "info",
+      "subject": "boot.img"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "0cc76e7c7952dfab",
+      "id": "selinux_label_gaps",
+      "image": "system",
+      "location": {
+        "kind": "image",
+        "ref": "system/system"
+      },
+      "message": "image carries no SELinux labels at all; the rule cannot evaluate",
+      "remedy": "confirm the image is not SELinux-enforcing",
+      "severity": "info",
+      "subject": "system"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "69b9a2e6ca40167a",
+      "id": "selinux_label_gaps",
+      "image": "vendor",
+      "location": {
+        "kind": "image",
+        "ref": "vendor/vendor"
+      },
+      "message": "image carries no SELinux labels at all; the rule cannot evaluate",
+      "remedy": "confirm the image is not SELinux-enforcing",
+      "severity": "info",
+      "subject": "vendor"
+    },
+    {
+      "baseline_state": "new",
+      "category": "quality",
+      "fingerprint": "e58f38d98444d7a2",
+      "id": "selinux_label_gaps",
+      "location": {
+        "kind": "file",
+        "ref": "boot.img"
+      },
+      "message": "cannot evaluate selinux_label_gaps: failed to read image (too short to be an ext filesystem)",
+      "remedy": "ensure the image is a valid ext2/3/4 or erofs filesystem",
+      "severity": "info",
+      "subject": "boot.img"
+    }
+  ],
+  "schema": "doctor/1",
+  "score": {
+    "coverage_gaps": 8,
+    "label": "needs work",
+    "model": "android/1",
+    "value": 78
+  },
+  "tool": "android-doctor",
+  "version": "<VERSION>"
+}
+--- stderr
+baseline <TMP>/meta/empty-findings.json: 0 suppressed as known, 2 new, 8 coverage gap(s) listed
+2 new finding(s) at or above low not in the baseline
+
+=== doctor-scan no-findings-key (exit 2)
+--- stdout
+--- stderr
+baseline <TMP>/meta/no-findings-key.json is not an android-doctor report: expected the output of `doctor scan --json` or `audit --json`
+
+=== doctor-scan row-without-fingerprint (exit 2)
+--- stdout
+--- stderr
+baseline <TMP>/meta/row-without-fingerprint.json is not an android-doctor report: finding 1 has no fingerprint (was it written by an older version?)
+
+=== doctor-scan scalar (exit 2)
+--- stdout
+--- stderr
+baseline <TMP>/meta/scalar.json is not an android-doctor report: expected the output of `doctor scan --json` or `audit --json`
+
+=== doctor-scan not-json (exit 2)
+--- stdout
+--- stderr
+baseline <TMP>/meta/not-json.json is not valid JSON
+  caused by: expected ident at line 1 column 2
+
+=== doctor-scan missing-file (exit 2)
+--- stdout
+--- stderr
+cannot read baseline <TMP>/meta/nope.json
+  caused by: No such file or directory (os error 2)
+
+=== doctor-scan human-all-known (exit 0)
+--- stdout
+android-doctor <VERSION>  score 78/100 needs work
+info      avb_signature          vbmeta.img     no vbmeta.img found; AVB signature not checked
+info      debug_leftovers        boot.img       cannot evaluate debug_leftovers: failed to read image (too short to be an ext filesystem)
+info      duplicate_properties   boot.img       cannot evaluate duplicate_properties: failed to read image (too short to be an ext filesystem)
+info      init_service_hygiene   boot.img       cannot evaluate init_service_hygiene: failed to read image (too short to be an ext filesystem)
+info      mode_anomalies         boot.img       cannot evaluate mode_anomalies: failed to read image (too short to be an ext filesystem)
+info      selinux_label_gaps     system/system  image carries no SELinux labels at all; the rule cannot evaluate
+info      selinux_label_gaps     vendor/vendor  image carries no SELinux labels at all; the rule cannot evaluate
+info      selinux_label_gaps     boot.img       cannot evaluate selinux_label_gaps: failed to read image (too short to be an ext filesystem)
+8 info
+baseline <TMP>/meta/own.json: 2 suppressed as known, 0 new, 8 coverage gap(s) listed
+--- stderr
+
+=== audit human-baseline-empty (exit 3)
+--- stdout
+android-doctor <VERSION>  score 70/100 needs work
+high      debuggable-build       system/build.prop  ro.debuggable=1 in build.prop: adbd runs as root
+high      insecure-adb           system/build.prop  ro.secure=0 in build.prop: adbd keeps root
+high      su-binary              system/xbin/su     /xbin/su looks like a su binary
+3 high
+baseline <TMP>/meta/empty-array.json: 0 suppressed as known, 3 new
+--- stderr
+3 new finding(s) at or above low not in the baseline
+
+=== audit never-gates-without-flags (exit 0)
+--- stdout
+70
+--- stderr
+

@@ -19,7 +19,11 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const BIN: &str = env!("CARGO_BIN_EXE_android-doctor");
+/// The binary under test. `AD_GOLDEN_BIN=/path/to/older/android-doctor cargo test --test golden`
+/// replays the goldens against another build, to prove a refactor kept the behaviour.
+fn bin() -> String {
+    std::env::var("AD_GOLDEN_BIN").unwrap_or_else(|_| env!("CARGO_BIN_EXE_android-doctor").into())
+}
 
 struct Scratch(PathBuf);
 impl Scratch {
@@ -75,7 +79,7 @@ fn case(
     name: &str,
     args: &[&dyn AsRef<std::ffi::OsStr>],
 ) -> String {
-    let out = Command::new(BIN)
+    let out = Command::new(bin())
         .args(args.iter().map(|a| a.as_ref()))
         .env("NO_COLOR", "1")
         .env("COLUMNS", "100")
@@ -299,6 +303,296 @@ fn findings_commands() {
     golden("findings.exit", &codes);
 }
 
+/// Run the binary and snapshot exit code, stdout and stderr together (for cases whose stderr text
+/// is part of the behaviour being pinned) as one `<name>.out` section appended to `acc`.
+fn case_all(acc: &mut String, tmp: &Scratch, name: &str, args: &[&dyn AsRef<std::ffi::OsStr>]) {
+    let out = Command::new(bin())
+        .args(args.iter().map(|a| a.as_ref()))
+        .env("NO_COLOR", "1")
+        .env("COLUMNS", "100")
+        .output()
+        .unwrap();
+    writeln!(
+        acc,
+        "=== {name} (exit {})\n--- stdout\n{}--- stderr\n{}",
+        out.status.code().unwrap(),
+        norm(&String::from_utf8_lossy(&out.stdout), &tmp.0),
+        norm(&String::from_utf8_lossy(&out.stderr), &tmp.0)
+    )
+    .unwrap();
+}
+
+/// Which baseline files are accepted, and the exact words of the refusals (decision 6: the tool
+/// keeps its own baseline parsing: no `schema` requirement, no size cap).
+#[test]
+fn baseline_variants() {
+    let t = firmware("baseline-variants");
+    let fw = t.0.join("fw");
+    let json = Command::new(bin())
+        .args(["doctor", "scan"])
+        .arg(&fw)
+        .arg("--json")
+        .output()
+        .unwrap();
+    let env: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    let rows = env["findings"].clone();
+    let mut acc = String::new();
+    let cases: Vec<(&str, String)> = vec![
+        (
+            "object-without-schema",
+            serde_json::json!({"findings": rows}).to_string(),
+        ),
+        ("bare-array", rows.to_string()),
+        (
+            "other-schema-name",
+            serde_json::json!({"schema": "other/9", "findings": rows}).to_string(),
+        ),
+        ("empty-array", "[]".into()),
+        ("empty-findings", r#"{"findings":[]}"#.into()),
+        ("no-findings-key", r#"{"hello":"world"}"#.into()),
+        (
+            "row-without-fingerprint",
+            r#"[{"id":"x","severity":"warn"}]"#.into(),
+        ),
+        ("scalar", "42".into()),
+        ("not-json", "not json".into()),
+    ];
+    for (name, body) in cases {
+        let f = t.p(&format!("meta/{name}.json"));
+        std::fs::write(&f, body).unwrap();
+        case_all(
+            &mut acc,
+            &t,
+            &format!("doctor-scan {name}"),
+            &[&"doctor", &"scan", &fw, &"--baseline", &f, &"--json"],
+        );
+    }
+    case_all(
+        &mut acc,
+        &t,
+        "doctor-scan missing-file",
+        &[
+            &"doctor",
+            &"scan",
+            &fw,
+            &"--baseline",
+            &t.p("meta/nope.json"),
+        ],
+    );
+    // the human views under a baseline: nothing new, and only the new one
+    let own = t.p("meta/own.json");
+    std::fs::write(&own, &json.stdout).unwrap();
+    case_all(
+        &mut acc,
+        &t,
+        "doctor-scan human-all-known",
+        &[&"doctor", &"scan", &fw, &"--baseline", &own],
+    );
+    case_all(
+        &mut acc,
+        &t,
+        "audit human-baseline-empty",
+        &[
+            &"audit",
+            &t.p("fw/system.img"),
+            &"--baseline",
+            &t.p("meta/empty-array.json"),
+        ],
+    );
+    case_all(
+        &mut acc,
+        &t,
+        "audit never-gates-without-flags",
+        &[&"audit", &t.p("fw/system.img"), &"--score"],
+    );
+    golden("baseline-variants.out", &acc);
+}
+
+fn show(acc: &mut String, label: &str, path: &Path, tmp: &Scratch) {
+    let body = match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => "(a symlink)".to_string(),
+        Ok(_) => norm(&std::fs::read_to_string(path).unwrap(), &tmp.0),
+        Err(_) => "(missing)".to_string(),
+    };
+    writeln!(acc, "--- {label}\n{body}").unwrap();
+}
+
+/// `ci install` over existing files, links and dirs; the exact refusal words and what survives.
+#[test]
+fn ci_install_overwrite_cases() {
+    use std::os::unix::fs::symlink;
+    let t = Scratch::new("ci-cases");
+    let mut acc = String::new();
+    let p = t.p("proj/x");
+    let proj = p.parent().unwrap().to_path_buf();
+    let wf = proj.join(".github/workflows/android-doctor.yml");
+    let ci = |acc: &mut String, name: &str, extra: &[&str]| {
+        let mut a: Vec<&dyn AsRef<std::ffi::OsStr>> = vec![&"ci", &"install", &"--dir", &proj];
+        a.extend(extra.iter().map(|e| e as &dyn AsRef<std::ffi::OsStr>));
+        case_all(acc, &t, name, &a);
+    };
+    ci(&mut acc, "fresh", &["--path", "out/fw"]);
+    show(&mut acc, "file", &wf, &t);
+    ci(&mut acc, "again-identical", &["--path", "out/fw"]);
+    std::fs::write(&wf, "mine\n").unwrap();
+    ci(&mut acc, "existing-differs", &[]);
+    show(&mut acc, "file", &wf, &t);
+    ci(&mut acc, "force", &["--force", "--fail-on", "high"]);
+    show(&mut acc, "file", &wf, &t);
+    // the workflow is a symlink to a file elsewhere
+    let victim = t.p("outside/victim");
+    std::fs::write(&victim, "keep\n").unwrap();
+    std::fs::remove_file(&wf).unwrap();
+    symlink(&victim, &wf).unwrap();
+    ci(&mut acc, "symlink-no-force", &[]);
+    show(&mut acc, "victim", &victim, &t);
+    ci(&mut acc, "symlink-force", &["--force"]);
+    show(&mut acc, "victim", &victim, &t);
+    show(&mut acc, "file", &wf, &t);
+    // .github itself is a link out of the project
+    let p2 = t.p("proj2/x");
+    let proj2 = p2.parent().unwrap().to_path_buf();
+    symlink(t.p("outside/x").parent().unwrap(), proj2.join(".github")).unwrap();
+    case_all(
+        &mut acc,
+        &t,
+        "github-dir-is-a-link",
+        &[&"ci", &"install", &"--dir", &proj2, &"--force"],
+    );
+    writeln!(
+        acc,
+        "--- outside holds: {:?}",
+        std::fs::read_dir(t.p("outside/x").parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<std::collections::BTreeSet<_>>()
+    )
+    .unwrap();
+    golden("ci-install-cases.out", &acc);
+}
+
+/// The AGENTS.md block is merged byte for byte whatever the file looked like before.
+#[test]
+fn agents_md_block_merges() {
+    let t = Scratch::new("agents-md");
+    let home = t.p("home/x").parent().unwrap().to_path_buf();
+    let mut acc = String::new();
+    let begin = "<!-- android-doctor:begin (managed; re-run `android-doctor doctor install`) -->";
+    let end = "<!-- android-doctor:end -->";
+    let existing = [
+        ("absent", None),
+        ("empty", Some(String::new())),
+        ("one-newline", Some("# mine\n".to_string())),
+        ("no-newline", Some("# mine".to_string())),
+        ("blank-lines", Some("# mine\n\n\n".to_string())),
+        (
+            "stale-block-then-text",
+            Some(format!("top\n{begin}\nold\n{end}\n\n\nbottom\n")),
+        ),
+        ("block-at-end", Some(format!("top\n\n{begin}\nold\n{end}"))),
+    ];
+    for (name, content) in existing {
+        let proj = t.p(&format!("{name}/x")).parent().unwrap().to_path_buf();
+        if let Some(c) = content {
+            std::fs::write(proj.join("AGENTS.md"), c).unwrap();
+        }
+        for round in ["first", "second"] {
+            let o = Command::new(bin())
+                .args(["doctor", "install", "--agent", "codex"])
+                .env("HOME", &home)
+                .current_dir(&proj)
+                .output()
+                .unwrap();
+            writeln!(
+                acc,
+                "=== {name} {round} (exit {})",
+                o.status.code().unwrap()
+            )
+            .unwrap();
+            show(&mut acc, "AGENTS.md", &proj.join("AGENTS.md"), &t);
+        }
+    }
+    golden("agents-md-cases.out", &acc);
+}
+
+/// The doctor/1 contract: a command that cannot run exits 2 with the one-line error and nothing
+/// on stdout (kept fix: `unpack`, `amlogic` and `report` used to leave through the runtime with 1).
+#[test]
+fn error_paths_exit_2() {
+    let t = firmware("errors");
+    let gone = t.p("nope.img");
+    let mut acc = String::new();
+    for args in [
+        vec!["unpack"],
+        vec!["amlogic"],
+        vec!["report"],
+        vec!["identify"],
+        vec!["info"],
+        vec!["ls"],
+        vec!["cat"],
+        vec!["vbmeta"],
+        vec!["audit"],
+        vec!["doctor", "scan"],
+        vec!["dt"],
+        vec!["ramdisk"],
+        vec!["files"],
+        vec!["hash-tree"],
+        vec!["fix"],
+    ] {
+        let mut a: Vec<&dyn AsRef<std::ffi::OsStr>> = args
+            .iter()
+            .map(|x| x as &dyn AsRef<std::ffi::OsStr>)
+            .collect();
+        a.push(&gone);
+        if args == ["cat"] {
+            a.push(&"/etc/hosts");
+        }
+        case_all(&mut acc, &t, &args.join(" "), &a);
+    }
+    // a usage error is clap's 2; --help is 0
+    case_all(&mut acc, &t, "usage", &[&"audit"]);
+    case_all(&mut acc, &t, "unknown-command", &[&"frobnicate"]);
+    golden("error-paths.out", &acc);
+}
+
+/// `shell` browses image -> directory -> file lazily, with the findings next to it.
+#[test]
+fn shell_browses_the_firmware() {
+    let t = firmware("shell");
+    let fw = t.p("fw");
+    let mut acc = String::new();
+    case_all(
+        &mut acc,
+        &t,
+        "shell-tree",
+        &[
+            &"shell",
+            &fw,
+            &"-c",
+            &"ls; cd images; ls; cd system; ls; cd etc; ls; cat old.log; pwd; cd /; cd security; ls",
+        ],
+    );
+    case_all(
+        &mut acc,
+        &t,
+        "shell-json",
+        &[
+            &"shell",
+            &t.p("fw/system.img"),
+            &"--json",
+            &"-c",
+            &"cd images; ls; info",
+        ],
+    );
+    case_all(
+        &mut acc,
+        &t,
+        "shell-missing",
+        &[&"shell", &t.p("nope"), &"-c", &"ls"],
+    );
+    golden("shell-tree.out", &acc);
+}
+
 #[test]
 fn help_texts() {
     let t = Scratch::new("help");
@@ -360,7 +654,7 @@ fn mcp_transcript() {
         serde_json::json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"nope","arguments":{}}}),
         serde_json::json!({"jsonrpc":"2.0","id":7,"method":"nope/method"}),
     ];
-    let mut child = Command::new(BIN)
+    let mut child = Command::new(bin())
         .arg("mcp")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -380,6 +674,54 @@ fn mcp_transcript() {
         .unwrap();
     child.wait().unwrap();
     golden("mcp-transcript.out", &norm(&out, &t.0));
+}
+
+/// Protocol edges and failing tools. `ping` and -32600 are the contract fixes kept from the kit;
+/// the rest are the first server's exact answers.
+#[test]
+fn mcp_contract() {
+    let t = firmware("mcp-contract");
+    let gone = t.p("nope.img").display().to_string();
+    let lines = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":2}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":{"a":1},"method":"tools/list"}"#.to_string(),
+        r#"[1,2]"#.to_string(),
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.to_string(),
+        "".to_string(),
+        "   ".to_string(),
+        "not json".to_string(),
+        r#"{"jsonrpc":"2.0","id":3,"method":"nope/method"}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":4,"method":"initialize","params":{"protocolVersion":"2099-01-01"}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"nope","arguments":{}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"identify","arguments":{}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"identify","arguments":{"path":"a","baseline":"b"}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"diff","arguments":{"old":"a"}}}"#.to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"audit","arguments":{"paths":[gone]}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"doctor","arguments":{"path":gone}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"doctor","arguments":{"path":t.p("fw").display().to_string(),"baseline":t.p("nobase.json").display().to_string()}}}).to_string(),
+    ];
+    let mut child = Command::new(bin())
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    for l in &lines {
+        writeln!(stdin, "{l}").unwrap();
+    }
+    drop(stdin);
+    let mut out = String::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut out)
+        .unwrap();
+    child.wait().unwrap();
+    golden("mcp-contract.out", &norm(&out, &t.0));
 }
 
 #[test]
@@ -419,7 +761,7 @@ fn install_bodies() {
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&proj).unwrap();
     std::fs::write(proj.join("AGENTS.md"), "# mine\n").unwrap();
-    let o = Command::new(BIN)
+    let o = Command::new(bin())
         .args(["doctor", "install"])
         .env("HOME", &home)
         .output()
@@ -430,7 +772,7 @@ fn install_bodies() {
         &norm(&String::from_utf8_lossy(&o.stdout), &t.0),
     );
     for agent in ["claude-code", "cursor", "codex", "opencode"] {
-        let o = Command::new(BIN)
+        let o = Command::new(bin())
             .args(["doctor", "install", "--agent", agent])
             .env("HOME", &home)
             .current_dir(&proj)
@@ -443,13 +785,13 @@ fn install_bodies() {
         );
     }
     // run twice: idempotent block upsert
-    Command::new(BIN)
+    Command::new(bin())
         .args(["doctor", "install", "--agent", "codex"])
         .env("HOME", &home)
         .current_dir(&proj)
         .output()
         .unwrap();
-    let o = Command::new(BIN)
+    let o = Command::new(bin())
         .args(["ci", "install", "--dir"])
         .arg(&proj)
         .output()

@@ -745,9 +745,9 @@ dependencies = [
 
 [[package]]
 name = "doctor-kit"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1445ff9fabbd47345be5ba980d5c6280df11ac6988399c4e712a8aece8553f99"
+checksum = "d4c08d4123217bfb6d0936b65d86050b4df8f400b8cbc72ff03a972efe081acf"
 dependencies = [
  "clap",
  "doctor-core",
