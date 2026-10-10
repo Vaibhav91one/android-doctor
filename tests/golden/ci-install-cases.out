@@ -1,0 +1,123 @@
+=== fresh (exit 0)
+--- stdout
+wrote <TMP>/proj/.github/workflows/android-doctor.yml
+--- stderr
+
+--- file
+# Written by `android-doctor ci install`. Pinned to android-doctor <VERSION>; re-run with --force to repin.
+name: android-doctor
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Uploads the SARIF report to code scanning; fork pull requests cannot, and the action skips the upload there.
+  security-events: write
+
+jobs:
+  android-doctor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: doctor-labs/android-doctor@v<VERSION>
+        with:
+          version: <VERSION>
+          # The firmware directory to scan, relative to the repository root. Edit it to match your layout.
+          path: 'out/fw'
+          command: doctor scan
+          fail-on: critical
+
+=== again-identical (exit 2)
+--- stdout
+--- stderr
+<TMP>/proj/.github/workflows/android-doctor.yml already exists; use --force to replace it
+
+=== existing-differs (exit 2)
+--- stdout
+--- stderr
+<TMP>/proj/.github/workflows/android-doctor.yml already exists; use --force to replace it
+
+--- file
+mine
+
+=== force (exit 0)
+--- stdout
+wrote <TMP>/proj/.github/workflows/android-doctor.yml
+--- stderr
+
+--- file
+# Written by `android-doctor ci install`. Pinned to android-doctor <VERSION>; re-run with --force to repin.
+name: android-doctor
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Uploads the SARIF report to code scanning; fork pull requests cannot, and the action skips the upload there.
+  security-events: write
+
+jobs:
+  android-doctor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: doctor-labs/android-doctor@v<VERSION>
+        with:
+          version: <VERSION>
+          # The firmware directory to scan, relative to the repository root. Edit it to match your layout.
+          path: 'firmware'
+          command: doctor scan
+          fail-on: high
+
+=== symlink-no-force (exit 2)
+--- stdout
+--- stderr
+<TMP>/proj/.github/workflows/android-doctor.yml already exists; use --force to replace it
+
+--- victim
+keep
+
+=== symlink-force (exit 0)
+--- stdout
+wrote <TMP>/proj/.github/workflows/android-doctor.yml
+--- stderr
+
+--- victim
+keep
+
+--- file
+# Written by `android-doctor ci install`. Pinned to android-doctor <VERSION>; re-run with --force to repin.
+name: android-doctor
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Uploads the SARIF report to code scanning; fork pull requests cannot, and the action skips the upload there.
+  security-events: write
+
+jobs:
+  android-doctor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: doctor-labs/android-doctor@v<VERSION>
+        with:
+          version: <VERSION>
+          # The firmware directory to scan, relative to the repository root. Edit it to match your layout.
+          path: 'firmware'
+          command: doctor scan
+          fail-on: critical
+
+=== github-dir-is-a-link (exit 2)
+--- stdout
+--- stderr
+<TMP>/proj2/.github is not a plain directory (a symlink or a file); refusing to write through it
+
+--- outside holds: {"victim"}
