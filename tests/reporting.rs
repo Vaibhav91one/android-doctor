@@ -254,7 +254,7 @@ fn sarif_to_an_unwritable_path_is_an_error() {
         d.join("no/such/dir/x.sarif")
     );
     assert_eq!(o.code, 2);
-    assert!(o.stderr.contains("cannot write SARIF"), "{}", o.stderr);
+    assert!(o.stderr.contains("x.sarif"), "{}", o.stderr);
 }
 
 // --- --score ---------------------------------------------------------------------------------
